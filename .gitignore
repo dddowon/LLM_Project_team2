@@ -149,6 +149,8 @@ activemq-data/
 
 # Environments
 .env
+.env.*
+!.env.example
 .envrc
 .venv
 env/
@@ -205,6 +207,7 @@ tempCodeRunnerFile.py
 
 # Ruff stuff:
 .ruff_cache/
+.cache/
 
 # PyPI configuration file
 .pypirc
@@ -216,3 +219,28 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project data and generated artifacts
+# Raw RFP data is under NDA. Keep only lightweight examples/templates in git.
+data/v1/raw/
+data/v1/*.csv
+data/v1/*.xlsx
+data/v1/*.pdf
+data/v1/*.hwp
+data/v1/**/*.csv
+data/v1/**/*.xlsx
+data/v1/**/*.pdf
+data/v1/**/*.hwp
+data/v1/**/*.zip
+data/v2/*.jsonl
+!data/v2/eval_questions.example.jsonl
+checkpoints/
+outputs/
+*.faiss
+*.index
+*.sqlite
+*.sqlite3
+*.db
+*.parquet
+*.pkl
+*.pickle

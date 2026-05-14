@@ -1,0 +1,27 @@
+project:
+  name: bidmate-rag
+
+paths:
+  raw_data_dir: data/v1/raw
+  metadata_csv: data/v1/data_list.csv
+  processed_dir: data/v2
+  index_dir: checkpoints/faiss_openai
+  evaluation_set: data/v2/eval_questions.jsonl
+  evaluation_output: outputs/eval_results.jsonl
+
+openai:
+  embedding_model: text-embedding-3-small
+  generation_model: gpt-5-mini
+
+chunking:
+  chunk_size: 1200
+  chunk_overlap: 200
+  min_chunk_chars: 80
+
+retrieval:
+  top_k: 5
+  score_threshold: 0.0
+
+generation:
+  max_context_chars: 12000
+  temperature: 0.2
