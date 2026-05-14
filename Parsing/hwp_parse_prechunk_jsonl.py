@@ -1,0 +1,676 @@
+#!/usr/bin/env python3
+"""Parse an HWP RFP into structured JSONL before chunking.
+
+The output is not final chunks. It is a pre-chunk representation:
+
+- section_text: text grouped by heading path
+- table: compact structured table representation
+- toc: table-of-contents/navigation table
+- cover_text: title/cover layout text
+
+Run this in the WSL virtualenv where rhwp-python is installed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+try:
+    import rhwp
+    from rhwp.ir.nodes import ListItemBlock, ParagraphBlock, TableBlock
+except ImportError as exc:  # pragma: no cover
+    rhwp = None
+
+    class ParagraphBlock:  # type: ignore[no-redef]
+        pass
+
+    class ListItemBlock:  # type: ignore[no-redef]
+        pass
+
+    class TableBlock:  # type: ignore[no-redef]
+        pass
+
+
+BARE_SECTION_RE = re.compile(
+    r"^(사업개요|사업목표|사업유형|사업추진계획|과업의\s*범위|과업의\s*내용|"
+    r"과업의\s*일반사항|과업의\s*개요|요구사항\s*상세|공모\s*추진\s*일정|"
+    r"입찰참가자격|입찰시\s*고려사항|제안서\s*제출방법(?:\s*및\s*제출서류)?|"
+    r"일반사항|제안서의\s*효력|주관사업자\s*선정방식|평가항목\s*및\s*배점\s*한도|"
+    r"제안서\s*규격\s*및\s*작성요령|유의사항)$"
+)
+
+REQUIREMENT_RE = re.compile(r"요구사항|요구\s*ID|SFR|SER|DAR|DIR|기능요구|보안요구", re.I)
+EVALUATION_RE = re.compile(r"평가|배점|점수|기술평가|가격평가|정량|정성|협상대상")
+SCHEDULE_RE = re.compile(r"20\d{2}년|기간|일정|월|착수|완료|추진")
+FORM_RE = re.compile(r"신청서|서약서|각서|기관명|대표자|주소|인감|사업자등록번호")
+
+ROMAN_TOKEN_RE = r"(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+|IX|IV|V(?:I{0,3})?|X|I{1,3})"
+ROMAN_RE = re.compile(rf"^{ROMAN_TOKEN_RE}[.)]?$")
+ROMAN_HEADING_RE = re.compile(rf"^({ROMAN_TOKEN_RE})(?:[.)]\s+|\s*/\s*|\s+)(.+)$")
+NUMBER_HEADING_RE = re.compile(r"^(\d{1,2}(?:\.\d{1,2})*)([.)])\s*(.+)$")
+KOREAN_HEADING_RE = re.compile(r"^([가-하])([.)])\s*(.+)$")
+CIRCLED_HEADING_RE = re.compile(r"^([①-⑳])\s*(.+)$")
+MAJOR_SECTION_TITLE_RE = re.compile(r"^(사업안내|과업안내|공모사항|제안서\s*작성|붙\s*임)$")
+
+
+def normalize_text(value: Any) -> str:
+    text = "" if value is None else str(value)
+    text = text.replace("\u00a0", " ")
+    text = text.replace("氠瑢", " ").replace("漠杳", " ")
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]+", " ", text)
+    text = re.sub(r"[\ue000-\uf8ff]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def normalize_heading_text(value: Any) -> str:
+    text = normalize_text(value)
+    text = re.sub(r"붙\s*임", "붙임", text)
+    return text
+
+
+def block_text(block: Any) -> str:
+    if isinstance(block, ParagraphBlock):
+        return normalize_text(block.text)
+    if isinstance(block, ListItemBlock):
+        marker = normalize_text(getattr(block, "marker", ""))
+        text = normalize_text(block.text)
+        if marker and marker not in {"-", "•", "1."}:
+            return normalize_text(f"{marker} {text}")
+        return text
+    if isinstance(block, TableBlock):
+        return normalize_text(block.text)
+    return normalize_text(getattr(block, "text", ""))
+
+
+def cell_text(cell: Any, *, include_nested_table_text: bool = False) -> str:
+    parts: list[str] = []
+    for inner in getattr(cell, "blocks", []):
+        if isinstance(inner, TableBlock) and not include_nested_table_text:
+            continue
+        text = block_text(inner)
+        if text:
+            parts.append(text)
+    return "\n".join(parts).strip()
+
+
+def detect_heading(text: str) -> tuple[int, str] | None:
+    short = normalize_text(text)
+    if not short or len(short) > 120:
+        return None
+
+    match = ROMAN_HEADING_RE.match(short)
+    if match:
+        roman, title = match.groups()
+        title = normalize_heading_text(title)
+        if title and len(title) <= 70:
+            return 1, normalize_text(f"{roman}. {title}")
+
+    match = NUMBER_HEADING_RE.match(short)
+    if match:
+        number, marker, title = match.groups()
+        title = normalize_text(title)
+        if not title:
+            return None
+        # Parenthesized numbers are often list items in these RFPs. Keep short
+        # title-like ones, but do not promote long explanatory sentences.
+        if marker == ")" and len(title) > 55:
+            return None
+        if marker == "." and len(title) > 90:
+            return None
+        heading = f"{number}. {title}" if marker == "." else f"{number}) {title}"
+        return 2, normalize_text(heading)
+
+    match = KOREAN_HEADING_RE.match(short)
+    if match:
+        letter, marker, title = match.groups()
+        title = normalize_text(title)
+        if marker == "." and re.search(r"[:：]", title):
+            return None
+        if title and len(title) <= 70:
+            return 3, normalize_text(f"{letter}{marker} {title}")
+
+    match = CIRCLED_HEADING_RE.match(short)
+    if match:
+        marker, title = match.groups()
+        title = normalize_text(title)
+        if title and len(title) <= 70:
+            return 4, normalize_text(f"{marker} {title}")
+
+    if BARE_SECTION_RE.match(short):
+        return 2, short
+    return None
+
+
+def is_deferred_heading(text: str) -> bool:
+    """Return True for list-like headings that need the next block for context."""
+    short = normalize_text(text)
+    number_match = NUMBER_HEADING_RE.match(short)
+    if number_match:
+        return number_match.group(2) == ")"
+    if KOREAN_HEADING_RE.match(short):
+        return True
+    if CIRCLED_HEADING_RE.match(short):
+        return True
+    return False
+
+
+def is_table_context_heading(text: str) -> bool:
+    """Return True for '가. 제목' style headings that can group following tables."""
+    short = normalize_text(text)
+    match = KOREAN_HEADING_RE.match(short)
+    if not match:
+        return False
+    _, marker, title = match.groups()
+    return marker == "." and not re.search(r"[:：]", title)
+
+
+def update_stack(stack: list[dict[str, Any]], level: int, heading: str) -> list[dict[str, Any]]:
+    kept = [item for item in stack if int(item["level"]) < level]
+    kept.append({"level": level, "heading": heading})
+    return kept
+
+
+def section_path(stack: list[dict[str, Any]]) -> list[str]:
+    return [str(item["heading"]) for item in stack]
+
+
+def section_type(path_items: list[str]) -> str:
+    text = " ".join(path_items)
+    if re.search(r"사업\s*개요|사업안내|목표|추진\s*배경", text):
+        return "overview"
+    if re.search(r"과업|요구사항|제안\s*요청|수행\s*범위", text):
+        return "requirements"
+    if re.search(r"보안|개인정보|접근권한|암호화", text):
+        return "security"
+    if re.search(r"평가|배점|협상", text):
+        return "evaluation"
+    if re.search(r"입찰|계약|공모|제출", text):
+        return "bid_contract"
+    if re.search(r"붙임|서식|양식", text):
+        return "appendix_form"
+    return "body"
+
+
+def has_nested_table(table: TableBlock) -> bool:
+    return any(isinstance(inner, TableBlock) for cell in table.cells for inner in cell.blocks)
+
+
+def table_grid(table: TableBlock, *, fill_spans: bool) -> list[list[str]]:
+    grid = [["" for _ in range(table.cols)] for _ in range(table.rows)]
+    for cell in table.cells:
+        text = cell_text(cell)
+        row_end = min(table.rows, cell.row + max(1, cell.row_span))
+        col_end = min(table.cols, cell.col + max(1, cell.col_span))
+        for row in range(cell.row, row_end):
+            for col in range(cell.col, col_end):
+                if row == cell.row and col == cell.col:
+                    grid[row][col] = text
+                elif fill_spans:
+                    grid[row][col] = text
+    return grid
+
+
+def unique_values(row: list[str]) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for value in row:
+        clean = normalize_text(value)
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        values.append(clean)
+    return values
+
+
+def compact_grid_lines(grid: list[list[str]], *, max_rows: int = 12) -> list[str]:
+    lines: list[str] = []
+    previous = ""
+    for row in grid[:max_rows]:
+        values = unique_values(row)
+        if not values:
+            continue
+        line = " / ".join(values)
+        if line == previous:
+            continue
+        lines.append(line)
+        previous = line
+    return lines
+
+
+def layout_heading_from_table(table: TableBlock, grid: list[list[str]]) -> tuple[int, str] | None:
+    """Treat small layout tables such as 'Ⅰ | 사업안내' as headings, not tables."""
+    values: list[str] = []
+    for row in grid:
+        values.extend(unique_values(row))
+    values = [value for value in values if value]
+    if not values or len(values) > 4 or table.rows > 8:
+        return None
+
+    combined = normalize_text(" ".join(values))
+    direct = detect_heading(combined)
+    if direct:
+        return direct
+
+    if len(values) >= 2 and ROMAN_RE.match(values[0]):
+        roman = values[0].rstrip(".)")
+        heading = normalize_text(f"{roman}. {' '.join(values[1:])}")
+        if len(heading) <= 80:
+            return 1, heading
+
+    if len(values) >= 2 and re.fullmatch(r"\d{1,2}[.)]?", values[0]):
+        number = values[0].rstrip(")")
+        if not number.endswith("."):
+            number += "."
+        heading = normalize_text(f"{number} {' '.join(values[1:])}")
+        if len(heading) <= 90:
+            return 2, heading
+
+    return None
+
+
+def classify_table(table: TableBlock, grid: list[list[str]]) -> str:
+    flat = normalize_text(" ".join(value for row in grid for value in row if value))
+    filled_slots = sum(1 for row in grid for value in row if value.strip())
+    total_slots = max(1, table.rows * table.cols)
+    empty_ratio = 1 - filled_slots / total_slots
+    span_count = sum(1 for cell in table.cells if cell.row_span > 1 or cell.col_span > 1)
+    span_ratio = span_count / max(1, len(table.cells))
+    last_values = [row[-1].strip() for row in grid if row and row[-1].strip()]
+    page_like = sum(1 for value in last_values if re.fullmatch(r"\d{1,3}", value))
+    page_ratio = page_like / max(1, len(last_values))
+
+    if has_nested_table(table):
+        return "nested_table"
+    if "목차" in flat or (
+        page_ratio >= 0.45 and span_ratio >= 0.25 and re.search(r"[ⅠⅡⅢⅣⅤ]|사업안내|과업안내|제안서", flat)
+    ):
+        return "toc_table"
+    if SCHEDULE_RE.search(flat) and table.cols >= 5:
+        return "schedule_table"
+    if REQUIREMENT_RE.search(flat):
+        return "requirement_table"
+    if EVALUATION_RE.search(flat):
+        return "evaluation_table"
+    if FORM_RE.search(flat):
+        return "form_table"
+    if table.rows <= 2 or (table.cols <= 2 and empty_ratio >= 0.5):
+        return "layout_table"
+    return "data_table"
+
+
+def header_value_rows(grid: list[list[str]]) -> list[dict[str, Any]]:
+    if not grid:
+        return []
+    headers = [normalize_text(value) or f"col_{idx}" for idx, value in enumerate(grid[0])]
+    rows: list[dict[str, Any]] = []
+    for row_index, row in enumerate(grid[1:], start=1):
+        cells: dict[str, str] = {}
+        for col_index, value in enumerate(row):
+            clean = normalize_text(value)
+            if not clean:
+                continue
+            header = headers[col_index] if col_index < len(headers) else f"col_{col_index}"
+            if clean == header:
+                continue
+            cells[header] = clean
+        if cells:
+            rows.append(
+                {
+                    "row_index": row_index,
+                    "text": " / ".join(f"{key}: {value}" for key, value in cells.items()),
+                    "cells": cells,
+                }
+            )
+    return rows
+
+
+def generic_rows(grid: list[list[str]], *, start_row: int = 0) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row_index, row in enumerate(grid[start_row:], start=start_row):
+        values = unique_values(row)
+        if not values:
+            continue
+        rows.append({"row_index": row_index, "text": " / ".join(values), "values": values})
+    return rows
+
+
+def group_rows(rows: list[dict[str, Any]], *, group_size: int) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    for start in range(0, len(rows), group_size):
+        chunk = rows[start : start + group_size]
+        if not chunk:
+            continue
+        groups.append(
+            {
+                "row_range": f"{chunk[0]['row_index']}-{chunk[-1]['row_index']}",
+                "text": "\n".join(str(row["text"]) for row in chunk),
+            }
+        )
+    return groups
+
+
+def table_payload(table: TableBlock, table_type: str, grid: list[list[str]], *, group_size: int) -> dict[str, Any]:
+    """Build compact table payload for pre-chunk JSONL."""
+    payload: dict[str, Any] = {
+        "rows": table.rows,
+        "cols": table.cols,
+        "cell_count": len(table.cells),
+    }
+
+    if table_type == "toc_table":
+        payload["items"] = generic_rows(grid)
+        return payload
+
+    if table_type in {"layout_table", "form_table", "nested_table"}:
+        payload["summary_lines"] = compact_grid_lines(grid, max_rows=16)
+        if table_type == "nested_table":
+            payload["nested_table_count"] = sum(
+                1 for cell in table.cells for inner in cell.blocks if isinstance(inner, TableBlock)
+            )
+        return payload
+
+    if table_type in {"requirement_table", "evaluation_table"}:
+        payload["rows_data"] = header_value_rows(grid)
+        return payload
+
+    if table_type == "schedule_table":
+        payload["row_groups"] = group_rows(generic_rows(grid, start_row=2), group_size=group_size)
+        return payload
+
+    rows_data = header_value_rows(grid)
+    if len(rows_data) <= 20:
+        payload["rows_data"] = rows_data
+    else:
+        payload["row_groups"] = group_rows(generic_rows(grid, start_row=1), group_size=group_size)
+    return payload
+
+
+def table_text_for_record(table_type: str, payload: dict[str, Any]) -> str:
+    if "rows_data" in payload:
+        return "\n".join(row["text"] for row in payload["rows_data"][:20])
+    if "row_groups" in payload:
+        return "\n".join(group["text"] for group in payload["row_groups"][:3])
+    if "items" in payload:
+        return "\n".join(item["text"] for item in payload["items"][:30])
+    if "summary_lines" in payload:
+        return "\n".join(payload["summary_lines"])
+    return table_type
+
+
+def new_base_record(source_file: str) -> dict[str, Any]:
+    return {
+        "file_name": source_file,
+    }
+
+
+def build_prechunk_records(
+    input_path: Path, *, group_size: int = 8, debug_headings_path: Path | None = None
+) -> list[dict[str, Any]]:
+    if rhwp is None:
+        raise SystemExit(
+            "rhwp-python is required. In WSL, run: source venv/bin/activate && pip install rhwp-python"
+        )
+    doc = rhwp.parse(str(input_path))
+    ir = doc.to_ir()
+    source_file = input_path.name
+
+    records: list[dict[str, Any]] = []
+    stack: list[dict[str, Any]] = []
+    text_buffer: list[str] = []
+    pending_table_title: tuple[int, str, bool] | None = None
+    pending_table_context: str | None = None
+    active_table_context: str | None = None
+    pending_major: str | None = None
+    section_index = 0
+    table_index = 0
+    debug_rows: list[dict[str, Any]] = []
+
+    def add_debug(action: str, text: str = "", **extra: Any) -> None:
+        if debug_headings_path is None:
+            return
+        debug_rows.append(
+            {
+                "action": action,
+                "text": text,
+                "section_path": section_path(stack),
+                **extra,
+            }
+        )
+
+    def flush_text() -> None:
+        nonlocal section_index, text_buffer
+        text = "\n".join(line for line in text_buffer if normalize_text(line)).strip()
+        text_buffer = []
+        if not normalize_text(text):
+            return
+        path_items = section_path(stack)
+        section_index += 1
+        record = new_base_record(source_file)
+        record.update(
+            {
+                "content_type": "section_text" if path_items else "cover_text",
+                "section_id": f"section_{section_index:04d}",
+                "section_path": path_items,
+                "section_type": section_type(path_items),
+                "heading": path_items[-1] if path_items else "",
+                "text": text,
+            }
+        )
+        records.append(record)
+
+    def flush_pending_table_context_as_text() -> None:
+        nonlocal pending_table_context
+        if pending_table_context:
+            text_buffer.append(pending_table_context)
+            pending_table_context = None
+
+    def flush_pending_table_title_as_text() -> None:
+        nonlocal pending_table_title, active_table_context
+        flush_pending_table_context_as_text()
+        if pending_table_title:
+            text_buffer.append(pending_table_title[1])
+            pending_table_title = None
+            active_table_context = None
+
+    def take_pending_table_path_items() -> list[str]:
+        nonlocal pending_table_title, pending_table_context, active_table_context
+        extras: list[str] = []
+        if pending_table_context:
+            active_table_context = pending_table_context
+            pending_table_context = None
+        if active_table_context:
+            extras.append(active_table_context)
+        if not pending_table_title:
+            return extras
+        heading_text = pending_table_title[1]
+        attach_to_table = pending_table_title[2]
+        pending_table_title = None
+        if not attach_to_table:
+            text_buffer.append(heading_text)
+            active_table_context = None
+            return []
+        extras.append(heading_text)
+        return extras
+
+    def flush_pending_major_as_text() -> None:
+        nonlocal pending_major
+        if pending_major:
+            text_buffer.append(pending_major)
+            pending_major = None
+
+    def clear_table_context() -> None:
+        nonlocal active_table_context
+        active_table_context = None
+
+    for block in ir.body:
+        if isinstance(block, (ParagraphBlock, ListItemBlock)):
+            text = block_text(block)
+            if ROMAN_RE.match(text):
+                flush_pending_table_title_as_text()
+                flush_pending_major_as_text()
+                flush_text()
+                clear_table_context()
+                pending_major = text.rstrip(".)")
+                add_debug("pending_major", text)
+                continue
+            if pending_major and MAJOR_SECTION_TITLE_RE.match(text):
+                flush_pending_table_title_as_text()
+                flush_text()
+                clear_table_context()
+                stack = update_stack(stack, 1, normalize_text(f"{pending_major}. {text}"))
+                add_debug("major_heading", text)
+                pending_major = None
+                continue
+            flush_pending_major_as_text()
+
+            detected = detect_heading(text)
+            if detected:
+                level, heading = detected
+                if is_deferred_heading(text):
+                    if is_table_context_heading(text):
+                        flush_pending_table_title_as_text()
+                        clear_table_context()
+                        pending_table_context = heading
+                        add_debug("pending_table_context", text, heading=heading, level=level)
+                    else:
+                        if pending_table_title:
+                            flush_pending_table_title_as_text()
+                        attach_to_table = bool(pending_table_context or active_table_context) or not text_buffer
+                        pending_table_title = (level, heading, attach_to_table)
+                        add_debug(
+                            "pending_table_title",
+                            text,
+                            heading=heading,
+                            level=level,
+                            attach_to_table=attach_to_table,
+                            table_context=pending_table_context or active_table_context or "",
+                        )
+                else:
+                    flush_pending_table_title_as_text()
+                    flush_text()
+                    clear_table_context()
+                    stack = update_stack(stack, level, heading)
+                    add_debug("heading", text, heading=heading, level=level)
+            elif text:
+                flush_pending_table_title_as_text()
+                clear_table_context()
+                text_buffer.append(text)
+                add_debug("body", text)
+            continue
+
+        if isinstance(block, TableBlock):
+            grid_no_fill = table_grid(block, fill_spans=False)
+            table_type_initial = classify_table(block, grid_no_fill)
+            heading = layout_heading_from_table(block, grid_no_fill)
+            if heading:
+                flush_pending_table_title_as_text()
+                flush_pending_major_as_text()
+                flush_text()
+                clear_table_context()
+                level, heading_text = heading
+                stack = update_stack(stack, level, heading_text)
+                add_debug("table_heading", heading_text, level=level)
+                continue
+
+            grid = table_grid(block, fill_spans=table_type_initial not in {"toc_table", "layout_table"})
+            table_type = classify_table(block, grid)
+
+            # Cover/title layout tables are useful but should not pretend to be data tables.
+            if table_type == "layout_table":
+                lines = compact_grid_lines(grid_no_fill, max_rows=8)
+                if lines:
+                    if stack:
+                        flush_pending_major_as_text()
+                        flush_pending_table_title_as_text()
+                        clear_table_context()
+                        text_buffer.extend(lines)
+                    else:
+                        record = new_base_record(source_file)
+                        record.update(
+                            {
+                                "content_type": "cover_text",
+                                "section_path": [],
+                                "section_type": "cover",
+                                "heading": "",
+                                "text": "\n".join(lines),
+                            }
+                        )
+                        records.append(record)
+                continue
+
+            flush_pending_major_as_text()
+            table_path_items = take_pending_table_path_items()
+            flush_text()
+            table_index += 1
+            table_id = f"table_{table_index:04d}"
+            payload = table_payload(block, table_type, grid, group_size=group_size)
+            path_items = section_path(stack)
+            if table_path_items:
+                path_items = [*path_items, *table_path_items]
+            add_debug(
+                "table",
+                table_type,
+                table_id=table_id,
+                table_title=table_path_items[-1] if table_path_items else "",
+                table_context=table_path_items[0] if len(table_path_items) > 1 else "",
+                section_path=path_items,
+            )
+            record = new_base_record(source_file)
+            content_type = "toc" if table_type == "toc_table" else "table"
+            record.update(
+                {
+                    "content_type": content_type,
+                    "table_id": table_id,
+                    "table_type": table_type,
+                    "section_path": path_items,
+                    "section_type": section_type(path_items),
+                    "table": payload,
+                }
+            )
+            if content_type == "toc":
+                record["text"] = table_text_for_record(table_type, payload)
+            records.append(record)
+
+    flush_pending_table_title_as_text()
+    flush_pending_major_as_text()
+    flush_text()
+    if debug_headings_path is not None:
+        debug_headings_path.parent.mkdir(parents=True, exist_ok=True)
+        with debug_headings_path.open("w", encoding="utf-8") as file:
+            for row in debug_rows:
+                file.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return records
+
+
+def write_jsonl(path: Path, records: list[dict[str, Any]], *, limit: int | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    selected = records if limit is None else records[:limit]
+    with path.open("w", encoding="utf-8") as file:
+        for record in selected:
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Parse HWP into pre-chunk structured JSONL.")
+    parser.add_argument("--input", required=True, type=Path, help="HWP input path")
+    parser.add_argument("--output", type=Path, default=Path("eda/hwp_prechunk.jsonl"), help="output JSONL path")
+    parser.add_argument("--limit", type=int, default=0, help="write only first N records; 0 means all")
+    parser.add_argument("--group-size", type=int, default=8, help="row count per group for large/schedule tables")
+    parser.add_argument("--debug-headings", type=Path, default=None, help="optional JSONL path for heading decisions")
+    args = parser.parse_args()
+
+    records = build_prechunk_records(args.input, group_size=args.group_size, debug_headings_path=args.debug_headings)
+    limit = None if args.limit == 0 else args.limit
+    write_jsonl(args.output, records, limit=limit)
+    print(f"parsed_records: {len(records)}")
+    print(f"written_records: {len(records) if limit is None else min(limit, len(records))}")
+    print(f"output: {args.output}")
+
+
+if __name__ == "__main__":
+    main()
