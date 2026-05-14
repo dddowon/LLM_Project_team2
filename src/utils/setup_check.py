@@ -84,6 +84,17 @@ def _check_paths(config_path: str) -> list[CheckResult]:
             ),
         ]
 
+    results.append(
+        CheckResult(
+            name="Vector DB provider",
+            ok=config.vector_store.provider.lower() == "faiss",
+            detail=(
+                f"{config.vector_store.provider} / {config.vector_store.index_type} / "
+                f"{config.vector_store.distance_metric}"
+            ),
+        )
+    )
+
     raw_dir = config.paths.raw_data_dir
     metadata_csv = config.paths.metadata_csv
     index_dir = config.paths.index_dir

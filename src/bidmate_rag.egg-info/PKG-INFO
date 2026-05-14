@@ -1,3 +1,24 @@
+Metadata-Version: 2.4
+Name: bidmate-rag
+Version: 0.1.0
+Summary: Scenario B RAG baseline for RFP question answering.
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: faiss-cpu>=1.8.0
+Requires-Dist: numpy>=1.26.0
+Requires-Dist: openai>=1.99.0
+Requires-Dist: pandas>=2.2.0
+Requires-Dist: pydantic>=2.7.0
+Requires-Dist: pypdf>=4.2.0
+Requires-Dist: python-dotenv>=1.0.1
+Requires-Dist: pyyaml>=6.0.1
+Requires-Dist: tqdm>=4.66.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.2.0; extra == "dev"
+Requires-Dist: ruff>=0.5.0; extra == "dev"
+Provides-Extra: hwp
+Requires-Dist: pyhwp>=0.1b15; extra == "hwp"
+
 # 입찰메이트 RAG 시스템
 
 공공입찰 RFP 문서를 대상으로 질의응답을 수행하는 시나리오 B(LLM API 기반) RAG baseline입니다.
