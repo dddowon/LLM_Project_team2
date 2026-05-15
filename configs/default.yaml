@@ -6,7 +6,7 @@ paths:
   metadata_csv: data/v1/data_list.csv
   processed_dir: data/v2
   index_dir: checkpoints/faiss_openai
-  evaluation_set: data/v2/eval_questions.jsonl
+  evaluation_set: data/v2/eval_questions.example.jsonl
   evaluation_output: outputs/eval_results.jsonl
 
 openai:
