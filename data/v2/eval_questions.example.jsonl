@@ -1,3 +1,4 @@
 {"question": "국민연금공단이 발주한 이러닝시스템 관련 사업 요구사항을 정리해 줘.", "category": "single_doc_summary"}
 {"question": "고려대학교 차세대 포털 시스템 사업과 광주과학기술원의 학사 시스템 기능개선 사업을 비교해 줘.", "category": "multi_doc_comparison"}
 {"question": "문서에 없는 내용이면 모른다고 답하는지 확인하기 위한 질문입니다. 이 사업의 2030년 해외 매출 목표는 얼마야?", "category": "unanswerable"}
+{"question": "GIST 캠퍼스 위치가 어디야?", "category": "location_probe", "ground_truth_keywords": ["광주", "북구", "첨단"]}

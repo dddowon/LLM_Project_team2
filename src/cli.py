@@ -81,6 +81,33 @@ def evaluate(config_path: str) -> None:
     write_jsonl(config.paths.evaluation_output, rows)
     print(f"Wrote evaluation results -> {config.paths.evaluation_output}")
 
+
+def evaluate_harness(
+    config_path: str,
+    *,
+    output_path: str | None,
+    judge_model: str,
+    no_llm_judge: bool,
+    no_langsmith_feedback: bool,
+) -> None:
+    from dotenv import load_dotenv
+
+    from pathlib import Path
+
+    from src.evaluation.langsmith_harness import run_eval_harness
+
+    load_dotenv()
+    out, summary = run_eval_harness(
+        config_path,
+        output_path=Path(output_path) if output_path else None,
+        judge_model=judge_model,
+        run_llm_judge=not no_llm_judge,
+        langsmith_feedback=not no_langsmith_feedback,
+    )
+    print(f"Wrote harness evaluation -> {out}")
+    print(f"Summary: {summary}")
+
+
 def embed_jsonl(
     input_path: str,
     output_path: str,
@@ -278,6 +305,31 @@ def main() -> None:
 
     subparsers.add_parser("evaluate", help="Run questions from the evaluation JSONL file")
 
+    harness_parser = subparsers.add_parser(
+        "evaluate-harness",
+        help="RAG eval with optional keyword retrieval hit, LLM-as-judge, LangSmith traces/feedback",
+    )
+    harness_parser.add_argument(
+        "--output",
+        default=None,
+        help="Output JSONL path (default: outputs/eval_harness_results.jsonl)",
+    )
+    harness_parser.add_argument(
+        "--judge-model",
+        default="gpt-4o",
+        help="OpenAI chat model for faithfulness/relevance scoring",
+    )
+    harness_parser.add_argument(
+        "--no-llm-judge",
+        action="store_true",
+        help="Skip GPT judge (retrieval keyword metrics only if keywords are present)",
+    )
+    harness_parser.add_argument(
+        "--no-langsmith-feedback",
+        action="store_true",
+        help="Do not attach LangSmith Client feedback scores (tracing still follows LANGSMITH_* env)",
+    )
+
     check_parser = subparsers.add_parser(
         "check-setup",
         help="Validate local settings, dependencies, paths, and optional OpenAI connectivity",
@@ -360,6 +412,14 @@ def main() -> None:
         query(args.config, args.question)
     elif args.command == "evaluate":
         evaluate(args.config)
+    elif args.command == "evaluate-harness":
+        evaluate_harness(
+            args.config,
+            output_path=args.output,
+            judge_model=args.judge_model,
+            no_llm_judge=args.no_llm_judge,
+            no_langsmith_feedback=args.no_langsmith_feedback,
+        )
     elif args.command == "check-setup":
         from src.utils.setup_check import run_setup_check
 

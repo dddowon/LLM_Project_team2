@@ -27,7 +27,13 @@ class RagEngine:
         ]
         return filtered
 
-    def answer(self, question: str, chat_history: list[dict[str, str]] | None = None) -> dict:
+    def answer(
+        self,
+        question: str,
+        chat_history: list[dict[str, str]] | None = None,
+        *,
+        include_source_text: bool = False,
+    ) -> dict:
         embedding = self.model_client.embed_texts([question], self.config.openai.embedding_model)[0]
         results = [
             item
@@ -41,11 +47,14 @@ class RagEngine:
             model=self.config.openai.generation_model,
             temperature=self.config.generation.temperature,
         )
+        sources: list[dict] = []
+        for chunk, score in results:
+            row: dict = {"chunk_id": chunk.chunk_id, "score": score, "metadata": chunk.metadata}
+            if include_source_text:
+                row["text"] = chunk.text
+            sources.append(row)
         return {
             "question": question,
             "answer": answer,
-            "sources": [
-                {"chunk_id": chunk.chunk_id, "score": score, "metadata": chunk.metadata}
-                for chunk, score in results
-            ],
+            "sources": sources,
         }
