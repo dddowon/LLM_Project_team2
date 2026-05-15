@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 
 
 class OpenAIModelClient:
@@ -19,11 +19,24 @@ class OpenAIModelClient:
         self,
         prompt: str,
         model: str,
-        temperature: float = 0.2,
+        temperature: float | None = 0.2,
     ) -> str:
-        response = self.client.responses.create(
-            model=model,
-            input=prompt,
-            temperature=temperature,
-        )
+        request = {
+            "model": model,
+            "input": prompt,
+        }
+        if temperature is not None and _supports_temperature(model):
+            request["temperature"] = temperature
+
+        try:
+            response = self.client.responses.create(**request)
+        except BadRequestError as exc:
+            if "temperature" not in request or "temperature" not in str(exc):
+                raise
+            request.pop("temperature")
+            response = self.client.responses.create(**request)
         return response.output_text
+
+
+def _supports_temperature(model: str) -> bool:
+    return not model.lower().startswith("gpt-5")

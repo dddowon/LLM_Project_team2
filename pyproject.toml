@@ -23,6 +23,7 @@ dev = [
 ]
 hwp = [
     "pyhwp>=0.1b15",
+    "rhwp-python>=0.5.1",
 ]
 
 [tool.ruff]
