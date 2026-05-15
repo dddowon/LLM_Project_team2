@@ -21,6 +21,12 @@ class OpenAIConfig(BaseModel):
     generation_model: str = "gpt-5-mini"
 
 
+class VectorStoreConfig(BaseModel):
+    provider: str = "faiss"
+    index_type: str = "IndexFlatIP"
+    distance_metric: str = "cosine_similarity"
+
+
 class ChunkingConfig(BaseModel):
     chunk_size: int = 1200
     chunk_overlap: int = 200
@@ -40,6 +46,7 @@ class GenerationConfig(BaseModel):
 class AppConfig(BaseModel):
     paths: PathConfig
     openai: OpenAIConfig
+    vector_store: VectorStoreConfig
     chunking: ChunkingConfig
     retrieval: RetrievalConfig
     generation: GenerationConfig
