@@ -1,7 +1,10 @@
+Parsing
+chunking
 cli
 config
 dataset
 engine
 models
+pipeline
 preprocessing
 utils

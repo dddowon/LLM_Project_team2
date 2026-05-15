@@ -14,3 +14,4 @@ ruff>=0.5.0
 
 [hwp]
 pyhwp>=0.1b15
+rhwp-python>=0.5.1

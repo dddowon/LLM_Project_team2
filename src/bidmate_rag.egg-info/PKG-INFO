@@ -18,6 +18,7 @@ Requires-Dist: pytest>=8.2.0; extra == "dev"
 Requires-Dist: ruff>=0.5.0; extra == "dev"
 Provides-Extra: hwp
 Requires-Dist: pyhwp>=0.1b15; extra == "hwp"
+Requires-Dist: rhwp-python>=0.5.1; extra == "hwp"
 
 # 입찰메이트 RAG 시스템
 
