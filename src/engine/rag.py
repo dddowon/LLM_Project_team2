@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from src.config import AppConfig
 from src.engine.prompts import build_rag_prompt, format_context
-from src.engine.vector_store import FaissVectorStore
+from src.engine.vector_store import ChromaVectorStore
 from src.models.openai_client import OpenAIModelClient
 
 
@@ -10,7 +10,7 @@ class RagEngine:
     def __init__(
         self,
         config: AppConfig,
-        vector_store: FaissVectorStore,
+        vector_store: ChromaVectorStore,
         model_client: OpenAIModelClient | None = None,
     ) -> None:
         self.config = config

@@ -57,13 +57,13 @@ def embed_prechunked_jsonl(
     return len(output_rows)
 
 
-def build_faiss_from_embedded_jsonl(
+def build_chroma_from_embedded_jsonl(
     input_path: Path,
     index_dir: Path,
     doc_id: str | None = None,
 ) -> int:
     from src.dataset.schema import Chunk
-    from src.engine.vector_store import FaissVectorStore
+    from src.engine.vector_store import ChromaVectorStore
 
     rows = read_jsonl(input_path)
     if not rows:
@@ -71,10 +71,12 @@ def build_faiss_from_embedded_jsonl(
 
     chunks: list[Chunk] = []
     embeddings: list[list[float]] = []
+
     for idx, row in enumerate(rows):
         embedding = row.get("embedding")
         if not isinstance(embedding, list) or not embedding:
             raise ValueError(f"{idx}번째 row에 embedding 리스트가 없습니다.")
+
         embedding_values = [float(value) for value in embedding]
         if embeddings and len(embedding_values) != len(embeddings[0]):
             raise ValueError(f"{idx}번째 row의 embedding 차원이 이전 row와 다릅니다.")
@@ -96,6 +98,7 @@ def build_faiss_from_embedded_jsonl(
             or metadata.get("source_file")
             or "document"
         )
+
         chunks.append(
             Chunk(
                 chunk_id=str(chunk_id),
@@ -106,7 +109,7 @@ def build_faiss_from_embedded_jsonl(
         )
         embeddings.append(embedding_values)
 
-    store = FaissVectorStore.build(chunks, embeddings)
+    store = ChromaVectorStore.build(chunks, embeddings)
     store.save(index_dir)
     return len(chunks)
 
