@@ -1,14 +1,3 @@
-"""LangSmith-oriented RAG eval harness: hierarchical traces + optional feedback scores.
-
-Enable tracing by setting (either prefix works in recent SDKs):
-  LANGSMITH_TRACING=true
-  LANGSMITH_API_KEY=...
-  LANGSMITH_PROJECT=your-project
-
-Legacy equivalents LANGCHAIN_TRACING_V2 / LANGCHAIN_API_KEY / LANGCHAIN_PROJECT
-are also honored by LangSmith clients.
-"""
-
 from __future__ import annotations
 
 import os
@@ -20,7 +9,7 @@ from langsmith.run_helpers import get_current_run_tree
 
 from src.config import load_config
 from src.engine.rag import RagEngine
-from src.engine.vector_store import FaissVectorStore
+from src.engine.vector_store import ChromaVectorStore
 from src.evaluation.llm_judge import judge_faithfulness_relevance, parse_judge_scores
 from src.evaluation.retrieval import evaluate_retrieval
 from src.utils.jsonl import read_jsonl, write_jsonl
@@ -39,7 +28,6 @@ def _feedback_scores_safe(client: Client | None, scores: dict[str, float]) -> No
         try:
             client.create_feedback(run_id=run_id, key=key, score=float(score))
         except Exception:
-            # Tracing must never fail the eval loop (missing key, network, etc.)
             continue
 
 
@@ -111,7 +99,6 @@ def _eval_one_row(
     elif judge_payload.get("judge_error"):
         merged["judge_error"] = judge_payload["judge_error"]
 
-    # Row-level summary for LangSmith table view
     _feedback_scores_safe(
         langsmith_client,
         {
@@ -162,7 +149,6 @@ def run_eval_harness(
     run_llm_judge: bool = True,
     langsmith_feedback: bool = True,
 ) -> tuple[Path, dict[str, Any]]:
-    """Run RAG on each JSONL row; optional keyword retrieval hit + LLM judge; write JSONL."""
     config = load_config(config_path)
     eval_path = evaluation_set or config.paths.evaluation_set
     out_path = output_path or Path("outputs/eval_harness_results.jsonl")
@@ -171,7 +157,7 @@ def run_eval_harness(
     if not rows:
         raise RuntimeError(f"평가 질문셋이 없습니다: {eval_path}")
 
-    store = FaissVectorStore.load(config.paths.index_dir)
+    store = ChromaVectorStore.load(config.paths.index_dir)
     engine = RagEngine(config, store)
 
     ls_client: Client | None = None

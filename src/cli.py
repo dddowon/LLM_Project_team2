@@ -10,7 +10,7 @@ def ingest(config_path: str) -> None:
 
     from src.config import load_config
     from src.dataset.loaders import load_documents
-    from src.engine.vector_store import FaissVectorStore
+    from src.engine.vector_store import ChromaVectorStore
     from src.models.openai_client import OpenAIModelClient
     from src.preprocessing.chunker import chunk_documents
 
@@ -33,7 +33,7 @@ def ingest(config_path: str) -> None:
         embeddings.extend(
             client.embed_texts(texts[start : start + 64], config.openai.embedding_model, batch_size=64)
         )
-    store = FaissVectorStore.build(chunks, embeddings)
+    store = ChromaVectorStore.build(chunks, embeddings)
     store.save(config.paths.index_dir)
     print(f"Indexed {len(documents)} documents / {len(chunks)} chunks -> {config.paths.index_dir}")
 
@@ -43,11 +43,11 @@ def query(config_path: str, question: str) -> None:
 
     from src.config import load_config
     from src.engine.rag import RagEngine
-    from src.engine.vector_store import FaissVectorStore
+    from src.engine.vector_store import ChromaVectorStore
 
     load_dotenv()
     config = load_config(config_path)
-    store = FaissVectorStore.load(config.paths.index_dir)
+    store = ChromaVectorStore.load(config.paths.index_dir)
     engine = RagEngine(config, store)
     result = engine.answer(question)
     print(result["answer"])
@@ -62,7 +62,7 @@ def evaluate(config_path: str) -> None:
 
     from src.config import load_config
     from src.engine.rag import RagEngine
-    from src.engine.vector_store import FaissVectorStore
+    from src.engine.vector_store import ChromaVectorStore
     from src.utils.jsonl import read_jsonl, write_jsonl
 
     load_dotenv()
@@ -71,7 +71,7 @@ def evaluate(config_path: str) -> None:
     if not questions:
         raise RuntimeError(f"평가 질문셋이 없습니다: {config.paths.evaluation_set}")
 
-    store = FaissVectorStore.load(config.paths.index_dir)
+    store = ChromaVectorStore.load(config.paths.index_dir)
     engine = RagEngine(config, store)
     rows = []
     for item in tqdm(questions, desc="Evaluating"):
@@ -140,17 +140,17 @@ def resolve_index_dir(config_path: str, index_dir: str | None):
     return load_config(config_path).paths.index_dir
 
 
-def build_faiss_index(input_path: str, index_dir: str, doc_id: str | None = None) -> None:
+def build_chroma_index(input_path: str, index_dir: str, doc_id: str | None = None) -> None:
     from pathlib import Path
 
-    from src.pipeline.embedding_pipeline import build_faiss_from_embedded_jsonl
+    from src.pipeline.embedding_pipeline import build_chroma_from_embedded_jsonl
 
-    count = build_faiss_from_embedded_jsonl(
+    count = build_chroma_from_embedded_jsonl(
         input_path=Path(input_path),
         index_dir=Path(index_dir),
         doc_id=doc_id,
     )
-    print(f"Built FAISS index with {count} chunks -> {index_dir}")
+    print(f"Built Chroma index with {count} chunks -> {index_dir}")
 
 
 def parse_hwp(
@@ -286,8 +286,8 @@ def run_pipeline(
         batch_size=batch_size,
         force_real=force_real,
     )
-    print("[4/4] build-faiss")
-    build_faiss_index(input_path=str(embedded), index_dir=index_dir, doc_id=doc_id)
+    print("[4/4] build-chroma")
+    build_chroma_index(input_path=str(embedded), index_dir=index_dir, doc_id=doc_id)
     print("pipeline_done")
     print(f"embedded_output: {embedded}")
     print(f"index_dir: {index_dir}")
@@ -298,7 +298,7 @@ def main() -> None:
     parser.add_argument("--config", default="configs/default.yaml")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("ingest", help="Load RFP files, chunk, embed, and build FAISS index")
+    subparsers.add_parser("ingest", help="Load RFP files, chunk, embed, and build Chroma index")
 
     query_parser = subparsers.add_parser("query", help="Ask a question against the built index")
     query_parser.add_argument("question")
@@ -347,14 +347,14 @@ def main() -> None:
     embed_parser.add_argument("--batch-size", type=int, default=64, help="Embedding batch size")
     embed_parser.add_argument("--force-real", action="store_true", help="Fail if OPENAI_API_KEY is missing")
 
-    faiss_parser = subparsers.add_parser("build-faiss", help="Build FAISS checkpoint from embedded JSONL")
-    faiss_parser.add_argument("--input", required=True, help="Embedded JSONL input path")
-    faiss_parser.add_argument(
+    chroma_parser = subparsers.add_parser("build-chroma", help="Build Chroma checkpoint from embedded JSONL")
+    chroma_parser.add_argument("--input", required=True, help="Embedded JSONL input path")
+    chroma_parser.add_argument(
         "--index-dir",
         default=None,
-        help="FAISS checkpoint output directory; defaults to config paths.index_dir",
+        help="Chroma checkpoint output directory; defaults to config paths.index_dir",
     )
-    faiss_parser.add_argument("--doc-id", default=None, help="Optional doc id override")
+    chroma_parser.add_argument("--doc-id", default=None, help="Optional doc id override")
 
     parse_parser = subparsers.add_parser("parse-hwp", help="Parse HWP into prechunk JSONL")
     parse_parser.add_argument("--input", required=True, help="HWP input path")
@@ -389,14 +389,14 @@ def main() -> None:
 
     pipeline_parser = subparsers.add_parser(
         "run-pipeline",
-        help="Run parse->chunk->embed->build-faiss in one command",
+        help="Run parse->chunk->embed->build-chroma in one command",
     )
     pipeline_parser.add_argument("--input", required=True, help="HWP input path")
     pipeline_parser.add_argument("--output-dir", default="data/v2", help="Output directory for pipeline artifacts")
     pipeline_parser.add_argument(
         "--index-dir",
         default=None,
-        help="FAISS checkpoint output directory; defaults to config paths.index_dir",
+        help="Chroma checkpoint output directory; defaults to config paths.index_dir",
     )
     pipeline_parser.add_argument("--doc-id", default=None, help="Optional doc id override")
     pipeline_parser.add_argument("--model", default="text-embedding-3-small", help="Embedding model")
@@ -432,8 +432,8 @@ def main() -> None:
             batch_size=args.batch_size,
             force_real=args.force_real,
         )
-    elif args.command == "build-faiss":
-        build_faiss_index(
+    elif args.command == "build-chroma":
+        build_chroma_index(
             input_path=args.input,
             index_dir=str(resolve_index_dir(args.config, args.index_dir)),
             doc_id=args.doc_id,

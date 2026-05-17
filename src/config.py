@@ -22,9 +22,9 @@ class OpenAIConfig(BaseModel):
 
 
 class VectorStoreConfig(BaseModel):
-    provider: str = "faiss"
-    index_type: str = "IndexFlatIP"
-    distance_metric: str = "cosine_similarity"
+    provider: str = "chroma"
+    index_type: str = "hnsw"
+    distance_metric: str = "cosine"
 
 
 class ChunkingConfig(BaseModel):

@@ -5,7 +5,7 @@ paths:
   raw_data_dir: data/v1/raw
   metadata_csv: data/v1/data_list.csv
   processed_dir: data/v2
-  index_dir: checkpoints/faiss_openai
+  index_dir: checkpoints/chroma_openai
   evaluation_set: data/v2/eval_questions.example.jsonl
   evaluation_output: outputs/eval_results.jsonl
 
@@ -14,9 +14,9 @@ openai:
   generation_model: gpt-5-mini
 
 vector_store:
-  provider: faiss
-  index_type: IndexFlatIP
-  distance_metric: cosine_similarity
+  provider: chroma
+  index_type: hnsw
+  distance_metric: cosine
 
 chunking:
   chunk_size: 1200

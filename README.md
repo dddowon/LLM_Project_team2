@@ -6,7 +6,7 @@
 
 - PDF/HWP RFP 문서와 `data_list.csv` 메타데이터를 불러옵니다.
 - 문서를 청킹하고 `text-embedding-3-small`로 임베딩합니다.
-- FAISS vector DB를 생성합니다.
+- Chroma vector DB를 생성합니다.
 - 검색된 문서 근거를 바탕으로 `gpt-5-mini`가 답변합니다.
 - 평가 질문셋으로 검색/생성 결과를 반복 비교합니다.
 
@@ -14,8 +14,8 @@
 
 - LLM API: OpenAI `gpt-5-mini`
 - Embedding: OpenAI `text-embedding-3-small`
-- Vector DB: FAISS `IndexFlatIP`
-- Similarity: L2 정규화 후 inner product 검색, cosine similarity 기준으로 사용
+- Vector DB: Chroma `hnsw`
+- Similarity: Chroma cosine distance 기반 검색
 
 ## 프로젝트 구조
 
@@ -117,7 +117,7 @@ python -m src.cli run-pipeline \
 1. `parse-hwp`
 2. `chunk-jsonl`
 3. `embed-jsonl`
-4. `build-faiss`
+4. `build-chroma`
 
 생성 산출물:
 - `*_prechunk.jsonl`
@@ -125,8 +125,8 @@ python -m src.cli run-pipeline \
 - `*_chunks_summary.csv`
 - `*_chunks_sample.jsonl`
 - `*_embedded.jsonl`
-- `checkpoints/faiss_openai/index.faiss`
-- `checkpoints/faiss_openai/chunks.json`
+- `checkpoints/chroma_openai/chroma.sqlite3`
+- `checkpoints/chroma_openai/chunks.json`
 
 ### 단계별 실행
 
@@ -145,9 +145,9 @@ python -m src.cli embed-jsonl \
   --output "data/v2/<name>_embedded.jsonl" \
   --model "text-embedding-3-small"
 
-python -m src.cli build-faiss \
+python -m src.cli build-chroma \
   --input "data/v2/<name>_embedded.jsonl" \
-  --index-dir "checkpoints/faiss_openai"
+  --index-dir "checkpoints/chroma_openai"
 ```
 
 ### `embed-jsonl` 입력 포맷(고정)
