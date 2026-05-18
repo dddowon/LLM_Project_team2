@@ -5,6 +5,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+from openai import OpenAI
+
 from src.utils.jsonl import read_jsonl, write_jsonl
 
 
@@ -165,18 +168,107 @@ def generate_eval_questions(
     print(f"wrote_generation_inputs: {output_path}")
 
 
+def parse_question_response(content: str) -> list[dict[str, Any]]:
+    data = json.loads(content)
+    if isinstance(data, dict):
+        for key in ("questions", "items", "data"):
+            value = data.get(key)
+            if isinstance(value, list):
+                data = value
+                break
+    if not isinstance(data, list):
+        raise ValueError("OpenAI 응답이 JSON 배열이 아닙니다.")
+    rows: list[dict[str, Any]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question", "")).strip()
+        if not question:
+            continue
+        keywords = item.get("ground_truth_keywords")
+        if not isinstance(keywords, list):
+            keywords = []
+        rows.append(
+            {
+                "question": question,
+                "category": str(item.get("category", "")).strip(),
+                "doc_id": str(item.get("doc_id", "")).strip(),
+                "expected_answer": str(item.get("expected_answer", "")).strip(),
+                "ground_truth_keywords": [str(keyword) for keyword in keywords],
+                "difficulty": str(item.get("difficulty", "")).strip(),
+            }
+        )
+    return rows
+
+
+def call_openai_for_questions(prompt: str, model: str) -> list[dict[str, Any]]:
+    client = OpenAI()
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+        temperature=0.2,
+    )
+    content = response.choices[0].message.content or "[]"
+    return parse_question_response(content)
+
+
+def generate_questions_with_openai(
+    input_path: Path,
+    output_path: Path,
+    *,
+    model: str,
+    overwrite: bool = False,
+) -> None:
+    if output_path.exists() and not overwrite:
+        raise FileExistsError(f"이미 파일이 있습니다: {output_path}")
+    rows = read_jsonl(input_path)
+    if not rows:
+        raise RuntimeError(f"질문 생성 입력 파일이 비어있습니다: {input_path}")
+
+    output_rows: list[dict[str, Any]] = []
+    for row in rows:
+        prompt = str(row.get("prompt", "")).strip()
+        if not prompt:
+            continue
+        questions = call_openai_for_questions(prompt, model)
+        for question in questions:
+            if not question.get("doc_id"):
+                question["doc_id"] = row.get("doc_id", "")
+            output_rows.append(question)
+
+    write_jsonl(output_path, output_rows)
+    print(f"wrote_eval_questions: {output_path}")
+    print(f"questions: {len(output_rows)}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-dir", default="data/v2")
     parser.add_argument("--pattern", default="*_chunks.jsonl")
     parser.add_argument("--output", default="data/v2/eval_question_generation_inputs.jsonl")
+    parser.add_argument("--generation-input", default="data/v2/eval_question_generation_inputs.jsonl")
+    parser.add_argument("--eval-output", default="data/v2/eval_questions.jsonl")
+    parser.add_argument("--model", default="gpt-4o-mini")
     parser.add_argument("--max-docs", type=int, default=5)
     parser.add_argument("--max-chunks-per-doc", type=int, default=8)
     parser.add_argument("--max-chars-per-chunk", type=int, default=1200)
     parser.add_argument("--questions-per-doc", type=int, default=3)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--call-openai", action="store_true")
     args = parser.parse_args()
+
+    load_dotenv()
+
+    if args.call_openai:
+        generate_questions_with_openai(
+            input_path=Path(args.generation_input),
+            output_path=Path(args.eval_output),
+            model=args.model,
+            overwrite=args.overwrite,
+        )
+        return
 
     input_dir = Path(args.input_dir)
     output_path = Path(args.output)
