@@ -51,13 +51,19 @@ def score_values(rows: list[dict[str, Any]], key: str) -> list[float]:
 def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     f_scores = score_values(rows, "f_score")
     r_scores = score_values(rows, "r_score")
+    s_scores = score_values(rows, "s_score")
     hits = score_values(rows, "retrieval_keyword_hit")
+    precisions = score_values(rows, "context_precision")
+    latencies = score_values(rows, "total_latency_ms")
     categories = Counter(row_category(row) for row in rows)
     return {
         "n": len(rows),
         "mean_f_score": mean(f_scores),
         "mean_r_score": mean(r_scores),
+        "mean_s_score": mean(s_scores),
         "mean_retrieval_keyword_hit": mean(hits),
+        "mean_context_precision": mean(precisions),
+        "mean_total_latency_ms": mean(latencies),
         "category_count": dict(sorted(categories.items())),
     }
 
@@ -75,7 +81,10 @@ def summarize_by_category(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "n": len(items),
                 "mean_f_score": mean(score_values(items, "f_score")),
                 "mean_r_score": mean(score_values(items, "r_score")),
+                "mean_s_score": mean(score_values(items, "s_score")),
                 "mean_retrieval_keyword_hit": mean(score_values(items, "retrieval_keyword_hit")),
+                "mean_context_precision": mean(score_values(items, "context_precision")),
+                "mean_total_latency_ms": mean(score_values(items, "total_latency_ms")),
             }
         )
     return summary_rows
@@ -84,12 +93,17 @@ def summarize_by_category(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def failure_score(row: dict[str, Any]) -> float:
     f_score = as_number(row.get("f_score"))
     r_score = as_number(row.get("r_score"))
+    s_score = as_number(row.get("s_score"))
     hit = as_number(row.get("retrieval_keyword_hit"))
+    precision = as_number(row.get("context_precision"))
     total = 0.0
     total += f_score if f_score is not None else 5.0
     total += r_score if r_score is not None else 5.0
+    total += s_score if s_score is not None else 5.0
     if hit == 0.0:
         total -= 2.0
+    if precision == 0.0:
+        total -= 1.0
     return total
 
 
@@ -98,8 +112,16 @@ def failure_rows(rows: list[dict[str, Any]], top_n: int) -> list[dict[str, Any]]
     for row in rows:
         f_score = as_number(row.get("f_score"))
         r_score = as_number(row.get("r_score"))
+        s_score = as_number(row.get("s_score"))
         hit = as_number(row.get("retrieval_keyword_hit"))
-        if (f_score is not None and f_score < 4) or (r_score is not None and r_score < 4) or hit == 0.0:
+        precision = as_number(row.get("context_precision"))
+        if (
+            (f_score is not None and f_score < 4)
+            or (r_score is not None and r_score < 4)
+            or (s_score is not None and s_score < 4)
+            or hit == 0.0
+            or precision == 0.0
+        ):
             candidates.append(row)
     return sorted(candidates, key=failure_score)[:top_n]
 
@@ -118,14 +140,17 @@ def source_ids(row: dict[str, Any]) -> str:
 def write_failures_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
-        "category",
-        "f_score",
-        "r_score",
-        "retrieval_keyword_hit",
-        "question",
-        "expected_answer",
-        "answer",
-        "source_ids",
+        "질문 유형",
+        "답변 정확도",
+        "질문 이해도",
+        "종합 능력",
+        "검색 성공",
+        "문맥 정밀도",
+        "응답 시간(ms)",
+        "질문",
+        "기대 답변",
+        "모델 답변",
+        "근거 청크",
     ]
     with path.open("w", encoding="utf-8-sig", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
@@ -133,14 +158,17 @@ def write_failures_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         for row in rows:
             writer.writerow(
                 {
-                    "category": row_category(row),
-                    "f_score": row.get("f_score"),
-                    "r_score": row.get("r_score"),
-                    "retrieval_keyword_hit": row.get("retrieval_keyword_hit"),
-                    "question": row.get("question", ""),
-                    "expected_answer": row.get("expected_answer", ""),
-                    "answer": row.get("answer", ""),
-                    "source_ids": source_ids(row),
+                    "질문 유형": row_category(row),
+                    "답변 정확도": row.get("f_score"),
+                    "질문 이해도": row.get("r_score"),
+                    "종합 능력": row.get("s_score"),
+                    "검색 성공": row.get("retrieval_keyword_hit"),
+                    "문맥 정밀도": row.get("context_precision"),
+                    "응답 시간(ms)": row.get("total_latency_ms"),
+                    "질문": row.get("question", ""),
+                    "기대 답변": row.get("expected_answer", ""),
+                    "모델 답변": row.get("answer", ""),
+                    "근거 청크": source_ids(row),
                 }
             )
 
@@ -194,31 +222,64 @@ def render_html(rows: list[dict[str, Any]], failures: list[dict[str, Any]]) -> s
         [(row["category"], row["mean_r_score"]) for row in by_category],
         max_value=5.0,
     )
+    synthesis_chart = bar_svg(
+        [(row["category"], row["mean_s_score"]) for row in by_category],
+        max_value=5.0,
+    )
     hit_chart = bar_svg(
         [(row["category"], row["mean_retrieval_keyword_hit"]) for row in by_category],
         max_value=1.0,
     )
+    precision_chart = bar_svg(
+        [(row["category"], row["mean_context_precision"]) for row in by_category],
+        max_value=1.0,
+    )
     category_table = table_html(
-        ["category", "n", "mean_f_score", "mean_r_score", "mean_retrieval_keyword_hit"],
+        [
+            "질문 유형",
+            "질문 수",
+            "평균 답변 정확도",
+            "평균 질문 이해도",
+            "평균 종합 능력",
+            "평균 문서 검색 성공률",
+            "평균 문맥 정밀도",
+            "평균 응답 시간(ms)",
+        ],
         [
             [
                 row["category"],
                 row["n"],
                 fmt(row["mean_f_score"]),
                 fmt(row["mean_r_score"]),
+                fmt(row["mean_s_score"]),
                 fmt(row["mean_retrieval_keyword_hit"]),
+                fmt(row["mean_context_precision"]),
+                fmt(row["mean_total_latency_ms"]),
             ]
             for row in by_category
         ],
     )
     failure_table = table_html(
-        ["category", "f_score", "r_score", "hit", "question", "source_ids"],
+        [
+            "질문 유형",
+            "답변 정확도",
+            "질문 이해도",
+            "종합 능력",
+            "검색 성공",
+            "문맥 정밀도",
+            "응답 시간(ms)",
+            "질문",
+            "근거 청크",
+        ],
         [
             [
                 row_category(row),
                 row.get("f_score", "-"),
                 row.get("r_score", "-"),
+                row.get("s_score", "-"),
                 row.get("retrieval_keyword_hit", "-"),
+                row.get("context_precision", "-"),
+                row.get("total_latency_ms", "-"),
                 str(row.get("question", ""))[:140],
                 source_ids(row),
             ]
@@ -228,6 +289,7 @@ def render_html(rows: list[dict[str, Any]], failures: list[dict[str, Any]]) -> s
     raw_summary = html.escape(json.dumps(summary, ensure_ascii=False, indent=2))
     f_hist = histogram_svg(score_values(rows, "f_score"))
     r_hist = histogram_svg(score_values(rows, "r_score"))
+    s_hist = histogram_svg(score_values(rows, "s_score"))
 
     return f"""<!doctype html>
     <html lang="ko">
@@ -237,7 +299,7 @@ def render_html(rows: list[dict[str, Any]], failures: list[dict[str, Any]]) -> s
     <style>
     body {{ font-family: Arial, "Malgun Gothic", sans-serif; margin: 32px; color: #222; }}
     h1, h2 {{ margin-top: 28px; }}
-    .cards {{ display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 12px; }}
+    .cards {{ display: grid; grid-template-columns: repeat(6, minmax(130px, 1fr)); gap: 12px; }}
     .card {{ border: 1px solid #ddd; border-radius: 10px; padding: 14px; background: #fafafa; }}
     .metric {{ font-size: 26px; font-weight: 700; margin-top: 8px; }}
     table {{ border-collapse: collapse; width: 100%; margin-top: 12px; }}
@@ -255,7 +317,9 @@ def render_html(rows: list[dict[str, Any]], failures: list[dict[str, Any]]) -> s
     <div class="card"><div>전체 질문 수</div><div class="metric">{summary["n"]}</div></div>
     <div class="card"><div>평균 답변 정확도</div><div class="metric">{fmt(summary["mean_f_score"])}</div></div>
     <div class="card"><div>평균 질문 이해도</div><div class="metric">{fmt(summary["mean_r_score"])}</div></div>
+    <div class="card"><div>평균 종합 능력</div><div class="metric">{fmt(summary["mean_s_score"])}</div></div>
     <div class="card"><div>평균 문서 검색 성공률</div><div class="metric">{fmt(summary["mean_retrieval_keyword_hit"])}</div></div>
+    <div class="card"><div>평균 응답 시간(ms)</div><div class="metric">{fmt(summary["mean_total_latency_ms"])}</div></div>
     </div>
     <h2>질문 유형별 요약</h2>
     {category_table}
@@ -263,12 +327,18 @@ def render_html(rows: list[dict[str, Any]], failures: list[dict[str, Any]]) -> s
     {category_chart}
     <h2>질문 유형별 질문 이해도</h2>
     {relevance_chart}
+    <h2>질문 유형별 종합 능력</h2>
+    {synthesis_chart}
     <h2>질문 유형별 정보 검색 성능</h2>
     {hit_chart}
+    <h2>질문 유형별 문맥 정밀도</h2>
+    {precision_chart}
     <h2>답변 정확도 점수 분포</h2>
     {f_hist}
     <h2>질문 이해도 점수 분포</h2>
     {r_hist}
+    <h2>종합 능력 점수 분포</h2>
+    {s_hist}
     <h2>낮은 점수 또는 검색 실패 사례</h2>
     {failure_table}
     <h2>원본 요약 데이터</h2>
