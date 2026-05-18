@@ -256,7 +256,7 @@ def run_pipeline(
     force_real: bool,
     group_size: int = 8,
     debug_headings: bool = True,
-    dump_metadata_sample: bool = True,
+    dump_metadata_sample: bool = False,
     dump_limit: int = 20,
 ) -> None:
     from pathlib import Path
@@ -438,9 +438,9 @@ def main() -> None:
     pipeline_parser.add_argument("--group-size", type=int, default=8, help="Table row group size for parser")
     pipeline_parser.add_argument("--no-debug-headings", action="store_true", help="Skip heading debug JSONL")
     pipeline_parser.add_argument(
-        "--no-dump-metadata-sample",
+        "--dump-metadata-sample",
         action="store_true",
-        help="Skip writing Chroma metadata sample JSON",
+        help="Write Chroma metadata sample JSON (disabled by default)",
     )
     pipeline_parser.add_argument(
         "--dump-limit",
@@ -520,7 +520,7 @@ def main() -> None:
             force_real=args.force_real,
             group_size=args.group_size,
             debug_headings=not args.no_debug_headings,
-            dump_metadata_sample=not args.no_dump_metadata_sample,
+            dump_metadata_sample=args.dump_metadata_sample,
             dump_limit=args.dump_limit,
         )
 
