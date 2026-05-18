@@ -1,5 +1,5 @@
-{"question": "BIFF&ACFM 온라인서비스 재개발 사업의 총 예산은 얼마인가요?", "answer": "사업예산은 부가가치세를 포함하여 금243,000,000원(금이억사천삼백만 원)입니다."}
-{"question": "이번 사업의 전체 수행 기간은 언제까지입니까?", "answer": "계약체결일부터 2025년 05월 31일까지입니다."}
-{"question": "입찰 방식과 계약 방법이 어떻게 되나요?", "answer": "입찰 방식은 지역 제한이 있는 제한 경쟁입찰이며, 계약 방법은 협상에 의한 계약입니다."}
-{"question": "입찰 담합 등 불공정행위를 주도한 자는 향후 몇 년간 입찰 참가자격이 제한되나요?", "answer": "담합을 주도한 자는 입찰참가자격제한 처분을 받는 날부터 2년 동안 참가하지 못합니다."}
-{"question": "이 사업의 유지보수 인력 구성에 대한 인건비 산출 근거를 알려줘.", "answer": "제시된 문서(biff.hwp)의 내용에는 인건비 산출 근거나 유지보수 인력 구성에 대한 상세 수치가 포함되어 있지 않아 답변이 어렵습니다."}
+{"question": "예시 사업의 총 예산은 얼마인가요?", "category": "budget", "doc_id": "example_doc_001", "expected_answer": "문서에 명시된 총 예산을 답변합니다.", "ground_truth_keywords": ["총 예산", "부가가치세", "사업예산"], "difficulty": "easy"}
+{"question": "예시 사업의 전체 수행 기간은 언제까지인가요?", "category": "schedule", "doc_id": "example_doc_001", "expected_answer": "문서에 명시된 계약 시작일과 종료일을 답변합니다.", "ground_truth_keywords": ["계약체결일", "수행 기간", "완료일"], "difficulty": "easy"}
+{"question": "예시 사업의 입찰 방식과 계약 방법을 알려주세요.", "category": "contract", "doc_id": "example_doc_001", "expected_answer": "문서에 명시된 입찰 방식과 계약 방법을 함께 답변합니다.", "ground_truth_keywords": ["입찰 방식", "계약 방법", "협상"], "difficulty": "medium"}
+{"question": "예시 사업의 주요 과업 범위를 항목별로 정리해 주세요.", "category": "scope_summary", "doc_id": "example_doc_001", "expected_answer": "문서에 근거해 주요 과업 범위를 요약합니다.", "ground_truth_keywords": ["과업", "범위", "요구사항"], "difficulty": "medium"}
+{"question": "문서에 없는 내용이면 모른다고 답하세요. 예시 사업의 2030년 해외 매출 목표는 얼마인가요?", "category": "unanswerable", "doc_id": "example_doc_001", "expected_answer": "문서에서 확인되지 않는다고 답변합니다.", "ground_truth_keywords": [], "difficulty": "hard"}
