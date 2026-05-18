@@ -111,6 +111,16 @@ python -m src.cli run-pipeline \
   --output-dir "data/v2"
 ```
 
+메타데이터 샘플 저장이 필요한 경우:
+
+```bash
+python -m src.cli run-pipeline \
+  --input "data/raw/(사)부산국제영화제_2024년 BIFF & ACFM 온라인서비스 재개발 및 행사지원시.hwp" \
+  --output-dir "data/v2" \
+  --dump-metadata-sample \
+  --dump-limit 20
+```
+
 기본 동작:
 - 출력은 `data/v2/<sanitize된_파일명>/` 하위로 문서별 분리 저장됩니다.
 - `--doc-id`는 선택 옵션이며, 폴더명에는 영향이 없고 Chroma 메타데이터의 `doc_id`에만 반영됩니다.
