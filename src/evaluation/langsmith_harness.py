@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,7 @@ from src.config import load_config
 from src.engine.rag import RagEngine
 from src.engine.vector_store import ChromaVectorStore
 from src.evaluation.llm_judge import judge_faithfulness_relevance, parse_judge_scores
-from src.evaluation.retrieval import evaluate_retrieval
+from src.evaluation.retrieval import evaluate_context_precision, evaluate_retrieval
 from src.utils.jsonl import read_jsonl, write_jsonl
 
 
@@ -41,12 +42,13 @@ def _traced_judge(
     client: Client | None,
 ) -> dict[str, int | str]:
     out = judge_faithfulness_relevance(query, contexts, answer, model=judge_model)
-    f_score, r_score, _err = parse_judge_scores(out)
+    f_score, r_score, s_score, _err = parse_judge_scores(out)
     _feedback_scores_safe(
         client,
         {
             "faithfulness_0_1": f_score / 5.0,
             "relevance_0_1": r_score / 5.0,
+            "synthesis_0_1": s_score / 5.0,
         },
     )
     return out
@@ -67,12 +69,16 @@ def _eval_one_row(
         keywords = None
     keyword_list = [str(k) for k in keywords] if keywords else []
 
+    start = time.perf_counter()
     result = engine.answer(question, include_source_text=True)
+    total_latency_ms = round((time.perf_counter() - start) * 1000, 2)
     contexts: list[Any] = list(result.get("sources") or [])
 
     retrieval_hit: float | None = None
+    context_precision: float | None = None
     if keyword_list:
         retrieval_hit = evaluate_retrieval(contexts, keyword_list)
+        context_precision = evaluate_context_precision(contexts, keyword_list)
 
     judge_payload: dict[str, int | str] = {}
     if run_llm_judge:
@@ -84,15 +90,18 @@ def _eval_one_row(
             client=langsmith_client,
         )
 
-    f_score, r_score, judge_err = parse_judge_scores(judge_payload)
+    f_score, r_score, s_score, judge_err = parse_judge_scores(judge_payload)
 
     merged: dict[str, Any] = {
         **row,
         "answer": result.get("answer"),
         "sources": result.get("sources"),
         "retrieval_keyword_hit": retrieval_hit,
+        "context_precision": context_precision,
         "f_score": f_score if run_llm_judge else None,
         "r_score": r_score if run_llm_judge else None,
+        "s_score": s_score if run_llm_judge else None,
+        "total_latency_ms": total_latency_ms,
     }
     if judge_err:
         merged["judge_error"] = judge_err
@@ -103,10 +112,13 @@ def _eval_one_row(
         langsmith_client,
         {
             **({"retrieval_keyword_hit": retrieval_hit} if retrieval_hit is not None else {}),
+            **({"context_precision": context_precision} if context_precision is not None else {}),
+            "total_latency_ms": total_latency_ms,
             **(
                 {
                     "faithfulness_0_1": f_score / 5.0,
                     "relevance_0_1": r_score / 5.0,
+                    "synthesis_0_1": s_score / 5.0,
                 }
                 if run_llm_judge
                 else {}
@@ -195,11 +207,21 @@ def run_eval_harness(
 
 def summarize_harness_results(results: list[dict[str, Any]]) -> dict[str, Any]:
     hits = [r["retrieval_keyword_hit"] for r in results if r.get("retrieval_keyword_hit") is not None]
+    precisions = [r["context_precision"] for r in results if r.get("context_precision") is not None]
     fs = [r["f_score"] for r in results if isinstance(r.get("f_score"), int)]
     rs = [r["r_score"] for r in results if isinstance(r.get("r_score"), int)]
+    ss = [r["s_score"] for r in results if isinstance(r.get("s_score"), int)]
+    latencies = [
+        r["total_latency_ms"]
+        for r in results
+        if isinstance(r.get("total_latency_ms"), (int, float))
+    ]
     return {
         "n": len(results),
         "mean_retrieval_keyword_hit": (sum(hits) / len(hits)) if hits else None,
+        "mean_context_precision": (sum(precisions) / len(precisions)) if precisions else None,
         "mean_f_score": (sum(fs) / len(fs)) if fs else None,
         "mean_r_score": (sum(rs) / len(rs)) if rs else None,
+        "mean_s_score": (sum(ss) / len(ss)) if ss else None,
+        "mean_total_latency_ms": (sum(latencies) / len(latencies)) if latencies else None,
     }
