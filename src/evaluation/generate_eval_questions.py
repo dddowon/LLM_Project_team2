@@ -119,7 +119,9 @@ def build_question_generation_prompt(
 
     총 {questions_per_doc}개의 질문을 생성하세요.
     출력은 반드시 {{"questions": [...]}} 형태의 JSON 객체로만 작성하세요.
-    각 항목은 question, category, doc_id, expected_answer, ground_truth_keywords, difficulty 필드를 포함해야 합니다.
+    각 항목은 question, category, question_type, doc_id, expected_answer, ground_truth_keywords, difficulty 필드를 포함해야 합니다.
+    category는 문서/업무 영역을 나타내며, 예: 기능 요구사항, 보안 요구사항, 사이트 운영 현황, 예산, 일정, 입찰 및 계약.
+    question_type은 질문 성격을 나타내며, fact, summary, comparison, follow_up, requirement_detail, unanswerable 중 하나를 사용하세요.
     ground_truth_keywords는 위 청크 텍스트에 실제로 등장하는 단어 또는 숫자만 사용하세요.
     question은 실제 사용자가 RFP 문서를 검색하며 물어볼 법한 자연스러운 한국어 문장으로 작성하세요.
     expected_answer는 정답 전체가 아니라 검수자가 확인할 수 있는 핵심 정답 요지로 작성하세요.
@@ -192,6 +194,7 @@ def parse_question_response(content: str) -> list[dict[str, Any]]:
             {
                 "question": question,
                 "category": str(item.get("category", "")).strip(),
+                "question_type": str(item.get("question_type", "")).strip(),
                 "doc_id": str(item.get("doc_id", "")).strip(),
                 "expected_answer": str(item.get("expected_answer", "")).strip(),
                 "ground_truth_keywords": [str(keyword) for keyword in keywords],
