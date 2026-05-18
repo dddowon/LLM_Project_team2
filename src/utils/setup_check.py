@@ -17,7 +17,7 @@ class CheckResult:
 
 
 REQUIRED_MODULES = {
-    "faiss": "faiss-cpu",
+    "chromadb": "chromadb",
     "numpy": "numpy",
     "openai": "openai",
     "pandas": "pandas",
@@ -87,7 +87,7 @@ def _check_paths(config_path: str) -> list[CheckResult]:
     results.append(
         CheckResult(
             name="Vector DB provider",
-            ok=config.vector_store.provider.lower() == "faiss",
+            ok=config.vector_store.provider.lower() == "chroma",
             detail=(
                 f"{config.vector_store.provider} / {config.vector_store.index_type} / "
                 f"{config.vector_store.distance_metric}"
@@ -118,8 +118,8 @@ def _check_paths(config_path: str) -> list[CheckResult]:
     )
     results.append(
         CheckResult(
-            name="FAISS index directory",
-            ok=(index_dir / "index.faiss").exists() and (index_dir / "chunks.json").exists(),
+            name="Chroma index directory",
+            ok=(index_dir / "chroma.sqlite3").exists() and (index_dir / "chunks.json").exists(),
             detail=str(index_dir) if index_dir.exists() else f"{index_dir} will be created by ingest",
             required=False,
         )

@@ -4,7 +4,6 @@ from typing import Any
 
 
 def evaluate_retrieval(contexts: list[Any], ground_truth_keywords: list[str]) -> float:
-    """Return 1.0 if any keyword appears in retrieved context text, else 0.0."""
     if not ground_truth_keywords:
         return 0.0
     extracted: list[str] = []

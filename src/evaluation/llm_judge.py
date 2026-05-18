@@ -24,7 +24,6 @@ def judge_faithfulness_relevance(
     *,
     model: str = "gpt-4o",
 ) -> dict[str, int | str]:
-    """LLM-as-judge: faithfulness (f_score) and answer relevance (r_score), each 0–5."""
     client = OpenAI()
     context_text = _contexts_to_plain_text(contexts)
 
@@ -54,7 +53,7 @@ def judge_faithfulness_relevance(
             "f_score": max(0, min(5, f_score)),
             "r_score": max(0, min(5, r_score)),
         }
-    except Exception as exc:  # noqa: BLE001 — judge must not break the harness
+    except Exception as exc:
         return {"f_score": 0, "r_score": 0, "judge_error": str(exc)}
 
 
