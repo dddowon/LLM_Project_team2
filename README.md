@@ -109,12 +109,12 @@ pip install -e ".[hwp]"
 python -m src.cli run-pipeline \
   --input "data/raw/(사)부산국제영화제_2024년 BIFF & ACFM 온라인서비스 재개발 및 행사지원시.hwp" \
   --output-dir "data/v2" \
-  --doc-id "biff_2024" \
   --dump-limit 20
 ```
 
 기본 동작:
 - 출력은 `data/v2/<sanitize된_파일명>/` 하위로 문서별 분리 저장됩니다.
+- `--doc-id`는 선택 옵션이며, 폴더명에는 영향이 없고 Chroma 메타데이터의 `doc_id`에만 반영됩니다.
 - Chroma 메타데이터 샘플 JSON이 자동 저장됩니다.
   - 파일명: `<원본파일명>_chroma_metadata_sample.json`
   - 개수: 기본 20개 (`--dump-limit`으로 변경)
@@ -140,6 +140,8 @@ python -m src.cli run-pipeline \
 여기서 `<doc_dir>`는 `data/v2/<sanitize된_파일명>/`입니다.
 
 ### 단계별 실행
+
+단계별 실행은 디버깅 또는 중간 산출물(prechunk/chunks/embedded) 확인이 필요한 경우에만 사용하고, 일반 실행은 원클릭 `run-pipeline`을 권장합니다.
 
 ```bash
 python -m src.cli parse-hwp \
