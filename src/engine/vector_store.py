@@ -38,14 +38,17 @@ class ChromaVectorStore:
 
         ids = [chunk.chunk_id for chunk in chunks]
         documents = [chunk.text for chunk in chunks]
-        metadatas = [
-            {
-                "chunk_id": chunk.chunk_id,
-                "doc_id": chunk.doc_id,
-                "row_idx": idx,
-            }
-            for idx, chunk in enumerate(chunks)
-        ]
+        metadatas = []
+        for idx, chunk in enumerate(chunks):
+            metadata = dict(chunk.metadata or {})
+            metadata.update(
+                {
+                    "chunk_id": chunk.chunk_id,
+                    "doc_id": chunk.doc_id,
+                    "row_idx": idx,
+                }
+            )
+            metadatas.append(metadata)
 
         collection.add(
             ids=ids,
@@ -88,17 +91,22 @@ class ChromaVectorStore:
             metadata={"hnsw:space": "cosine"},
         )
 
-        collection.add(
-            ids=[chunk.chunk_id for chunk in self.chunks],
-            documents=[chunk.text for chunk in self.chunks],
-            metadatas=[
+        metadatas = []
+        for idx, chunk in enumerate(self.chunks):
+            metadata = dict(chunk.metadata or {})
+            metadata.update(
                 {
                     "chunk_id": chunk.chunk_id,
                     "doc_id": chunk.doc_id,
                     "row_idx": idx,
                 }
-                for idx, chunk in enumerate(self.chunks)
-            ],
+            )
+            metadatas.append(metadata)
+
+        collection.add(
+            ids=[chunk.chunk_id for chunk in self.chunks],
+            documents=[chunk.text for chunk in self.chunks],
+            metadatas=metadatas,
             embeddings=self.embeddings,
         )
 

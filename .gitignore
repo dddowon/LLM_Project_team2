@@ -74,6 +74,13 @@ data/**/vector_store/
 vector_store/
 faiss_index/
 
+# Pipeline outputs under data/v2 (document-scoped folders)
+data/v2/*/chroma_index/
+data/v2/*/*_embedded.jsonl
+data/v2/*/*_chunks_sample.jsonl
+data/v2/*/*_chroma_metadata_sample.json
+data/v2/*/*_heading_debug.jsonl
+
 # Common vector DB / index files
 *.faiss
 *.index
@@ -114,4 +121,3 @@ __pycache__/
 .mypy_cache/
 .venv/
 venv/
-

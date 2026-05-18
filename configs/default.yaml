@@ -2,8 +2,8 @@ project:
   name: bidmate-rag
 
 paths:
-  raw_data_dir: data/v1/raw
-  metadata_csv: data/v1/data_list.csv
+  raw_data_dir: data/raw
+  metadata_csv: data/raw/data_list.csv
   processed_dir: data/v2
   index_dir: checkpoints/chroma_openai
   evaluation_set: data/v2/eval_questions.example.jsonl
