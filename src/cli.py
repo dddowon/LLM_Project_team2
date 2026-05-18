@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import re
 import sys
 
 
@@ -247,25 +249,35 @@ def convert_embedding_input(input_path: str, output_path: str, doc_id: str | Non
 def run_pipeline(
     input_path: str,
     output_dir: str,
-    index_dir: str,
+    index_dir: str | None,
     doc_id: str | None,
     model: str,
     batch_size: int,
     force_real: bool,
     group_size: int = 8,
     debug_headings: bool = True,
+    dump_metadata_sample: bool = True,
+    dump_limit: int = 20,
 ) -> None:
     from pathlib import Path
+    import chromadb
 
     input_file = Path(input_path)
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     stem = input_file.stem
-    prechunk = out_dir / f"{stem}_prechunk.jsonl"
-    heading_debug = out_dir / f"{stem}_heading_debug.jsonl"
-    chunks = out_dir / f"{stem}_chunks.jsonl"
-    embedded = out_dir / f"{stem}_embedded.jsonl"
+    safe_stem = re.sub(r"[\\/:*?\"<>|&\s]+", "_", stem).strip("._")
+    safe_stem = re.sub(r"_+", "_", safe_stem) or "document"
+    doc_dir = out_dir / safe_stem
+    doc_dir.mkdir(parents=True, exist_ok=True)
+
+    prechunk = doc_dir / f"{stem}_prechunk.jsonl"
+    heading_debug = doc_dir / f"{stem}_heading_debug.jsonl"
+    chunks = doc_dir / f"{stem}_chunks.jsonl"
+    embedded = doc_dir / f"{stem}_embedded.jsonl"
+    metadata_sample = doc_dir / f"{stem}_chroma_metadata_sample.json"
+    resolved_index_dir = index_dir or str(doc_dir / "chroma_index")
 
     print("[1/4] parse-hwp")
     parse_hwp(
@@ -287,10 +299,31 @@ def run_pipeline(
         force_real=force_real,
     )
     print("[4/4] build-chroma")
-    build_chroma_index(input_path=str(embedded), index_dir=index_dir, doc_id=doc_id)
+    build_chroma_index(input_path=str(embedded), index_dir=resolved_index_dir, doc_id=doc_id)
+    if dump_metadata_sample:
+        client = chromadb.PersistentClient(path=str(resolved_index_dir))
+        col = client.get_collection("rfp_chunks")
+        result = col.get(limit=max(1, dump_limit), include=["metadatas"])
+        keys = [
+            "file_name",
+            "section_path_text",
+            "section_type",
+            "table_type",
+            "table_id",
+            "row_range",
+            "chunk_id",
+            "doc_id",
+            "row_idx",
+        ]
+        rows = [{k: m.get(k) for k in keys} for m in result.get("metadatas", [])]
+        metadata_sample.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+
     print("pipeline_done")
+    print(f"doc_output_dir: {doc_dir}")
     print(f"embedded_output: {embedded}")
-    print(f"index_dir: {index_dir}")
+    print(f"index_dir: {resolved_index_dir}")
+    if dump_metadata_sample:
+        print(f"metadata_sample: {metadata_sample}")
 
 
 def main() -> None:
@@ -404,6 +437,17 @@ def main() -> None:
     pipeline_parser.add_argument("--force-real", action="store_true", help="Fail if OPENAI_API_KEY is missing")
     pipeline_parser.add_argument("--group-size", type=int, default=8, help="Table row group size for parser")
     pipeline_parser.add_argument("--no-debug-headings", action="store_true", help="Skip heading debug JSONL")
+    pipeline_parser.add_argument(
+        "--no-dump-metadata-sample",
+        action="store_true",
+        help="Skip writing Chroma metadata sample JSON",
+    )
+    pipeline_parser.add_argument(
+        "--dump-limit",
+        type=int,
+        default=20,
+        help="Number of metadata rows to dump into sample JSON",
+    )
 
     args = parser.parse_args()
     if args.command == "ingest":
@@ -469,13 +513,15 @@ def main() -> None:
         run_pipeline(
             input_path=args.input,
             output_dir=args.output_dir,
-            index_dir=str(resolve_index_dir(args.config, args.index_dir)),
+            index_dir=str(resolve_index_dir(args.config, args.index_dir)) if args.index_dir else None,
             doc_id=args.doc_id,
             model=args.model,
             batch_size=args.batch_size,
             force_real=args.force_real,
             group_size=args.group_size,
             debug_headings=not args.no_debug_headings,
+            dump_metadata_sample=not args.no_dump_metadata_sample,
+            dump_limit=args.dump_limit,
         )
 
 
