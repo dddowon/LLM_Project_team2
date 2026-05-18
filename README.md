@@ -28,7 +28,7 @@
 │   │   ├── raw/             # PDF/HWP 파일 배치
 │   │   └── data_list.csv    # 제공 메타데이터
 │   └── v2/                  # 평가 질문셋 등 2차 가공 데이터
-├── checkpoints/             # FAISS 인덱스, git 업로드 금지
+├── checkpoints/             # Chroma 인덱스, git 업로드 금지
 ├── outputs/                 # 평가 결과, git 업로드 금지
 ├── src/
 │   ├── dataset/             # 문서/메타데이터 로더
@@ -108,7 +108,7 @@ pip install -e ".[hwp]"
 
 ```bash
 python -m src.cli run-pipeline \
-  --input "data/v2/(사)부산국제영화제_2024년 BIFF & ACFM 온라인서비스 재개발 및 행사지원시.hwp" \
+  --input "data/v1/raw/(사)부산국제영화제_2024년 BIFF & ACFM 온라인서비스 재개발 및 행사지원시.hwp" \
   --output-dir "data/v2" \
   --doc-id "biff_2024"
 ```
@@ -132,7 +132,7 @@ python -m src.cli run-pipeline \
 
 ```bash
 python -m src.cli parse-hwp \
-  --input "data/v2/<input>.hwp" \
+  --input "data/v1/raw/<input>.hwp" \
   --output "data/v2/<name>_prechunk.jsonl" \
   --debug-headings "data/v2/<name>_heading_debug.jsonl"
 
@@ -160,6 +160,7 @@ python -m src.cli build-chroma \
 - `metadata` (object)
 
 출력은 입력 row를 유지하고 `embedding`, `metadata.embedding_source`를 추가합니다.
+`metadata`는 필수이며 `dict` 타입이어야 합니다. 누락되거나 타입이 다르면 `ValueError`를 발생시킵니다.
 
 `OPENAI_API_KEY`가 없으면 `mock` 임베딩으로 동작하고, 실 API 강제 검증은 `--force-real` 옵션을 사용합니다.
 

@@ -47,7 +47,7 @@ def embed_prechunked_jsonl(
     output_rows = []
     for row, embedding in zip(rows, embeddings, strict=False):
         out = dict(row)
-        metadata = dict(out.get("metadata", {})) if isinstance(out.get("metadata"), dict) else {}
+        metadata = dict(out["metadata"])
         metadata["embedding_source"] = embedding_source
         out["metadata"] = metadata
         out["embedding"] = embedding
@@ -116,10 +116,10 @@ def build_chroma_from_embedded_jsonl(
 
 def _validate_chunk_rows(rows: list[dict[str, Any]]) -> None:
     for idx, row in enumerate(rows):
-        for key in ("chunk_id", "chunk_type", "chunk_text"):
+        for key in ("chunk_id", "chunk_type", "chunk_text", "metadata"):
             if key not in row:
                 raise ValueError(f"{idx}번째 row에 필수 필드가 없습니다: {key}")
-        if "metadata" in row and not isinstance(row["metadata"], dict):
+        if not isinstance(row["metadata"], dict):
             raise ValueError(f"{idx}번째 row의 metadata는 dict 여야 합니다.")
 
 
