@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "chromadb>=0.5.0",
-    "langsmith>=0.3.0",
+    "mlflow>=2.14.0",
     "numpy>=1.26.0",
     "openai>=1.99.0",
     "pandas>=2.2.0",
@@ -21,6 +21,9 @@ dependencies = [
 dev = [
     "pytest>=8.2.0",
     "ruff>=0.5.0",
+]
+langsmith = [
+    "langsmith>=0.3.0",
 ]
 hwp = [
     "pyhwp>=0.1b15",
