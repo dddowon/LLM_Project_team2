@@ -237,6 +237,55 @@ def chunk_jsonl(
     print(f"sample_output: {sample}")
 
 
+def sampling(
+    input_path: str,
+    output_path: str,
+    quotas: str | None = None,
+    appendix_mode: str = "auto",
+    min_per_doc: int = 9,
+    fallback_body: int = 0,
+    min_chars: int = 80,
+    limit_docs: int | None = None,
+    add_sampling_metadata: bool = False,
+) -> None:
+    from pathlib import Path
+
+    from src.sampling.sample_eval_chunks import (
+        parse_quota_config,
+        read_jsonl,
+        sample_rows,
+        write_jsonl,
+    )
+
+    quota_config = parse_quota_config(quotas)
+    rows = read_jsonl(Path(input_path))
+    sampled_rows, summary = sample_rows(
+        rows,
+        quotas=quota_config,
+        appendix_mode=appendix_mode,
+        min_chars=min_chars,
+        min_per_doc=min_per_doc,
+        fallback_body=fallback_body,
+        limit_docs=limit_docs,
+        add_sampling_metadata=add_sampling_metadata,
+    )
+    write_jsonl(Path(output_path), sampled_rows)
+
+    print(f"input_rows: {summary['input_rows']}")
+    print(f"candidate_rows: {summary['candidate_rows']}")
+    print(f"documents: {summary['documents']}")
+    print(f"sampled_rows: {summary['sampled_rows']}")
+    print(
+        "doc_samples: "
+        f"min={summary['min_doc_samples']} "
+        f"avg={summary['avg_doc_samples']} "
+        f"max={summary['max_doc_samples']}"
+    )
+    section_counts = json.dumps(summary["section_counts"], ensure_ascii=False, sort_keys=True)
+    print(f"section_counts: {section_counts}")
+    print(f"output: {output_path}")
+
+
 def convert_embedding_input(input_path: str, output_path: str, doc_id: str | None = None) -> None:
     from pathlib import Path
 
@@ -412,6 +461,64 @@ def main() -> None:
     chunk_parser.add_argument("--exclude-cover", action="store_true", help="Exclude cover_text records")
     chunk_parser.add_argument("--include-debug-metadata", action="store_true", help="Keep debug metadata")
 
+    sampling_parser = subparsers.add_parser(
+        "sampling",
+        help="Sample evaluation chunks from a slim RAG chunk JSONL",
+    )
+    sampling_parser.add_argument(
+        "--input",
+        default="eda/hwp_text_chunks_slim.jsonl",
+        help="Input slim chunk JSONL",
+    )
+    sampling_parser.add_argument(
+        "--output",
+        default="eda/eval_sample_chunks.jsonl",
+        help="Output sampled JSONL",
+    )
+    sampling_parser.add_argument(
+        "--quotas",
+        default=None,
+        help=(
+            "Comma-separated quota override. Example: "
+            "overview=1,requirements=4,evaluation=2,bid_contract=2,security=1,appendix_form=1"
+        ),
+    )
+    sampling_parser.add_argument(
+        "--appendix-mode",
+        choices=("auto", "always", "never"),
+        default="auto",
+        help="How to sample appendix_form chunks",
+    )
+    sampling_parser.add_argument(
+        "--min-per-doc",
+        type=int,
+        default=9,
+        help="Auto appendix/body fallback target; does not force duplicate chunks",
+    )
+    sampling_parser.add_argument(
+        "--fallback-body",
+        type=int,
+        default=0,
+        help="If a document is sparse, sample up to this many body chunks as fallback",
+    )
+    sampling_parser.add_argument(
+        "--min-chars",
+        type=int,
+        default=80,
+        help="Drop chunks shorter than this",
+    )
+    sampling_parser.add_argument(
+        "--limit-docs",
+        type=int,
+        default=None,
+        help="Debug only: first N documents",
+    )
+    sampling_parser.add_argument(
+        "--add-sampling-metadata",
+        action="store_true",
+        help="Add sample_strategy/sample_rank fields to metadata",
+    )
+
     convert_parser = subparsers.add_parser(
         "convert-embedding-input",
         help="Convert prechunk/chunk JSONL to embedding input JSONL",
@@ -506,6 +613,18 @@ def main() -> None:
             include_cover=not args.exclude_cover,
             include_toc=args.include_toc,
             include_debug_metadata=args.include_debug_metadata,
+        )
+    elif args.command == "sampling":
+        sampling(
+            input_path=args.input,
+            output_path=args.output,
+            quotas=args.quotas,
+            appendix_mode=args.appendix_mode,
+            min_per_doc=args.min_per_doc,
+            fallback_body=args.fallback_body,
+            min_chars=args.min_chars,
+            limit_docs=args.limit_docs,
+            add_sampling_metadata=args.add_sampling_metadata,
         )
     elif args.command == "convert-embedding-input":
         convert_embedding_input(input_path=args.input, output_path=args.output, doc_id=args.doc_id)
