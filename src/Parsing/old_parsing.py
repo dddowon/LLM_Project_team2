@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Parse HWP files into one prechunk JSONL only.
+"""Parse an HWP RFP into structured JSONL before chunking.
 
-Standalone parsing-only script. It does not import other local project .py files.
+The output is not final chunks. It is a pre-chunk representation:
 
-Output records are prechunk records:
-- cover_text
-- section_text
-- table
-- toc
+- section_text: text grouped by heading path
+- table: compact structured table representation
+- toc: table-of-contents/navigation table
+- cover_text: title/cover layout text
+
+Run this in the WSL virtualenv where rhwp-python is installed.
 """
 
 from __future__ import annotations
@@ -15,14 +16,13 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import sys
 from pathlib import Path
 from typing import Any
 
 try:
     import rhwp
     from rhwp.ir.nodes import ListItemBlock, ParagraphBlock, TableBlock
-except ImportError:  # pragma: no cover
+except ImportError as exc:  # pragma: no cover
     rhwp = None
 
     class ParagraphBlock:  # type: ignore[no-redef]
@@ -35,8 +35,6 @@ except ImportError:  # pragma: no cover
         pass
 
 
-DEFAULT_OUTPUT = Path("eda/hwp_prechunk_all.jsonl")
-
 BARE_SECTION_RE = re.compile(
     r"^(사업개요|사업목표|사업유형|사업추진계획|과업의\s*범위|과업의\s*내용|"
     r"과업의\s*일반사항|과업의\s*개요|요구사항\s*상세|공모\s*추진\s*일정|"
@@ -44,10 +42,12 @@ BARE_SECTION_RE = re.compile(
     r"일반사항|제안서의\s*효력|주관사업자\s*선정방식|평가항목\s*및\s*배점\s*한도|"
     r"제안서\s*규격\s*및\s*작성요령|유의사항)$"
 )
+
 REQUIREMENT_RE = re.compile(r"요구사항|요구\s*ID|SFR|SER|DAR|DIR|기능요구|보안요구", re.I)
 EVALUATION_RE = re.compile(r"평가|배점|점수|기술평가|가격평가|정량|정성|협상대상")
 SCHEDULE_RE = re.compile(r"20\d{2}년|기간|일정|월|착수|완료|추진")
 FORM_RE = re.compile(r"신청서|서약서|각서|기관명|대표자|주소|인감|사업자등록번호")
+
 ROMAN_TOKEN_RE = r"(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+|IX|IV|V(?:I{0,3})?|X|I{1,3})"
 ROMAN_RE = re.compile(rf"^{ROMAN_TOKEN_RE}[.)]?$")
 ROMAN_HEADING_RE = re.compile(rf"^({ROMAN_TOKEN_RE})(?:[.)]\s+|\s*/\s*|\s+)(.+)$")
@@ -69,7 +69,8 @@ def normalize_text(value: Any) -> str:
 
 def normalize_heading_text(value: Any) -> str:
     text = normalize_text(value)
-    return re.sub(r"붙\s*임", "붙임", text)
+    text = re.sub(r"붙\s*임", "붙임", text)
+    return text
 
 
 def block_text(block: Any) -> str:
@@ -115,6 +116,8 @@ def detect_heading(text: str) -> tuple[int, str] | None:
         title = normalize_text(title)
         if not title:
             return None
+        # Parenthesized numbers are often list items in these RFPs. Keep short
+        # title-like ones, but do not promote long explanatory sentences.
         if marker == ")" and len(title) > 55:
             return None
         if marker == "." and len(title) > 90:
@@ -144,6 +147,7 @@ def detect_heading(text: str) -> tuple[int, str] | None:
 
 
 def is_deferred_heading(text: str) -> bool:
+    """Return True for list-like headings that need the next block for context."""
     short = normalize_text(text)
     number_match = NUMBER_HEADING_RE.match(short)
     if number_match:
@@ -156,6 +160,7 @@ def is_deferred_heading(text: str) -> bool:
 
 
 def is_table_context_heading(text: str) -> bool:
+    """Return True for '가. 제목' style headings that can group following tables."""
     short = normalize_text(text)
     match = KOREAN_HEADING_RE.match(short)
     if not match:
@@ -170,7 +175,7 @@ def update_stack(stack: list[dict[str, Any]], level: int, heading: str) -> list[
     return kept
 
 
-def stack_section_path(stack: list[dict[str, Any]]) -> list[str]:
+def section_path(stack: list[dict[str, Any]]) -> list[str]:
     return [str(item["heading"]) for item in stack]
 
 
@@ -238,6 +243,7 @@ def compact_grid_lines(grid: list[list[str]], *, max_rows: int = 12) -> list[str
 
 
 def layout_heading_from_table(table: TableBlock, grid: list[list[str]]) -> tuple[int, str] | None:
+    """Treat small layout tables such as 'Ⅰ | 사업안내' as headings, not tables."""
     values: list[str] = []
     for row in grid:
         values.extend(unique_values(row))
@@ -263,6 +269,7 @@ def layout_heading_from_table(table: TableBlock, grid: list[list[str]]) -> tuple
         heading = normalize_text(f"{number} {' '.join(values[1:])}")
         if len(heading) <= 90:
             return 2, heading
+
     return None
 
 
@@ -326,8 +333,9 @@ def generic_rows(grid: list[list[str]], *, start_row: int = 0) -> list[dict[str,
     rows: list[dict[str, Any]] = []
     for row_index, row in enumerate(grid[start_row:], start=start_row):
         values = unique_values(row)
-        if values:
-            rows.append({"row_index": row_index, "text": " / ".join(values), "values": values})
+        if not values:
+            continue
+        rows.append({"row_index": row_index, "text": " / ".join(values), "values": values})
     return rows
 
 
@@ -335,21 +343,29 @@ def group_rows(rows: list[dict[str, Any]], *, group_size: int) -> list[dict[str,
     groups: list[dict[str, Any]] = []
     for start in range(0, len(rows), group_size):
         chunk = rows[start : start + group_size]
-        if chunk:
-            groups.append(
-                {
-                    "row_range": f"{chunk[0]['row_index']}-{chunk[-1]['row_index']}",
-                    "text": "\n".join(str(row["text"]) for row in chunk),
-                }
-            )
+        if not chunk:
+            continue
+        groups.append(
+            {
+                "row_range": f"{chunk[0]['row_index']}-{chunk[-1]['row_index']}",
+                "text": "\n".join(str(row["text"]) for row in chunk),
+            }
+        )
     return groups
 
 
 def table_payload(table: TableBlock, table_type: str, grid: list[list[str]], *, group_size: int) -> dict[str, Any]:
-    payload: dict[str, Any] = {"rows": table.rows, "cols": table.cols, "cell_count": len(table.cells)}
+    """Build compact table payload for pre-chunk JSONL."""
+    payload: dict[str, Any] = {
+        "rows": table.rows,
+        "cols": table.cols,
+        "cell_count": len(table.cells),
+    }
+
     if table_type == "toc_table":
         payload["items"] = generic_rows(grid)
         return payload
+
     if table_type in {"layout_table", "form_table", "nested_table"}:
         payload["summary_lines"] = compact_grid_lines(grid, max_rows=16)
         if table_type == "nested_table":
@@ -357,9 +373,11 @@ def table_payload(table: TableBlock, table_type: str, grid: list[list[str]], *, 
                 1 for cell in table.cells for inner in cell.blocks if isinstance(inner, TableBlock)
             )
         return payload
+
     if table_type in {"requirement_table", "evaluation_table"}:
         payload["rows_data"] = header_value_rows(grid)
         return payload
+
     if table_type == "schedule_table":
         payload["row_groups"] = group_rows(generic_rows(grid, start_row=2), group_size=group_size)
         return payload
@@ -372,7 +390,7 @@ def table_payload(table: TableBlock, table_type: str, grid: list[list[str]], *, 
     return payload
 
 
-def table_text_for_record(payload: dict[str, Any]) -> str:
+def table_text_for_record(table_type: str, payload: dict[str, Any]) -> str:
     if "rows_data" in payload:
         return "\n".join(row["text"] for row in payload["rows_data"][:20])
     if "row_groups" in payload:
@@ -381,28 +399,26 @@ def table_text_for_record(payload: dict[str, Any]) -> str:
         return "\n".join(item["text"] for item in payload["items"][:30])
     if "summary_lines" in payload:
         return "\n".join(payload["summary_lines"])
-    return ""
+    return table_type
 
 
 def new_base_record(source_file: str) -> dict[str, Any]:
-    return {"file_name": source_file}
+    return {
+        "file_name": source_file,
+    }
 
 
 def build_prechunk_records(
-    input_path: Path,
-    *,
-    group_size: int = 8,
-    debug_headings_path: Path | None = None,
+    input_path: Path, *, group_size: int = 8, debug_headings_path: Path | None = None
 ) -> list[dict[str, Any]]:
-    _ = debug_headings_path
     if rhwp is None:
         raise SystemExit(
-            "rhwp-python is required. In WSL, run this inside the venv where rhwp is installed."
+            "rhwp-python is required. In WSL, run: source venv/bin/activate && pip install rhwp-python"
         )
-
     doc = rhwp.parse(str(input_path))
     ir = doc.to_ir()
     source_file = input_path.name
+
     records: list[dict[str, Any]] = []
     stack: list[dict[str, Any]] = []
     text_buffer: list[str] = []
@@ -412,6 +428,19 @@ def build_prechunk_records(
     pending_major: str | None = None
     section_index = 0
     table_index = 0
+    debug_rows: list[dict[str, Any]] = []
+
+    def add_debug(action: str, text: str = "", **extra: Any) -> None:
+        if debug_headings_path is None:
+            return
+        debug_rows.append(
+            {
+                "action": action,
+                "text": text,
+                "section_path": section_path(stack),
+                **extra,
+            }
+        )
 
     def flush_text() -> None:
         nonlocal section_index, text_buffer
@@ -419,7 +448,7 @@ def build_prechunk_records(
         text_buffer = []
         if not normalize_text(text):
             return
-        path_items = stack_section_path(stack)
+        path_items = section_path(stack)
         section_index += 1
         record = new_base_record(source_file)
         record.update(
@@ -487,12 +516,14 @@ def build_prechunk_records(
                 flush_text()
                 clear_table_context()
                 pending_major = text.rstrip(".)")
+                add_debug("pending_major", text)
                 continue
             if pending_major and MAJOR_SECTION_TITLE_RE.match(text):
                 flush_pending_table_title_as_text()
                 flush_text()
                 clear_table_context()
                 stack = update_stack(stack, 1, normalize_text(f"{pending_major}. {text}"))
+                add_debug("major_heading", text)
                 pending_major = None
                 continue
             flush_pending_major_as_text()
@@ -505,20 +536,31 @@ def build_prechunk_records(
                         flush_pending_table_title_as_text()
                         clear_table_context()
                         pending_table_context = heading
+                        add_debug("pending_table_context", text, heading=heading, level=level)
                     else:
                         if pending_table_title:
                             flush_pending_table_title_as_text()
                         attach_to_table = bool(pending_table_context or active_table_context) or not text_buffer
                         pending_table_title = (level, heading, attach_to_table)
+                        add_debug(
+                            "pending_table_title",
+                            text,
+                            heading=heading,
+                            level=level,
+                            attach_to_table=attach_to_table,
+                            table_context=pending_table_context or active_table_context or "",
+                        )
                 else:
                     flush_pending_table_title_as_text()
                     flush_text()
                     clear_table_context()
                     stack = update_stack(stack, level, heading)
+                    add_debug("heading", text, heading=heading, level=level)
             elif text:
                 flush_pending_table_title_as_text()
                 clear_table_context()
                 text_buffer.append(text)
+                add_debug("body", text)
             continue
 
         if isinstance(block, TableBlock):
@@ -532,10 +574,13 @@ def build_prechunk_records(
                 clear_table_context()
                 level, heading_text = heading
                 stack = update_stack(stack, level, heading_text)
+                add_debug("table_heading", heading_text, level=level)
                 continue
 
             grid = table_grid(block, fill_spans=table_type_initial not in {"toc_table", "layout_table"})
             table_type = classify_table(block, grid)
+
+            # Cover/title layout tables are useful but should not pretend to be data tables.
             if table_type == "layout_table":
                 lines = compact_grid_lines(grid_no_fill, max_rows=8)
                 if lines:
@@ -564,9 +609,17 @@ def build_prechunk_records(
             table_index += 1
             table_id = f"table_{table_index:04d}"
             payload = table_payload(block, table_type, grid, group_size=group_size)
-            path_items = stack_section_path(stack)
+            path_items = section_path(stack)
             if table_path_items:
                 path_items = [*path_items, *table_path_items]
+            add_debug(
+                "table",
+                table_type,
+                table_id=table_id,
+                table_title=table_path_items[-1] if table_path_items else "",
+                table_context=table_path_items[0] if len(table_path_items) > 1 else "",
+                section_path=path_items,
+            )
             record = new_base_record(source_file)
             content_type = "toc" if table_type == "toc_table" else "table"
             record.update(
@@ -580,21 +633,18 @@ def build_prechunk_records(
                 }
             )
             if content_type == "toc":
-                record["text"] = table_text_for_record(payload)
+                record["text"] = table_text_for_record(table_type, payload)
             records.append(record)
 
     flush_pending_table_title_as_text()
     flush_pending_major_as_text()
     flush_text()
+    if debug_headings_path is not None:
+        debug_headings_path.parent.mkdir(parents=True, exist_ok=True)
+        with debug_headings_path.open("w", encoding="utf-8") as file:
+            for row in debug_rows:
+                file.write(json.dumps(row, ensure_ascii=False) + "\n")
     return records
-
-
-def discover_hwp_files(input_dir: Path, *, glob_pattern: str, recursive: bool) -> list[Path]:
-    iterator = input_dir.rglob(glob_pattern) if recursive else input_dir.glob(glob_pattern)
-    return sorted(
-        [path for path in iterator if path.is_file() and path.suffix.lower() == ".hwp"],
-        key=lambda path: str(path).casefold(),
-    )
 
 
 def write_jsonl(path: Path, records: list[dict[str, Any]], *, limit: int | None = None) -> None:
@@ -605,49 +655,20 @@ def write_jsonl(path: Path, records: list[dict[str, Any]], *, limit: int | None 
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def parse_hwp_files(input_files: list[Path], *, group_size: int, stop_on_error: bool) -> tuple[list[dict[str, Any]], int]:
-    records: list[dict[str, Any]] = []
-    error_count = 0
-    total = len(input_files)
-    for index, input_path in enumerate(input_files, start=1):
-        print(f"[{index}/{total}] parsing: {input_path.name}")
-        try:
-            records.extend(build_prechunk_records(input_path, group_size=group_size))
-        except Exception as exc:
-            error_count += 1
-            print(f"  error: {type(exc).__name__}: {exc}")
-            if stop_on_error:
-                raise
-    return records, error_count
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Parse HWP files into one prechunk JSONL only.")
-    parser.add_argument("--input-dir", type=Path, default=Path("files"), help="directory containing HWP files")
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="output prechunk JSONL")
-    parser.add_argument("--glob", default="*.hwp", help="HWP filename glob")
-    parser.add_argument("--recursive", action="store_true", help="search input directory recursively")
-    parser.add_argument("--limit-files", type=int, default=0, help="parse only first N files; 0 means all")
+    parser = argparse.ArgumentParser(description="Parse HWP into pre-chunk structured JSONL.")
+    parser.add_argument("--input", required=True, type=Path, help="HWP input path")
+    parser.add_argument("--output", type=Path, default=Path("eda/hwp_prechunk.jsonl"), help="output JSONL path")
+    parser.add_argument("--limit", type=int, default=0, help="write only first N records; 0 means all")
     parser.add_argument("--group-size", type=int, default=8, help="row count per group for large/schedule tables")
-    parser.add_argument("--stop-on-error", action="store_true", help="stop when one file fails")
+    parser.add_argument("--debug-headings", type=Path, default=None, help="optional JSONL path for heading decisions")
     args = parser.parse_args()
 
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(encoding="utf-8")
-
-    input_files = discover_hwp_files(args.input_dir, glob_pattern=args.glob, recursive=args.recursive)
-    if args.limit_files:
-        input_files = input_files[: args.limit_files]
-    if not input_files:
-        raise SystemExit(f"No HWP files found: {args.input_dir} ({args.glob})")
-
-    records, error_count = parse_hwp_files(input_files, group_size=args.group_size, stop_on_error=args.stop_on_error)
-    write_jsonl(args.output, records)
-    print(f"target_files: {len(input_files)}")
-    print(f"error_files: {error_count}")
-    print(f"written_records: {len(records)}")
+    records = build_prechunk_records(args.input, group_size=args.group_size, debug_headings_path=args.debug_headings)
+    limit = None if args.limit == 0 else args.limit
+    write_jsonl(args.output, records, limit=limit)
+    print(f"parsed_records: {len(records)}")
+    print(f"written_records: {len(records) if limit is None else min(limit, len(records))}")
     print(f"output: {args.output}")
 
 
