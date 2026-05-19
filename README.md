@@ -197,3 +197,35 @@ python -m src.cli build-chroma \
 
 - OpenAI Embeddings guide: https://platform.openai.com/docs/guides/embeddings
 - OpenAI Responses API: https://platform.openai.com/docs/api-reference/responses/create
+
+## 파싱/청킹/샘플링 단독 실행
+
+아래 명령은 임베딩이나 Chroma 인덱싱 없이 HWP 파싱, 청킹, 평가용 샘플링만 순서대로 실행합니다.
+
+파싱:
+
+```bash
+venv/bin/python -m src.cli parse-hwp \
+  --input "data/v2/(사)부산국제영화제_2024년 BIFF & ACFM 온라인서비스 재개발 및 행사지원시.hwp" \
+  --output "data/v2/biff_acfm_parse_chunk_test/prechunk.jsonl"
+```
+
+청킹:
+
+```bash
+venv/bin/python -m src.cli chunk-jsonl \
+  --input "data/v2/biff_acfm_parse_chunk_test/prechunk.jsonl" \
+  --output "data/v2/biff_acfm_parse_chunk_test/chunks.jsonl" \
+  --summary-output "data/v2/biff_acfm_parse_chunk_test/chunks_summary.csv" \
+  --sample-output "data/v2/biff_acfm_parse_chunk_test/chunks_sample.jsonl"
+```
+
+평가용 샘플링:
+
+```bash
+venv/bin/python -m src.cli sampling \
+  --input "data/v2/biff_acfm_parse_chunk_test/chunks.jsonl" \
+  --output "data/v2/biff_acfm_parse_chunk_test/eval_sample_chunks.jsonl"
+```
+
+기준 청킹 결과와 overlap을 맞춰야 하는 경우 `chunk-jsonl`에 `--text-overlap 150`을 추가합니다.
