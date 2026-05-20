@@ -45,6 +45,44 @@ def fmt_seconds(ms_value: float | None) -> str:
     return f"{ms_value / 1000:.2f}초" if ms_value is not None else "-"
 
 
+def metrics_legend_html() -> str:
+    """
+    리포트 상단에 표시할 지표 정의(코드: llm_judge, retrieval, harness와 동일한 의미).
+    
+    Parameters:
+    - 없음: 매개변수 없이 고정된 HTML 문자열 템플릿을 반환합니다.
+    """
+    return """<div class="metrics-legend">
+    <h2>📘 지표 설명</h2>
+    <p class="legend-intro">아래 수치들은 <strong>src/evaluation</strong>의 RAG 평가 하네스(Harness)에서 계산됩니다. LLM 판정 점수(f/r/s)는 절대적인 정답률을 의미하기보다, 동일한 기준 아래 여러 실험(실행 간) 성능을 <strong>상대 비교할 때 유용합니다.</strong></p>
+
+    <dl>
+    <dt>전체 질문 수</dt>
+    <dd>이번 성능 평가에 포함된 총 질문(데이터셋의 행)의 개수입니다.</dd>
+
+    <dt>응답 시간 (total_latency_ms)</dt>
+    <dd>해당 질문 한 건에 대해 문서 검색, 답변 생성, LLM 판정 등이 끝날 때까지 걸린 총 시간(밀리초, ms)입니다. 리포트 상단 카드에는 직관성을 위해 초 단위로 환산하여 표시합니다.</dd>
+
+    <dt>답변 정확도 (f_score, Faithfulness)</dt>
+    <dd>판정 모델이 바라본 답변의 <strong>충실도(환각 여부)</strong>입니다. 검색으로 가져온 근거 텍스트에 기반하여, 거짓 정보(환각) 없이 답변이 올바르게 작성되었는지를 0~5점 사이의 정수로 채점합니다.</dd>
+
+    <dt>질문 이해도 (r_score, Relevance)</dt>
+    <dd>생성된 답변이 사용자의 질문 의도에 얼마나 직접적이고 적절하게 대응하는지(<strong>적합성</strong>)를 따져 0~5점 사이의 정수로 채점합니다.</dd>
+
+    <dt>종합 능력 (s_score, Synthesis)</dt>
+    <dd>분산된 여러 근거 데이터를 하나로 묶어, 사용자의 질문 의도에 맞게 논리적으로 잘 <strong>구조화(종합)</strong>했는지를 0~5점 사이의 정수로 채점합니다.</dd>
+
+    <dt>검색 성공률 (Hit Rate, retrieval_keyword_hit)</dt>
+    <dd>질문셋에 정의된 정답 키워드(<code>ground_truth_keywords</code>) 중 <strong>단 하나라도</strong> 이번에 검색된 모든 청크 텍스트를 이어 붙인 문자열 안에 부분 문자열로 포함되어 있으면 1, 없으면 0으로 판정합니다. 질문별 결과는 0 또는 1이며, 리포트 상단 카드 및 표에 표기되는 퍼센트(%)는 이 결과들의 <strong>평균값</strong>입니다. 정답 키워드가 비어 있는 경우는 의미 있는 히트(Hit)로 보기 어렵습니다.</dd>
+
+    <dt>문맥 정밀도 (context_precision)</dt>
+    <dd>모델이 가져온 총 <em>k</em>개의 청크 중, 정답 키워드가 실제 포함된 청크의 비율을 뜻합니다. 즉, <strong>(키워드가 포함된 청크 수 &divide; <em>k</em>)</strong> 값으로 0~1 사이의 범위를 가집니다. 검색 결과 안에서 &ldquo;관련 있어 보이는&rdquo; 알짜배기 청크의 비율에 가깝지만, 단어의 표현이 다르면 같은 의미를 지니고 있더라도 0으로 계산될 수 있어 기준이 다소 엄격합니다.</dd>
+    </dl>
+
+    <p class="legend-footnote"><strong>질문 유형</strong>은 평가 JSONL의 <code>category</code>(예: 기능 요구사항, 예산)이고, <strong>질문 성격</strong>은 <code>question_type</code>을 한글 라벨로 바꾼 값입니다.</p>
+    </div>"""
+
+
 def row_category(row: dict[str, Any]) -> str:
     category = str(row.get("category") or "").strip()
     return category or "미분류"
@@ -97,15 +135,115 @@ def summarize_by_field(rows: list[dict[str, Any]], field_name: str) -> list[dict
     return summary_rows
 
 
-def source_ids(row: dict[str, Any]) -> str:
+def source_chunk_id_list(row: dict[str, Any]) -> list[str]:
+    """검색 sources에 포함된 chunk_id를 순서대로(중복 제거)."""
+    sources = row.get("sources")
+    if not isinstance(sources, list):
+        return []
+    out: list[str] = []
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        cid = str(source.get("chunk_id", "")).strip()
+        if cid and cid not in out:
+            out.append(cid)
+    return out
+
+
+def source_chunk_ids_csv_field(row: dict[str, Any]) -> str:
+    """CSV·엑셀용: 전체 ID를 한 줄로."""
+    return ", ".join(source_chunk_id_list(row))
+
+
+def source_chunk_ids_html(row: dict[str, Any]) -> str:
+    """오답 노트 HTML: ID가 잘리지 않도록 목록으로 표시."""
+    ids = source_chunk_id_list(row)
+    if not ids:
+        return '<span class="muted">(검색 근거 없음)</span>'
+    items = "".join(f"<li><code>{html.escape(cid)}</code></li>" for cid in ids)
+    return f'<ul class="chunk-id-list">{items}</ul>'
+
+
+def source_file_names_short(row: dict[str, Any], *, max_chars: int = 120) -> str:
+    """검색 근거에 붙은 metadata.file_name 등(어느 HWP/문서인지)."""
     sources = row.get("sources")
     if not isinstance(sources, list):
         return ""
-    ids = []
-    for source in sources[:5]:
-        if isinstance(source, dict):
-            ids.append(str(source.get("chunk_id", "")))
-    return ", ".join(source_id for source_id in ids if source_id)
+    seen: list[str] = []
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        meta = source.get("metadata")
+        name = ""
+        if isinstance(meta, dict):
+            name = str(meta.get("file_name") or meta.get("source_file") or "").strip()
+        if name and name not in seen:
+            seen.append(name)
+    joined = " | ".join(seen)
+    if len(joined) <= max_chars:
+        return joined
+    return joined[: max_chars - 1] + "…"
+
+
+def cell_text_html(text: Any, *, max_chars: int = 1200) -> str:
+    """테이블 셀용: 이스케이프 후 줄바꿈을 <br>로 (스크롤은 CSS로)."""
+    raw = "" if text is None else str(text)
+    if len(raw) > max_chars:
+        raw = raw[: max_chars - 1] + "…"
+    return html.escape(raw).replace("\n", "<br/>")
+
+
+def failure_table_html(failures: list[dict[str, Any]]) -> str:
+    """모델 답변은 본문 행만 두고, 근거 문서·청크는 바로 아래 행에 블록으로 분리한다."""
+    headers = [
+        "질문 유형",
+        "질문 성격",
+        "f",
+        "r",
+        "s",
+        "검색",
+        "문맥",
+        "질문",
+        "기대 답변",
+        "모델 답변",
+    ]
+    ncols = len(headers)
+    head = "".join(f'<th class="col-h-{index}">{html.escape(h)}</th>' for index, h in enumerate(headers))
+    body_rows: list[str] = []
+    for row in failures:
+        main_cells = [
+            html.escape(row_category(row)),
+            html.escape(row_question_type(row)),
+            html.escape(str(row.get("f_score", "-"))),
+            html.escape(str(row.get("r_score", "-"))),
+            html.escape(str(row.get("s_score", "-"))),
+            html.escape(str(row.get("retrieval_keyword_hit", "-"))),
+            html.escape(str(row.get("context_precision", "-"))),
+            f'<div class="failure-text">{cell_text_html(row.get("question"), max_chars=600)}</div>',
+            f'<div class="failure-text">{cell_text_html(row.get("expected_answer"), max_chars=1200)}</div>',
+            f'<div class="failure-text">{cell_text_html(row.get("answer"), max_chars=1200)}</div>',
+        ]
+        body_rows.append("<tr>" + "".join(f"<td>{c}</td>" for c in main_cells) + "</tr>")
+        evidence_inner = (
+            '<div class="failure-evidence-wrap">'
+            '<div class="evidence-section-title">근거 문서</div>'
+            f'<div class="failure-sources failure-sources-doc">{html.escape(source_file_names_short(row, max_chars=500))}</div>'
+            '<div class="evidence-section-title">근거 청크 ID</div>'
+            '<div class="failure-sources failure-sources-ids">'
+            f"{source_chunk_ids_html(row)}"
+            "</div>"
+            "</div>"
+        )
+        body_rows.append(
+            f'<tr class="failure-evidence-row"><td colspan="{ncols}">{evidence_inner}</td></tr>'
+        )
+    return (
+        '<table class="failure-detail"><thead><tr>'
+        + head
+        + "</tr></thead><tbody>"
+        + "".join(body_rows)
+        + "</tbody></table>"
+    )
 
 
 def failure_score(row: dict[str, Any]) -> float:
@@ -159,7 +297,8 @@ def write_failures_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "질문",
         "기대 답변",
         "모델 답변",
-        "근거 청크",
+        "근거 문서",
+        "근거 청크 ID",
     ]
     with path.open("w", encoding="utf-8-sig", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
@@ -178,7 +317,8 @@ def write_failures_csv(path: Path, rows: list[dict[str, Any]]) -> None:
                     "질문": row.get("question", ""),
                     "기대 답변": row.get("expected_answer", ""),
                     "모델 답변": row.get("answer", ""),
-                    "근거 청크": source_ids(row),
+                    "근거 문서": source_file_names_short(row),
+                    "근거 청크 ID": source_chunk_ids_csv_field(row),
                 }
             )
 
@@ -320,33 +460,7 @@ def render_html(rows: list[dict[str, Any]], failures: list[dict[str, Any]]) -> s
             for row in by_question_type
         ],
     )
-    failure_table = table_html(
-        [
-            "질문 유형",
-            "질문 성격",
-            "답변 정확도(f_score)",
-            "질문 이해도(r_score)",
-            "종합 능력(s_score)",
-            "검색 성공(Hit Rate)",
-            "문맥 정밀도(context_precision)",
-            "질문",
-            "근거 청크",
-        ],
-        [
-            [
-                row_category(row),
-                row_question_type(row),
-                row.get("f_score", "-"),
-                row.get("r_score", "-"),
-                row.get("s_score", "-"),
-                row.get("retrieval_keyword_hit", "-"),
-                row.get("context_precision", "-"),
-                str(row.get("question", ""))[:140],
-                source_ids(row),
-            ]
-            for row in failures
-        ],
-    )
+    failure_table = failure_table_html(failures)
 
     return f"""<!doctype html>
     <html lang="ko">
@@ -367,6 +481,45 @@ def render_html(rows: list[dict[str, Any]], failures: list[dict[str, Any]]) -> s
     table {{ border-collapse: collapse; width: 100%; margin-top: 15px; background: #fff; border-radius: 8px; overflow: hidden; }}
     th, td {{ border: 1px solid #eee; padding: 12px; text-align: center; }}
     th {{ background: #f8f9fa; }}
+    table.failure-detail {{ font-size: 13px; width: 100%; table-layout: fixed; }}
+    table.failure-detail th, table.failure-detail td {{ text-align: left; vertical-align: top; padding: 8px 10px; }}
+    table.failure-detail th:nth-child(-n+7),
+    table.failure-detail td:nth-child(-n+7) {{ text-align: center; white-space: nowrap; width: 3.2rem; }}
+    table.failure-detail td:nth-child(1), table.failure-detail th:nth-child(1) {{ width: 6.5rem; }}
+    table.failure-detail td:nth-child(2), table.failure-detail th:nth-child(2) {{ width: 6.5rem; }}
+    table.failure-detail .failure-text {{
+        max-width: 100%; max-height: 12rem; overflow: auto; line-height: 1.45; font-size: 12px; text-align: left;
+        word-break: break-word; hyphens: auto;
+    }}
+    table.failure-detail .failure-sources {{
+        font-size: 11px; color: #555; line-height: 1.3; word-break: break-word; overflow: auto;
+    }}
+    table.failure-detail .failure-sources-doc {{ max-height: 5rem; }}
+    table.failure-detail .failure-sources-ids {{ max-height: none; }}
+    table.failure-detail ul.chunk-id-list {{
+        margin: 4px 0 0 1.1rem; padding: 0 0 0 0.4rem; font-size: 12px; line-height: 1.55;
+    }}
+    table.failure-detail ul.chunk-id-list code {{ font-size: 11px; }}
+    table.failure-detail .muted {{ color: #888; font-size: 12px; }}
+    table.failure-detail tr.failure-evidence-row td {{
+        border-top: 1px dashed #dde3ea;
+        background: #fafbfd;
+        padding: 6px 10px 12px 10px;
+    }}
+    table.failure-detail .failure-evidence-wrap {{ text-align: left; }}
+    table.failure-detail .evidence-section-title {{
+        font-size: 11px; font-weight: 700; color: #4f7cff; margin: 10px 0 4px 0; letter-spacing: 0.02em;
+    }}
+    table.failure-detail .failure-evidence-wrap .evidence-section-title:first-child {{ margin-top: 2px; }}
+    .metrics-legend {{ background: #fff; padding: 22px 26px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); margin-top: 28px; max-width: 960px; margin-left: auto; margin-right: auto; }}
+    .metrics-legend h2 {{ margin-top: 0; border-left: 5px solid #4f7cff; padding-left: 12px; font-size: 18px; }}
+    .legend-intro {{ color: #444; font-size: 14px; line-height: 1.6; margin: 12px 0 8px 0; }}
+    .metrics-legend dl {{ margin: 16px 0 0 0; }}
+    .metrics-legend dt {{ font-weight: 700; color: #2c3e50; margin-top: 16px; font-size: 14px; }}
+    .metrics-legend dt:first-of-type {{ margin-top: 0; }}
+    .metrics-legend dd {{ margin: 6px 0 0 0; color: #444; font-size: 14px; line-height: 1.55; padding-left: 0; text-align: left; }}
+    .legend-footnote {{ margin: 18px 0 0 0; color: #666; font-size: 13px; line-height: 1.5; }}
+    .metrics-legend code {{ background: #f0f2f5; padding: 1px 6px; border-radius: 4px; font-size: 12px; }}
     </style>
     </head>
     <body>
@@ -379,6 +532,7 @@ def render_html(rows: list[dict[str, Any]], failures: list[dict[str, Any]]) -> s
         <div class="card"><div>평균 검색 성공률(Hit Rate)</div><div class="metric">{fmt_percent(summary["mean_retrieval_keyword_hit"])}</div></div>
         <div class="card"><div>평균 응답 시간(total_latency_ms)</div><div class="metric">{fmt_seconds(summary["mean_total_latency_ms"])}</div></div>
     </div>
+    {metrics_legend_html()}
     <h2>📈 유형별 지표 상세 분석</h2>
     <div class="chart-container">
         <div class="chart-box"><h3>🎯 답변의 정확도(f_score)</h3>{category_chart}</div>
@@ -401,6 +555,7 @@ def render_html(rows: list[dict[str, Any]], failures: list[dict[str, Any]]) -> s
     {question_type_table}
     <h2>📝 오답 노트 / 실패 사례</h2>
     <div class="note">답변 품질 점수가 낮거나 검색 성공률·문맥 정밀도가 0인 케이스를 우선 표시합니다.</div>
+    <div class="note"><strong>모델 답변</strong>은 입력 JSONL의 <code>answer</code> 필드를 그대로 보여 줍니다. 과거 프롬프트가 답변 끝에 <code>source_id</code> 목록을 붙이도록 했다면 그 형태가 남아 있을 수 있습니다. 프롬프트를 바꾼 뒤에도 <strong>같은 JSONL로 리포트만 다시 만들면</strong> <code>answer</code>는 변하지 않습니다. <strong>평가 하네스를 다시 실행</strong>해 새 결과 파일을 생성해야 수정된 프롬프트가 반영됩니다. 오답 노트 아래에는 <strong>근거 문서</strong>·<strong>근거 청크 ID</strong>(<code>sources</code>)만 둡니다.</div>
     {failure_table}
     </body>
     </html>"""
