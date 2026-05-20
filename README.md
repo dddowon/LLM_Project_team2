@@ -122,6 +122,7 @@ python -m src.cli run-pipeline \
 ```
 
 기본 동작:
+
 - 출력은 `data/v2/<sanitize된_파일명>/` 하위로 문서별 분리 저장됩니다.
 - `--doc-id`는 선택 옵션이며, 폴더명에는 영향이 없고 Chroma 메타데이터의 `doc_id`에만 반영됩니다.
 - 기본값으로 Chroma 메타데이터 샘플 JSON은 저장하지 않습니다(운영 권장).
@@ -130,12 +131,14 @@ python -m src.cli run-pipeline \
   - 개수: 기본 20개 (`--dump-limit`으로 변경)
 
 실행 단계:
+
 1. `parse-hwp`
 2. `chunk-jsonl`
 3. `embed-jsonl`
 4. `build-chroma`
 
 생성 산출물:
+
 - `<doc_dir>/<원본파일명>_prechunk.jsonl`
 - `<doc_dir>/<원본파일명>_heading_debug.jsonl`
 - `<doc_dir>/<원본파일명>_chunks.jsonl`
@@ -195,8 +198,8 @@ python -m src.cli build-chroma \
 
 ## 참고한 공식 문서
 
-- OpenAI Embeddings guide: https://platform.openai.com/docs/guides/embeddings
-- OpenAI Responses API: https://platform.openai.com/docs/api-reference/responses/create
+- OpenAI Embeddings guide: [https://platform.openai.com/docs/guides/embeddings](https://platform.openai.com/docs/guides/embeddings)
+- OpenAI Responses API: [https://platform.openai.com/docs/api-reference/responses/create](https://platform.openai.com/docs/api-reference/responses/create)
 
 ## 파싱/청킹/샘플링 단독 실행
 
