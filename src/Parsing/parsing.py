@@ -49,13 +49,10 @@ EVALUATION_RE = re.compile(r"평가|배점|점수|평점|기술평가|가격평�
 SCHEDULE_RE = re.compile(r"20\d{2}(?:년)?|[1-4]/4|M\+\d+|월별|분기|착수|완료")
 SCHEDULE_CONTEXT_RE = re.compile(r"추진\s*일정|공모\s*추진\s*일정|사업\s*기간|수행\s*기간|일정표|월별|연차별|착수|완료")
 FORM_RE = re.compile(r"신청서|서약서|각서|기관명|대표자|주소|인감|사업자등록번호")
-<<<<<<< HEAD
-=======
 MENU_CONTEXT_RE = re.compile(r"기능\s*메뉴도|메뉴\s*구성|사이트맵|화면\s*구성|메뉴\s*구조")
 ORG_CONTEXT_RE = re.compile(r"추진\s*체계|수행\s*체계|사업수행\s*체계|조직도|역할\s*분담|분담\s*사항")
 COMPLIANCE_RE = re.compile(r"기술\s*적용\s*계획|적용계획/결과|부분적용|미적용|준수\s*여부|검토\s*결과")
 
->>>>>>> 8f9d0e9859aa2ddfb0a0f4c65c4a29dced204ba2
 ROMAN_TOKEN_RE = r"(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+|IX|IV|V(?:I{0,3})?|X|I{1,3})"
 ROMAN_RE = re.compile(rf"^{ROMAN_TOKEN_RE}[.)]?$")
 ROMAN_HEADING_RE = re.compile(rf"^({ROMAN_TOKEN_RE})(?:[.)]\s+|\s*/\s*|\s+)(.+)$")
@@ -430,14 +427,6 @@ def group_rows(rows: list[dict[str, Any]], *, group_size: int) -> list[dict[str,
     return groups
 
 
-<<<<<<< HEAD
-def table_payload(table: TableBlock, table_type: str, grid: list[list[str]], *, group_size: int) -> dict[str, Any]:
-    payload: dict[str, Any] = {"rows": table.rows, "cols": table.cols, "cell_count": len(table.cells)}
-    if table_type == "toc_table":
-        payload["items"] = generic_rows(grid)
-        return payload
-    if table_type in {"layout_table", "form_table", "nested_table"}:
-=======
 def table_payload(
     table: TableBlock,
     table_type: str,
@@ -460,7 +449,6 @@ def table_payload(
         return payload
 
     if table_type in {"layout_table", "form_table", "nested_table", "note_table"}:
->>>>>>> 8f9d0e9859aa2ddfb0a0f4c65c4a29dced204ba2
         payload["summary_lines"] = compact_grid_lines(grid, max_rows=16)
         if table_type == "nested_table":
             payload["nested_table_count"] = sum(
@@ -482,9 +470,6 @@ def table_payload(
     return payload
 
 
-<<<<<<< HEAD
-def table_text_for_record(payload: dict[str, Any]) -> str:
-=======
 def table_payload_has_content(payload: dict[str, Any]) -> bool:
     if payload.get("markdown"):
         return True
@@ -496,7 +481,6 @@ def table_payload_has_content(payload: dict[str, Any]) -> bool:
 
 
 def table_text_for_record(table_type: str, payload: dict[str, Any]) -> str:
->>>>>>> 8f9d0e9859aa2ddfb0a0f4c65c4a29dced204ba2
     if "rows_data" in payload:
         return "\n".join(row["text"] for row in payload["rows_data"][:20])
     if "row_groups" in payload:
@@ -505,7 +489,7 @@ def table_text_for_record(table_type: str, payload: dict[str, Any]) -> str:
         return "\n".join(item["text"] for item in payload["items"][:30])
     if "summary_lines" in payload:
         return "\n".join(payload["summary_lines"])
-    return ""
+    return table_type
 
 
 def new_base_record(source_file: str) -> dict[str, Any]:
@@ -687,29 +671,13 @@ def build_prechunk_records(
             flush_text()
             table_index += 1
             table_id = f"table_{table_index:04d}"
-<<<<<<< HEAD
-            payload = table_payload(block, table_type, grid, group_size=group_size)
             path_items = stack_section_path(stack)
-            if table_path_items:
-                path_items = [*path_items, *table_path_items]
-=======
-            path_items = section_path(stack)
             if table_path_items:
                 path_items = [*path_items, *table_path_items]
             table_type = refine_table_type_by_context(table_type, path_items)
             payload = table_payload(block, table_type, grid, group_size=group_size, markdown_grid=grid_no_fill)
             if not table_payload_has_content(payload):
-                add_debug("empty_table_skipped", table_type, table_id=table_id, section_path=path_items)
                 continue
-            add_debug(
-                "table",
-                table_type,
-                table_id=table_id,
-                table_title=table_path_items[-1] if table_path_items else "",
-                table_context=table_path_items[0] if len(table_path_items) > 1 else "",
-                section_path=path_items,
-            )
->>>>>>> 8f9d0e9859aa2ddfb0a0f4c65c4a29dced204ba2
             record = new_base_record(source_file)
             content_type = "toc" if table_type == "toc_table" else "table"
             record.update(
@@ -723,7 +691,7 @@ def build_prechunk_records(
                 }
             )
             if content_type == "toc":
-                record["text"] = table_text_for_record(payload)
+                record["text"] = table_text_for_record(table_type, payload)
             records.append(record)
 
     flush_pending_table_title_as_text()
