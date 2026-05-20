@@ -4,10 +4,24 @@ import argparse
 import json
 import re
 import sys
+from pathlib import Path
+
+
+def _require_exactly_one(*, a, b, a_name: str, b_name: str) -> None:
+    if bool(a) == bool(b):
+        raise SystemExit(f"Provide exactly one of {a_name} or {b_name}.")
+
+
+def _discover_hwp_in_dir(input_dir: str | Path) -> list[Path]:
+    from src.Parsing.parsing import discover_hwp_files
+
+    input_files = discover_hwp_files(Path(input_dir), glob_pattern="*.hwp", recursive=False)
+    if not input_files:
+        raise SystemExit(f"No HWP files found in: {input_dir}")
+    return input_files
 
 
 def ingest(config_path: str) -> None:
-    from dotenv import load_dotenv
     from tqdm import tqdm
 
     from src.config import load_config
@@ -16,7 +30,6 @@ def ingest(config_path: str) -> None:
     from src.models.openai_client import OpenAIModelClient
     from src.preprocessing.chunker import chunk_documents
 
-    load_dotenv()
     config = load_config(config_path)
     documents = load_documents(config.paths.raw_data_dir, config.paths.metadata_csv)
     chunks = chunk_documents(
@@ -41,13 +54,10 @@ def ingest(config_path: str) -> None:
 
 
 def query(config_path: str, question: str) -> None:
-    from dotenv import load_dotenv
-
     from src.config import load_config
     from src.engine.rag import RagEngine
     from src.engine.vector_store import ChromaVectorStore
 
-    load_dotenv()
     config = load_config(config_path)
     store = ChromaVectorStore.load(config.paths.index_dir)
     engine = RagEngine(config, store)
@@ -59,7 +69,6 @@ def query(config_path: str, question: str) -> None:
 
 
 def evaluate(config_path: str) -> None:
-    from dotenv import load_dotenv
     from tqdm import tqdm
 
     from src.config import load_config
@@ -67,7 +76,6 @@ def evaluate(config_path: str) -> None:
     from src.engine.vector_store import ChromaVectorStore
     from src.utils.jsonl import read_jsonl, write_jsonl
 
-    load_dotenv()
     config = load_config(config_path)
     questions = read_jsonl(config.paths.evaluation_set)
     if not questions:
@@ -131,13 +139,8 @@ def evaluate_harness(
     no_llm_judge: bool,
     no_langsmith_feedback: bool,
 ) -> None:
-    from dotenv import load_dotenv
-
-    from pathlib import Path
-
     from src.evaluation.langsmith_harness import run_eval_harness
 
-    load_dotenv()
     out, summary = run_eval_harness(
         config_path,
         output_path=Path(output_path) if output_path else None,
@@ -156,8 +159,6 @@ def embed_jsonl(
     batch_size: int = 64,
     force_real: bool = False,
 ) -> None:
-    from pathlib import Path
-
     from src.pipeline.embedding_pipeline import embed_prechunked_jsonl
 
     count = embed_prechunked_jsonl(
@@ -171,8 +172,6 @@ def embed_jsonl(
 
 
 def resolve_index_dir(config_path: str, index_dir: str | None):
-    from pathlib import Path
-
     if index_dir:
         return Path(index_dir)
 
@@ -182,8 +181,6 @@ def resolve_index_dir(config_path: str, index_dir: str | None):
 
 
 def build_chroma_index(input_path: str, index_dir: str, doc_id: str | None = None) -> None:
-    from pathlib import Path
-
     from src.pipeline.embedding_pipeline import build_chroma_from_embedded_jsonl
 
     count = build_chroma_from_embedded_jsonl(
@@ -195,18 +192,40 @@ def build_chroma_index(input_path: str, index_dir: str, doc_id: str | None = Non
 
 
 def parse_hwp(
-    input_path: str,
     output_path: str,
+    *,
+    input_path: str | None = None,
+    input_dir: str | None = None,
     debug_headings: str | None = None,
     limit: int = 0,
     group_size: int = 8,
 ) -> None:
-    from pathlib import Path
+    from src.Parsing.parsing import (
+        build_prechunk_records,
+        parse_hwp_files,
+        write_jsonl,
+    )
 
-    from src.Parsing.parsing import build_prechunk_records, write_jsonl
+    _require_exactly_one(
+        a=input_path,
+        b=input_dir,
+        a_name="--input (single HWP)",
+        b_name="--input-dir (folder)",
+    )
 
     debug_path = Path(debug_headings) if debug_headings else None
-    records = build_prechunk_records(Path(input_path), group_size=group_size, debug_headings_path=debug_path)
+    if input_dir:
+        input_files = _discover_hwp_in_dir(input_dir)
+        records, error_count = parse_hwp_files(input_files, group_size=group_size, stop_on_error=False)
+        print(f"target_files: {len(input_files)}")
+        print(f"error_files: {error_count}")
+    else:
+        records = build_prechunk_records(
+            Path(input_path),  # type: ignore[arg-type]
+            group_size=group_size,
+            debug_headings_path=debug_path,
+        )
+
     write_limit = None if limit == 0 else limit
     write_jsonl(Path(output_path), records, limit=write_limit)
     written = len(records) if write_limit is None else min(write_limit, len(records))
@@ -232,7 +251,6 @@ def chunk_jsonl(
     include_debug_metadata: bool = False,
 ) -> None:
     from argparse import Namespace
-    from pathlib import Path
 
     from src.chunking.chunking import (
         build_rag_chunks,
@@ -276,9 +294,44 @@ def chunk_jsonl(
     print(f"sample_output: {sample}")
 
 
+def _load_chunks_for_sampling(
+    *,
+    input_path: str | None,
+    input_dir: str | None,
+    pattern: str,
+    recursive: bool,
+) -> tuple[list[dict], list[Path]]:
+    from src.sampling.sample_eval_chunks import read_jsonl
+
+    _require_exactly_one(
+        a=input_path,
+        b=input_dir,
+        a_name="--input (one JSONL)",
+        b_name="--input-dir (many JSONL files)",
+    )
+
+    if input_path:
+        path = Path(input_path)
+        return read_jsonl(path), [path]
+
+    root = Path(input_dir)  # type: ignore[arg-type]
+    iterator = root.rglob(pattern) if recursive else root.glob(pattern)
+    paths = sorted(path for path in iterator if path.is_file())
+    if not paths:
+        raise SystemExit(f"No chunk JSONL files found: {input_dir} ({pattern})")
+    rows: list[dict] = []
+    for path in paths:
+        rows.extend(read_jsonl(path))
+    return rows, paths
+
+
 def sampling(
-    input_path: str,
     output_path: str,
+    *,
+    input_path: str | None = None,
+    input_dir: str | None = None,
+    pattern: str = "*_chunks.jsonl",
+    recursive: bool = True,
     quotas: str | None = None,
     appendix_mode: str = "auto",
     min_per_doc: int = 9,
@@ -287,17 +340,23 @@ def sampling(
     limit_docs: int | None = None,
     add_sampling_metadata: bool = False,
 ) -> None:
-    from pathlib import Path
-
     from src.sampling.sample_eval_chunks import (
         parse_quota_config,
-        read_jsonl,
         sample_rows,
         write_jsonl,
     )
 
     quota_config = parse_quota_config(quotas)
-    rows = read_jsonl(Path(input_path))
+    rows, source_paths = _load_chunks_for_sampling(
+        input_path=input_path,
+        input_dir=input_dir,
+        pattern=pattern,
+        recursive=recursive,
+    )
+    if source_paths:
+        print(f"chunk_files: {len(source_paths)}")
+        for path in source_paths:
+            print(f"  - {path}")
     sampled_rows, summary = sample_rows(
         rows,
         quotas=quota_config,
@@ -326,52 +385,92 @@ def sampling(
 
 
 def convert_embedding_input(input_path: str, output_path: str, doc_id: str | None = None) -> None:
-    from pathlib import Path
-
     from src.Parsing.convert_prechunk_to_embedding_input import convert
 
     count = convert(Path(input_path), Path(output_path), doc_id)
     print(f"Converted {count} rows -> {output_path}")
 
 
-def run_pipeline(
-    input_path: str,
+def _pipeline_paths_for_input(
+    input_file: Path,
+    output_dir: str,
+    *,
+    prechunk_output: str | None,
+    chunks_output: str | None,
+    embedded_output: str | None,
+    debug_headings_output: str | None,
+) -> tuple[Path, Path | None, Path, Path, Path]:
+    explicit = [prechunk_output, chunks_output, embedded_output]
+    if any(explicit) and not all(explicit):
+        raise SystemExit(
+            "For explicit paths, pass all of --prechunk-output, --chunks-output, --embedded-output."
+        )
+
+    if all(explicit):
+        prechunk = Path(prechunk_output)  # type: ignore[arg-type]
+        chunks = Path(chunks_output)  # type: ignore[arg-type]
+        embedded = Path(embedded_output)  # type: ignore[arg-type]
+        heading_debug = Path(debug_headings_output) if debug_headings_output else None
+        metadata_sample = embedded.with_name(f"{embedded.stem}_chroma_metadata_sample.json")
+        doc_dir = prechunk.parent
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        return prechunk, heading_debug, chunks, embedded, metadata_sample
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = input_file.stem
+    safe_stem = re.sub(r"[\\/:*?\"<>|&\s]+", "_", stem).strip("._")
+    safe_stem = re.sub(r"_+", "_", safe_stem) or "document"
+    doc_dir = out_dir / safe_stem
+    doc_dir.mkdir(parents=True, exist_ok=True)
+    prechunk = doc_dir / f"{stem}_prechunk.jsonl"
+    heading_debug = (
+        Path(debug_headings_output)
+        if debug_headings_output
+        else doc_dir / f"{stem}_heading_debug.jsonl"
+    )
+    chunks = doc_dir / f"{stem}_chunks.jsonl"
+    embedded = doc_dir / f"{stem}_embedded.jsonl"
+    metadata_sample = doc_dir / f"{stem}_chroma_metadata_sample.json"
+    return prechunk, heading_debug, chunks, embedded, metadata_sample
+
+
+def _run_pipeline_for_file(
+    input_file: Path,
+    *,
     output_dir: str,
     index_dir: str | None,
     doc_id: str | None,
     model: str,
     batch_size: int,
     force_real: bool,
-    group_size: int = 8,
-    debug_headings: bool = True,
-    dump_metadata_sample: bool = False,
-    dump_limit: int = 20,
+    group_size: int,
+    debug_headings: bool,
+    dump_metadata_sample: bool,
+    dump_limit: int,
+    prechunk_output: str | None = None,
+    chunks_output: str | None = None,
+    embedded_output: str | None = None,
+    debug_headings_output: str | None = None,
 ) -> None:
-    from pathlib import Path
     import chromadb
 
-    input_file = Path(input_path)
-    out_dir = Path(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    prechunk, heading_debug, chunks, embedded, metadata_sample = _pipeline_paths_for_input(
+        input_file,
+        output_dir,
+        prechunk_output=prechunk_output,
+        chunks_output=chunks_output,
+        embedded_output=embedded_output,
+        debug_headings_output=debug_headings_output,
+    )
+    resolved_index_dir = index_dir or str(prechunk.parent / "chroma_index")
 
-    stem = input_file.stem
-    safe_stem = re.sub(r"[\\/:*?\"<>|&\s]+", "_", stem).strip("._")
-    safe_stem = re.sub(r"_+", "_", safe_stem) or "document"
-    doc_dir = out_dir / safe_stem
-    doc_dir.mkdir(parents=True, exist_ok=True)
-
-    prechunk = doc_dir / f"{stem}_prechunk.jsonl"
-    heading_debug = doc_dir / f"{stem}_heading_debug.jsonl"
-    chunks = doc_dir / f"{stem}_chunks.jsonl"
-    embedded = doc_dir / f"{stem}_embedded.jsonl"
-    metadata_sample = doc_dir / f"{stem}_chroma_metadata_sample.json"
-    resolved_index_dir = index_dir or str(doc_dir / "chroma_index")
-
+    print(f"pipeline_input: {input_file}")
     print("[1/4] parse-hwp")
     parse_hwp(
+        str(prechunk),
         input_path=str(input_file),
-        output_path=str(prechunk),
-        debug_headings=str(heading_debug) if debug_headings else None,
+        debug_headings=str(heading_debug) if debug_headings and heading_debug else None,
         group_size=group_size,
     )
 
@@ -407,18 +506,89 @@ def run_pipeline(
         metadata_sample.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print("pipeline_done")
-    print(f"doc_output_dir: {doc_dir}")
-    print(f"embedded_output: {embedded}")
+    print(f"prechunk: {prechunk}")
+    print(f"chunks: {chunks}")
+    print(f"embedded: {embedded}")
     print(f"index_dir: {resolved_index_dir}")
     if dump_metadata_sample:
         print(f"metadata_sample: {metadata_sample}")
+
+
+def run_pipeline(
+    *,
+    input_path: str | None = None,
+    input_dir: str | None = None,
+    output_dir: str = "data/v2",
+    index_dir: str | None = None,
+    doc_id: str | None = None,
+    model: str = "text-embedding-3-small",
+    batch_size: int = 64,
+    force_real: bool = False,
+    group_size: int = 8,
+    debug_headings: bool = True,
+    dump_metadata_sample: bool = False,
+    dump_limit: int = 20,
+    prechunk_output: str | None = None,
+    chunks_output: str | None = None,
+    embedded_output: str | None = None,
+    debug_headings_output: str | None = None,
+) -> None:
+    _require_exactly_one(
+        a=input_path,
+        b=input_dir,
+        a_name="--input (single HWP)",
+        b_name="--input-dir (folder)",
+    )
+
+    explicit_outputs = any([prechunk_output, chunks_output, embedded_output])
+    if input_dir and explicit_outputs:
+        raise SystemExit("Explicit --*-output paths work only with --input (single file).")
+
+    if input_path:
+        _run_pipeline_for_file(
+            Path(input_path),
+            output_dir=output_dir,
+            index_dir=index_dir,
+            doc_id=doc_id,
+            model=model,
+            batch_size=batch_size,
+            force_real=force_real,
+            group_size=group_size,
+            debug_headings=debug_headings,
+            dump_metadata_sample=dump_metadata_sample,
+            dump_limit=dump_limit,
+            prechunk_output=prechunk_output,
+            chunks_output=chunks_output,
+            embedded_output=embedded_output,
+            debug_headings_output=debug_headings_output,
+        )
+        return
+
+    input_files = _discover_hwp_in_dir(input_dir)  # type: ignore[arg-type]
+
+    resolved_index = index_dir
+    for index, input_file in enumerate(input_files, start=1):
+        print(f"\n=== [{index}/{len(input_files)}] {input_file.name} ===")
+        _run_pipeline_for_file(
+            input_file,
+            output_dir=output_dir,
+            index_dir=resolved_index,
+            doc_id=doc_id,
+            model=model,
+            batch_size=batch_size,
+            force_real=force_real,
+            group_size=group_size,
+            debug_headings=debug_headings,
+            dump_metadata_sample=dump_metadata_sample and index == len(input_files),
+            dump_limit=dump_limit,
+        )
+    print(f"\nall_done: {len(input_files)} file(s)")
 
 
 def main() -> None:
     from dotenv import load_dotenv
 
     load_dotenv()
-
     parser = argparse.ArgumentParser(description="Bidmate RAG scenario B baseline")
     parser.add_argument("--config", default="configs/default.yaml")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -522,7 +692,12 @@ def main() -> None:
     chroma_parser.add_argument("--doc-id", default=None, help="Optional doc id override")
 
     parse_parser = subparsers.add_parser("parse-hwp", help="Parse HWP into prechunk JSONL")
-    parse_parser.add_argument("--input", required=True, help="HWP input path")
+    parse_input = parse_parser.add_mutually_exclusive_group(required=True)
+    parse_input.add_argument("--input", help="Single HWP file path")
+    parse_input.add_argument(
+        "--input-dir",
+        help="Folder of HWP files (*.hwp in that folder only; merged into one prechunk JSONL)",
+    )
     parse_parser.add_argument("--output", required=True, help="Prechunk JSONL output path")
     parse_parser.add_argument("--debug-headings", default=None, help="Optional heading debug JSONL path")
     parse_parser.add_argument("--limit", type=int, default=0, help="Write first N records only; 0=all")
@@ -546,18 +721,32 @@ def main() -> None:
 
     sampling_parser = subparsers.add_parser(
         "sampling",
-        help="Sample evaluation chunks from a slim RAG chunk JSONL",
+        help="Sample evaluation chunks from slim RAG chunk JSONL (one file or many under a folder)",
+    )
+    sampling_input = sampling_parser.add_mutually_exclusive_group(required=True)
+    sampling_input.add_argument("--input", help="Single chunks JSONL path")
+    sampling_input.add_argument(
+        "--input-dir",
+        help="Directory to search for chunk JSONL files (e.g. after run-pipeline --input-dir)",
     )
     sampling_parser.add_argument(
-        "--input",
-        default="eda/hwp_text_chunks_slim.jsonl",
-        help="Input slim chunk JSONL",
+        "--pattern",
+        default="*_chunks.jsonl",
+        help="Glob for --input-dir (default: *_chunks.jsonl)",
     )
     sampling_parser.add_argument(
-        "--output",
-        default="eda/eval_sample_chunks.jsonl",
-        help="Output sampled JSONL",
+        "--recursive",
+        action="store_true",
+        default=True,
+        help="Search subfolders under --input-dir (default: on)",
     )
+    sampling_parser.add_argument(
+        "--no-recursive",
+        action="store_false",
+        dest="recursive",
+        help="Only files directly under --input-dir",
+    )
+    sampling_parser.add_argument("--output", required=True, help="Output sampled JSONL")
     sampling_parser.add_argument(
         "--quotas",
         default=None,
@@ -614,8 +803,25 @@ def main() -> None:
         "run-pipeline",
         help="Run parse->chunk->embed->build-chroma in one command",
     )
-    pipeline_parser.add_argument("--input", required=True, help="HWP input path")
-    pipeline_parser.add_argument("--output-dir", default="data/v2", help="Output directory for pipeline artifacts")
+    pipeline_input = pipeline_parser.add_mutually_exclusive_group(required=True)
+    pipeline_input.add_argument("--input", help="Single HWP file path")
+    pipeline_input.add_argument(
+        "--input-dir",
+        help="Folder of HWP files (*.hwp in that folder only; one pipeline per file)",
+    )
+    pipeline_parser.add_argument(
+        "--output-dir",
+        default="data/v2",
+        help="Base output directory when --*-output paths are omitted (per-file subfolder)",
+    )
+    pipeline_parser.add_argument("--prechunk-output", default=None, help="Prechunk JSONL path (--input only)")
+    pipeline_parser.add_argument("--chunks-output", default=None, help="Chunks JSONL path (--input only)")
+    pipeline_parser.add_argument("--embedded-output", default=None, help="Embedded JSONL path (--input only)")
+    pipeline_parser.add_argument(
+        "--debug-headings-output",
+        default=None,
+        help="Heading debug JSONL path (--input only)",
+    )
     pipeline_parser.add_argument(
         "--index-dir",
         default=None,
@@ -685,8 +891,9 @@ def main() -> None:
         )
     elif args.command == "parse-hwp":
         parse_hwp(
+            args.output,
             input_path=args.input,
-            output_path=args.output,
+            input_dir=args.input_dir,
             debug_headings=args.debug_headings,
             limit=args.limit,
             group_size=args.group_size,
@@ -710,8 +917,11 @@ def main() -> None:
         )
     elif args.command == "sampling":
         sampling(
+            args.output,
             input_path=args.input,
-            output_path=args.output,
+            input_dir=args.input_dir,
+            pattern=args.pattern,
+            recursive=args.recursive,
             quotas=args.quotas,
             appendix_mode=args.appendix_mode,
             min_per_doc=args.min_per_doc,
@@ -723,10 +933,12 @@ def main() -> None:
     elif args.command == "convert-embedding-input":
         convert_embedding_input(input_path=args.input, output_path=args.output, doc_id=args.doc_id)
     elif args.command == "run-pipeline":
+        resolved_index = str(resolve_index_dir(args.config, args.index_dir))
         run_pipeline(
             input_path=args.input,
+            input_dir=args.input_dir,
             output_dir=args.output_dir,
-            index_dir=str(resolve_index_dir(args.config, args.index_dir)) if args.index_dir else None,
+            index_dir=resolved_index,
             doc_id=args.doc_id,
             model=args.model,
             batch_size=args.batch_size,
@@ -735,6 +947,10 @@ def main() -> None:
             debug_headings=not args.no_debug_headings,
             dump_metadata_sample=args.dump_metadata_sample,
             dump_limit=args.dump_limit,
+            prechunk_output=args.prechunk_output,
+            chunks_output=args.chunks_output,
+            embedded_output=args.embedded_output,
+            debug_headings_output=args.debug_headings_output,
         )
 
 
