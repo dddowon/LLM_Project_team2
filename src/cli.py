@@ -99,7 +99,12 @@ def evaluate_mlflow(
 
     from pathlib import Path
 
-    from src.evaluation.mlflow_harness import run_eval_harness_mlflow
+    try:
+        from src.evaluation.mlflow_harness import run_eval_harness_mlflow
+    except ImportError as exc:
+        raise SystemExit(
+            "evaluate-mlflow requires MLflow. Install with: pip install -e \".[mlflow]\""
+        ) from exc
 
     load_dotenv()
     out, summary, run_id = run_eval_harness_mlflow(
@@ -410,6 +415,10 @@ def run_pipeline(
 
 
 def main() -> None:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
     parser = argparse.ArgumentParser(description="Bidmate RAG scenario B baseline")
     parser.add_argument("--config", default="configs/default.yaml")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -423,7 +432,7 @@ def main() -> None:
 
     harness_parser = subparsers.add_parser(
         "evaluate-harness",
-        help="RAG eval with LLM-as-judge and LangSmith traces (requires pip install -e '.[langsmith]')",
+        help="RAG eval with LLM-as-judge and LangSmith traces (default; set LANGSMITH_* in .env)",
     )
     harness_parser.add_argument(
         "--output",
@@ -448,7 +457,7 @@ def main() -> None:
 
     mlflow_parser = subparsers.add_parser(
         "evaluate-mlflow",
-        help="RAG eval with keyword retrieval, LLM-as-judge, and MLflow experiment tracking",
+        help="Same as evaluate-harness but logs to MLflow (requires pip install -e '.[mlflow]')",
     )
     mlflow_parser.add_argument(
         "--output",
