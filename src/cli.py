@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 import sys
@@ -574,6 +575,109 @@ def run_paddle_ocr(image_path: str, output_path: str, lang: str = "korean") -> N
     print(f"output: {output}")
 
 
+def run_docvlm_ocr(
+    image_path: str,
+    output_path: str,
+    model_name: str = "PP-DocBee-2B",
+    device: str = "gpu:0",
+    batch_size: int = 1,
+) -> None:
+    from pathlib import Path
+    import time
+
+    from paddleocr import DocVLM
+
+    image = Path(image_path)
+    if not image.exists():
+        raise FileNotFoundError(f"Image not found: {image}")
+
+    vlm = DocVLM(model_name=model_name, device=device)
+    start = time.perf_counter()
+    results = vlm.predict(
+        input={"image": str(image), "query": "Extract all visible text from this image."},
+        batch_size=batch_size,
+    )
+    latency_ms = (time.perf_counter() - start) * 1000.0
+
+    def _collect_texts(value: object) -> list[str]:
+        texts: list[str] = []
+        if value is None:
+            return texts
+        if isinstance(value, str):
+            text = value.strip()
+            if text:
+                texts.append(text)
+            return texts
+        if isinstance(value, dict):
+            # [Design Intent] DocVLM result payloads vary by model/version, so parse common text-bearing keys first.
+            preferred_keys = [
+                "text",
+                "markdown",
+                "content",
+                "result",
+                "answer",
+                "output",
+                "prediction",
+            ]
+            ignore_keys = {"image", "image_path", "input_path", "query", "prompt"}
+            for key in preferred_keys:
+                if key in value:
+                    texts.extend(_collect_texts(value.get(key)))
+            # Fallback: traverse all fields to avoid dropping nested text-only outputs.
+            for key, nested in value.items():
+                if key not in preferred_keys and key not in ignore_keys:
+                    texts.extend(_collect_texts(nested))
+            return texts
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                texts.extend(_collect_texts(item))
+            return texts
+        return texts
+
+    rows: list[dict] = []
+    raw_items: list[dict] = []
+    for item in results:
+        if hasattr(item, "to_dict"):
+            item_dict = item.to_dict()
+        elif isinstance(item, dict):
+            item_dict = item
+        else:
+            item_dict = {"raw": str(item)}
+        raw_items.append(item_dict)
+        extracted = _collect_texts(item_dict)
+        for text_block in extracted:
+            for line in (seg.strip() for seg in str(text_block).splitlines()):
+                if line:
+                    rows.append({"text": line, "score": None, "poly": None})
+
+    # [Design Intent] Keep order while dropping exact duplicates to stabilize downstream structured matching.
+    deduped_rows: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        key = row["text"].strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped_rows.append(row)
+
+    payload = {
+        "image_path": str(image),
+        "model": f"docvlm:{model_name}",
+        "lang": "multilingual",
+        "status": "success",
+        "latency_ms": round(latency_ms, 2),
+        "ocr_lines": deduped_rows,
+        "raw_docvlm_output": raw_items,
+    }
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"ocr_lines: {len(deduped_rows)}")
+    print(f"latency_ms: {payload['latency_ms']}")
+    print(f"output: {output}")
+
+
 def build_pred_structured(
     gt_path: str,
     pred_raw_path: str,
@@ -605,7 +709,11 @@ def eval_pred_structured_vs_gt(
     pred_structured_path: str,
     item_id: str,
     output_path: str,
+    relaxed_output_path: str | None = None,
+    field_match_csv_path: str | None = None,
+    relaxed_threshold: float = 0.65,
 ) -> None:
+    from difflib import SequenceMatcher
     from pathlib import Path
 
     from src.Parsing.ocr.evaluation.eval_pred_structured_vs_gt import (
@@ -685,6 +793,108 @@ def eval_pred_structured_vs_gt(
     print(json.dumps(report, ensure_ascii=False, indent=2))
     print(f"saved: {output}")
 
+    def normalize_text_relaxed(text: str) -> str:
+        text = str(text).lower()
+        text = text.replace("\n", " ")
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    def compact_text(text: str) -> str:
+        text = normalize_text_relaxed(text)
+        return re.sub(r"[^0-9a-z가-힣]+", "", text)
+
+    def flatten_structure(obj: object, path: str = "") -> list[dict[str, str]]:
+        rows: list[dict[str, str]] = []
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                next_path = f"{path}.{key}" if path else str(key)
+                rows.extend(flatten_structure(value, next_path))
+            return rows
+        if isinstance(obj, list):
+            for value in obj:
+                rows.extend(flatten_structure(value, path))
+            return rows
+        value = str(obj).strip()
+        if value:
+            rows.append({"field_path": path, "expected_value": value})
+        return rows
+
+    def value_match_score(expected: str, pred: str, threshold: float) -> tuple[float, bool]:
+        expected_norm = compact_text(expected)
+        pred_norm = compact_text(pred)
+        if not expected_norm:
+            return 0.0, False
+        if expected_norm in pred_norm:
+            return 1.0, True
+        score = SequenceMatcher(None, expected_norm, pred_norm).ratio()
+        return score, score >= threshold
+
+    expected_fields = flatten_structure(gt_structure)
+    field_rows: list[dict[str, object]] = []
+    matched_count = 0
+    for field in expected_fields:
+        score, matched = value_match_score(field["expected_value"], pred_text, relaxed_threshold)
+        if matched:
+            matched_count += 1
+        field_rows.append(
+            {
+                "id": item_id,
+                "type": pred_item.get("type", gt_item.get("image_type", "unknown")),
+                "field_path": field["field_path"],
+                "expected_value": field["expected_value"],
+                "match_score": round(score, 6),
+                "matched": matched,
+            }
+        )
+
+    text_similarity = SequenceMatcher(
+        None,
+        normalize_text_relaxed(gt_text),
+        normalize_text_relaxed(pred_text),
+    ).ratio()
+    field_hit_rate = matched_count / len(expected_fields) if expected_fields else 0.0
+    relaxed_report = {
+        "id": item_id,
+        "type": pred_item.get("type", gt_item.get("image_type", "unknown")),
+        "status": pred_item.get("status", "success"),
+        "latency_ms": pred_item.get("latency_ms"),
+        "text": {
+            "text_similarity": text_similarity,
+            "cer": text_cer,
+            "wer": text_wer,
+        },
+        "field_match": {
+            "rate_pct": round(field_hit_rate * 100.0, 2),
+            "matched": matched_count,
+            "total": len(expected_fields),
+            "threshold": relaxed_threshold,
+        },
+    }
+
+    relaxed_output = (
+        Path(relaxed_output_path)
+        if relaxed_output_path
+        else output.with_name("report_relaxed.json")
+    )
+    relaxed_output.parent.mkdir(parents=True, exist_ok=True)
+    relaxed_output.write_text(json.dumps(relaxed_report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"saved_relaxed: {relaxed_output}")
+
+    field_csv_output = (
+        Path(field_match_csv_path)
+        if field_match_csv_path
+        else output.with_name("field_match.csv")
+    )
+    field_csv_output.parent.mkdir(parents=True, exist_ok=True)
+    with field_csv_output.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["id", "type", "field_path", "expected_value", "match_score", "matched"],
+        )
+        writer.writeheader()
+        writer.writerows(field_rows)
+    print(f"saved_field_match_csv: {field_csv_output}")
+
 
 def ocr_run_all(
     image_path: str,
@@ -695,9 +905,25 @@ def ocr_run_all(
     report_output: str,
     lang: str = "korean",
     score_threshold: float = 0.0,
+    ocr_engine: str = "paddleocr",
+    ocr_device: str = "gpu:0",
+    docvlm_model_name: str = "PP-DocBee-2B",
+    docvlm_batch_size: int = 1,
+    relaxed_output_path: str | None = None,
+    field_match_csv_path: str | None = None,
+    relaxed_threshold: float = 0.65,
 ) -> None:
-    print("[1/3] run-paddle-ocr")
-    run_paddle_ocr(image_path=image_path, output_path=pred_raw_output, lang=lang)
+    print("[1/3] run-ocr")
+    if ocr_engine == "docvlm":
+        run_docvlm_ocr(
+            image_path=image_path,
+            output_path=pred_raw_output,
+            model_name=docvlm_model_name,
+            device=ocr_device,
+            batch_size=docvlm_batch_size,
+        )
+    else:
+        run_paddle_ocr(image_path=image_path, output_path=pred_raw_output, lang=lang)
     print("[2/3] build-pred-structured")
     build_pred_structured(
         gt_path=gt_path,
@@ -712,8 +938,207 @@ def ocr_run_all(
         pred_structured_path=pred_structured_output,
         item_id=item_id,
         output_path=report_output,
+        relaxed_output_path=relaxed_output_path,
+        field_match_csv_path=field_match_csv_path,
+        relaxed_threshold=relaxed_threshold,
     )
     print("ocr_run_all_done")
+
+
+def _infer_item_id_from_gt(gt_path: Path) -> str:
+    payload = json.loads(gt_path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict):
+        item_id = payload.get("id")
+        if not item_id:
+            raise ValueError(f"`id` not found in GT JSON: {gt_path}")
+        return str(item_id)
+
+    if isinstance(payload, list):
+        ids: list[str] = []
+        for item in payload:
+            if isinstance(item, dict) and item.get("id"):
+                item_id = str(item["id"])
+                if item_id not in ids:
+                    ids.append(item_id)
+        if not ids:
+            raise ValueError(f"No `id` found in GT JSON list: {gt_path}")
+        if len(ids) > 1:
+            raise ValueError(
+                f"Multiple ids found in GT JSON ({len(ids)}). Pass --id explicitly. ids={ids}"
+            )
+        return ids[0]
+
+    raise ValueError(f"Unsupported GT JSON shape: {type(payload).__name__}")
+
+
+def _resolve_ocr_doc_paths(
+    *,
+    doc_key: str,
+    images_root: str,
+    gt_root: str,
+    output_root: str,
+    image_name: str,
+) -> tuple[Path, Path, Path, Path, Path]:
+    image_path = Path(images_root) / doc_key / image_name
+    gt_path = Path(gt_root) / f"{doc_key}.json"
+    out_dir = Path(output_root) / doc_key
+    pred_raw = out_dir / "pred_raw.json"
+    pred_structured = out_dir / "pred_structured.json"
+    report = out_dir / "report.json"
+    return image_path, gt_path, pred_raw, pred_structured, report
+
+
+def _resolve_image_path(doc_dir: Path, image_name: str) -> Path:
+    if not doc_dir.exists():
+        raise FileNotFoundError(f"Image folder not found: {doc_dir}")
+
+    # 1) Exact path first.
+    exact = doc_dir / image_name
+    if exact.exists():
+        return exact
+
+    # 2) Try same stem with common image extensions.
+    stem = Path(image_name).stem
+    for ext in [".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"]:
+        candidate = doc_dir / f"{stem}{ext}"
+        if candidate.exists():
+            return candidate
+
+    # 3) Fallback: first image in folder.
+    image_files = sorted(
+        [
+            path
+            for path in doc_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
+        ],
+        key=lambda p: p.name,
+    )
+    if image_files:
+        return image_files[0]
+
+    raise FileNotFoundError(f"No image files found in: {doc_dir}")
+
+
+def ocr_run_doc(
+    *,
+    doc_key: str,
+    item_id: str | None,
+    images_root: str,
+    gt_root: str,
+    output_root: str,
+    image_name: str,
+    lang: str,
+    score_threshold: float,
+    ocr_engine: str,
+    ocr_device: str,
+    docvlm_model_name: str,
+    docvlm_batch_size: int,
+) -> None:
+    image_path, gt_path, pred_raw, pred_structured, report = _resolve_ocr_doc_paths(
+        doc_key=doc_key,
+        images_root=images_root,
+        gt_root=gt_root,
+        output_root=output_root,
+        image_name=image_name,
+    )
+    image_path = _resolve_image_path(Path(images_root) / doc_key, image_name)
+    if not gt_path.exists():
+        raise FileNotFoundError(f"GT not found: {gt_path}")
+
+    final_item_id = item_id or _infer_item_id_from_gt(gt_path)
+    pred_raw.parent.mkdir(parents=True, exist_ok=True)
+    print(f"doc_key: {doc_key}")
+    print(f"image: {image_path}")
+    print(f"gt: {gt_path}")
+    print(f"id: {final_item_id}")
+    ocr_run_all(
+        image_path=str(image_path),
+        gt_path=str(gt_path),
+        item_id=final_item_id,
+        pred_raw_output=str(pred_raw),
+        pred_structured_output=str(pred_structured),
+        report_output=str(report),
+        lang=lang,
+        score_threshold=score_threshold,
+        ocr_engine=ocr_engine,
+        ocr_device=ocr_device,
+        docvlm_model_name=docvlm_model_name,
+        docvlm_batch_size=docvlm_batch_size,
+    )
+
+
+def ocr_run_batch(
+    *,
+    images_root: str,
+    gt_root: str,
+    output_root: str,
+    image_name: str,
+    limit: int,
+    stop_on_error: bool,
+    lang: str,
+    score_threshold: float,
+    ocr_engine: str,
+    ocr_device: str,
+    docvlm_model_name: str,
+    docvlm_batch_size: int,
+) -> None:
+    image_root_path = Path(images_root)
+    if not image_root_path.exists():
+        raise FileNotFoundError(f"images_root not found: {image_root_path}")
+
+    doc_dirs = sorted([path for path in image_root_path.iterdir() if path.is_dir()], key=lambda p: p.name)
+    if limit > 0:
+        doc_dirs = doc_dirs[:limit]
+
+    ok_count = 0
+    skip_count = 0
+    skip_image_count = 0
+    skip_gt_count = 0
+    fail_count = 0
+
+    for doc_dir in doc_dirs:
+        doc_key = doc_dir.name
+        print(f"\n=== OCR Batch: {doc_key} ===")
+        try:
+            ocr_run_doc(
+                doc_key=doc_key,
+                item_id=None,
+                images_root=images_root,
+                gt_root=gt_root,
+                output_root=output_root,
+                image_name=image_name,
+                lang=lang,
+                score_threshold=score_threshold,
+                ocr_engine=ocr_engine,
+                ocr_device=ocr_device,
+                docvlm_model_name=docvlm_model_name,
+                docvlm_batch_size=docvlm_batch_size,
+            )
+            ok_count += 1
+        except FileNotFoundError as e:
+            message = str(e)
+            if "Image folder not found" in message or "No image files found" in message or "Image not found" in message:
+                print(f"[SKIP][이미지 없음] {message}")
+                skip_image_count += 1
+            elif "GT not found" in message:
+                print(f"[SKIP][GT 없음] {message}")
+                skip_gt_count += 1
+            else:
+                print(f"[SKIP] {message}")
+            skip_count += 1
+        except Exception as e:
+            print(f"[FAIL] {doc_key}: {e}")
+            fail_count += 1
+            if stop_on_error:
+                raise
+
+    print("\n=== OCR Batch Summary ===")
+    print(f"total_docs: {len(doc_dirs)}")
+    print(f"ok: {ok_count}")
+    print(f"skip: {skip_count}")
+    print(f"skip_image_missing: {skip_image_count}")
+    print(f"skip_gt_missing: {skip_gt_count}")
+    print(f"fail: {fail_count}")
 
 
 def _pipeline_paths_for_input(
@@ -1218,6 +1643,65 @@ def main() -> None:
     ocr_all_parser.add_argument("--report-output", required=True, help="Evaluation report JSON output path")
     ocr_all_parser.add_argument("--lang", default="korean", help="PaddleOCR language")
     ocr_all_parser.add_argument(
+        "--ocr-config",
+        default="configs/ocr_default.yaml",
+        help="OCR config path (engine/device/model settings)",
+    )
+    ocr_all_parser.add_argument(
+        "--score-threshold",
+        type=float,
+        default=0.0,
+        help="Minimum OCR confidence threshold for structured prediction",
+    )
+
+    ocr_doc_parser = subparsers.add_parser(
+        "ocr-run-doc",
+        help="Run OCR/eval for one doc_key with auto path resolution",
+    )
+    ocr_doc_parser.add_argument("--doc-key", required=True, help="Document key (folder name under ocr_images)")
+    ocr_doc_parser.add_argument(
+        "--id",
+        default=None,
+        help="Target item id. If omitted, auto-detected from GT JSON when unique.",
+    )
+    ocr_doc_parser.add_argument("--images-root", default="data/v2/ocr_images", help="Root folder of OCR images")
+    ocr_doc_parser.add_argument("--gt-root", default="data/v2/ocr_eval/incoming_gt", help="Root folder of GT JSONs")
+    ocr_doc_parser.add_argument("--output-root", default="data/v2/ocr_eval", help="Root folder of OCR outputs")
+    ocr_doc_parser.add_argument("--image-name", default="img_001.jpg", help="Image filename inside doc folder")
+    ocr_doc_parser.add_argument("--lang", default="korean", help="PaddleOCR language fallback")
+    ocr_doc_parser.add_argument(
+        "--ocr-config",
+        default="configs/ocr_default.yaml",
+        help="OCR config path (engine/device/model settings)",
+    )
+    ocr_doc_parser.add_argument(
+        "--score-threshold",
+        type=float,
+        default=0.0,
+        help="Minimum OCR confidence threshold for structured prediction",
+    )
+
+    ocr_batch_parser = subparsers.add_parser(
+        "ocr-run-batch",
+        help="Run OCR/eval for all doc folders under ocr_images",
+    )
+    ocr_batch_parser.add_argument("--images-root", default="data/v2/ocr_images", help="Root folder of OCR images")
+    ocr_batch_parser.add_argument("--gt-root", default="data/v2/ocr_eval/incoming_gt", help="Root folder of GT JSONs")
+    ocr_batch_parser.add_argument("--output-root", default="data/v2/ocr_eval", help="Root folder of OCR outputs")
+    ocr_batch_parser.add_argument("--image-name", default="img_001.jpg", help="Image filename inside doc folder")
+    ocr_batch_parser.add_argument("--limit", type=int, default=0, help="Process first N doc folders only; 0=all")
+    ocr_batch_parser.add_argument(
+        "--stop-on-error",
+        action="store_true",
+        help="Stop batch immediately on first failure",
+    )
+    ocr_batch_parser.add_argument("--lang", default="korean", help="PaddleOCR language fallback")
+    ocr_batch_parser.add_argument(
+        "--ocr-config",
+        default="configs/ocr_default.yaml",
+        help="OCR config path (engine/device/model settings)",
+    )
+    ocr_batch_parser.add_argument(
         "--score-threshold",
         type=float,
         default=0.0,
@@ -1404,6 +1888,9 @@ def main() -> None:
             output_path=args.output,
         )
     elif args.command == "ocr-run-all":
+        from src.config_ocr import load_ocr_config
+
+        ocr_cfg = load_ocr_config(args.ocr_config).ocr
         ocr_run_all(
             image_path=args.image,
             gt_path=args.gt,
@@ -1411,8 +1898,48 @@ def main() -> None:
             pred_raw_output=args.pred_raw_output,
             pred_structured_output=args.pred_structured_output,
             report_output=args.report_output,
-            lang=args.lang,
-            score_threshold=args.score_threshold,
+            lang=ocr_cfg.lang or args.lang,
+            score_threshold=ocr_cfg.score_threshold if ocr_cfg.score_threshold is not None else args.score_threshold,
+            ocr_engine=ocr_cfg.engine,
+            ocr_device=ocr_cfg.device,
+            docvlm_model_name=ocr_cfg.docvlm_model_name,
+            docvlm_batch_size=ocr_cfg.batch_size,
+        )
+    elif args.command == "ocr-run-doc":
+        from src.config_ocr import load_ocr_config
+
+        ocr_cfg = load_ocr_config(args.ocr_config).ocr
+        ocr_run_doc(
+            doc_key=args.doc_key,
+            item_id=args.id,
+            images_root=args.images_root,
+            gt_root=args.gt_root,
+            output_root=args.output_root,
+            image_name=args.image_name,
+            lang=ocr_cfg.lang or args.lang,
+            score_threshold=ocr_cfg.score_threshold if ocr_cfg.score_threshold is not None else args.score_threshold,
+            ocr_engine=ocr_cfg.engine,
+            ocr_device=ocr_cfg.device,
+            docvlm_model_name=ocr_cfg.docvlm_model_name,
+            docvlm_batch_size=ocr_cfg.batch_size,
+        )
+    elif args.command == "ocr-run-batch":
+        from src.config_ocr import load_ocr_config
+
+        ocr_cfg = load_ocr_config(args.ocr_config).ocr
+        ocr_run_batch(
+            images_root=args.images_root,
+            gt_root=args.gt_root,
+            output_root=args.output_root,
+            image_name=args.image_name,
+            limit=args.limit,
+            stop_on_error=args.stop_on_error,
+            lang=ocr_cfg.lang or args.lang,
+            score_threshold=ocr_cfg.score_threshold if ocr_cfg.score_threshold is not None else args.score_threshold,
+            ocr_engine=ocr_cfg.engine,
+            ocr_device=ocr_cfg.device,
+            docvlm_model_name=ocr_cfg.docvlm_model_name,
+            docvlm_batch_size=ocr_cfg.batch_size,
         )
     elif args.command == "run-pipeline":
         resolved_index = str(resolve_index_dir(args.config, args.index_dir))

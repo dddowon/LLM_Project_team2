@@ -1,0 +1,7 @@
+ocr:
+  engine: docvlm
+  device: gpu:0
+  lang: korean
+  score_threshold: 0.0
+  docvlm_model_name: PP-DocBee-2B
+  batch_size: 1

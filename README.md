@@ -207,89 +207,7 @@ python -m src.cli build-chroma \
 
 `OPENAI_API_KEY`가 없으면 `mock` 임베딩으로 동작하고, 실 API 강제 검증은 `--force-real` 옵션을 사용합니다.
 
-## OCR 파이프라인
 
-### OCR 환경 설치
-
-```bash
-conda create -n ocr_eval python=3.10.20 -y
-conda activate ocr_eval
-pip install -r requirements_ocr_eval.txt
-```
-
-### 개요
-
-OCR 파이프라인은 아래 4단계로 구성됩니다.
-
-1. `extract_hwp_images.py`  
-   `data/raw/ocr_raw/*.hwp` -> `data/v2/ocr_images/.../*.jpg|png`
-2. `run_paddle_ocr.py`  
-   추출 이미지 1장 -> `pred_raw.json` (`ocr_lines`)
-3. `build_pred_structured.py`  
-   `pred_raw.json` + `gt.json` -> `pred_structured.json`
-4. `eval_pred_structured_vs_gt.py`  
-   `gt.json` + `pred_structured.json` -> `report.json`
-
-### 원클릭 실행 (권장)
-
-```bash
-python -m src.cli ocr-run-all \
-  --image "data/v2/ocr_images/한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보/img_001.jpg" \
-  --gt "data/v2/ocr_eval/hanyeong_gt.json" \
-  --id "한영대학_학사정보_001" \
-  --pred-raw-output "data/v2/ocr_eval/hanyeong_pred_real_all.json" \
-  --pred-structured-output "data/v2/ocr_eval/hanyeong_pred_structured_all.json" \
-  --report-output "data/v2/ocr_eval/report_structured_all.json"
-```
-
-### 단계별 개별 실행
-
-1) HWP -> 이미지 추출
-
-```bash
-python -m src.cli extract-ocr-images \
-  --input-dir "data/raw/ocr_raw" \
-  --output-dir "data/v2/ocr_images" \
-  --limit 0
-```
-
-2) 이미지 1장 OCR 추론 (`pred_raw.json` 생성)
-
-```bash
-python src/Parsing/ocr/inference/run_paddle_ocr.py \
-  --image "data/v2/ocr_images/한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보/img_001.jpg" \
-  --output "data/v2/ocr_eval/hanyeong_pred_real.json"
-```
-
-3) raw -> structured 변환 (`pred_structured.json` 생성)
-
-```bash
-python src/Parsing/ocr/inference/build_pred_structured.py \
-  --gt "data/v2/ocr_eval/hanyeong_gt.json" \
-  --pred-raw "data/v2/ocr_eval/hanyeong_pred_real.json" \
-  --id "한영대학_학사정보_001" \
-  --output "data/v2/ocr_eval/hanyeong_pred_structured.json"
-```
-
-4) GT vs structured 비교 (`report.json` 생성)
-
-```bash
-python src/Parsing/ocr/evaluation/eval_pred_structured_vs_gt.py \
-  --gt "data/v2/ocr_eval/hanyeong_gt.json" \
-  --pred-structured "data/v2/ocr_eval/hanyeong_pred_structured.json" \
-  --id "한영대학_학사정보_001" \
-  --output "data/v2/ocr_eval/report_structured_real.json"
-```
-
-### 결과 확인 위치
-
-- OCR 이미지 추출 결과: `data/v2/ocr_images/`
-- OCR 평가 산출물(`pred_raw`, `pred_structured`, `report`): `data/v2/ocr_eval/`
-- `report.json` 주요 지표:
-  - `type`, `status`, `latency_ms`
-  - `text.char_similarity_pct`, `text.cer`, `text.wer`
-  - `field_match.rate_pct` (매칭 개수/전체 개수)
-  - `structure.<필드>.precision/recall/f1`
 
 ## 실험 포인트
 
@@ -344,3 +262,85 @@ python -m src.cli sampling \
 ```
 
 기준 청킹 결과와 overlap을 맞춰야 하는 경우 `chunk-jsonl`에 `--text-overlap 150`을 추가합니다.
+
+
+## OCR 파이프라인
+
+### OCR 환경 설치
+
+```bash
+conda create -n ocr_eval_vlm python=3.10.20 -y
+conda activate ocr_eval_vlm
+pip install -r requirements_ocr_eval_vlm.txt
+```
+
+### 개요
+
+현재 OCR 실행은 CLI에서 아래 명령으로 통합 운영합니다.
+
+```bash
+# WSL + NVIDIA GPU 환경에서만 필요
+export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH}
+```
+
+입력/출력 규칙:
+- 이미지 입력: `data/v2/ocr_images/<doc_key>/img_001.jpg`
+- GT 입력: `data/v2/ocr_eval/incoming_gt/<doc_key>.json`
+- 결과 출력: `data/v2/ocr_eval/<doc_key>/{pred_raw,pred_structured,report}.json`
+- `--doc-key`는 파일명이 아니라 `ocr_images` 하위 폴더명입니다.
+
+### 문서 1개 실행
+
+```bash
+python -m src.cli ocr-run-doc \
+  --doc-key "한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보" \
+  --ocr-config "configs/ocr_default.yaml"
+```
+
+실제 경로를 명시하려면:
+
+```bash
+cd /home/imella0707/personal/LLM_Project_team2
+conda activate ocr_eval_vlm
+export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH}   # WSL + NVIDIA GPU일 때만
+
+python -m src.cli ocr-run-doc \
+  --doc-key "한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보" \
+  --images-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_images" \
+  --gt-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_eval/incoming_gt" \
+  --output-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_eval" \
+  --ocr-config "/home/imella0707/personal/LLM_Project_team2/configs/ocr_default.yaml"
+```
+
+GT JSON에 `id`가 여러 개면 `--id`를 함께 지정하세요.
+
+### 전체 문서 배치 실행
+
+```bash
+python -m src.cli ocr-run-batch \
+  --ocr-config "configs/ocr_default.yaml"
+```
+
+실제 경로를 명시하려면:
+
+```bash
+cd /home/imella0707/personal/LLM_Project_team2
+conda activate ocr_eval_vlm
+export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH}   # WSL + NVIDIA GPU일 때만
+
+python -m src.cli ocr-run-batch \
+  --images-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_images" \
+  --gt-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_eval/incoming_gt" \
+  --output-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_eval" \
+  --ocr-config "/home/imella0707/personal/LLM_Project_team2/configs/ocr_default.yaml"
+```
+
+### 결과 확인 위치
+
+- OCR 이미지 추출 결과: `data/v2/ocr_images/`
+- OCR 평가 산출물(`pred_raw`, `pred_structured`, `report`): `data/v2/ocr_eval/`
+- `report.json` 주요 지표:
+  - `type`, `status`, `latency_ms`
+  - `text.char_similarity_pct`, `text.cer`, `text.wer`
+  - `field_match.rate_pct` (매칭 개수/전체 개수)
+  - `structure.<필드>.precision/recall/f1`

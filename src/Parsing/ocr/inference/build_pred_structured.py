@@ -20,6 +20,17 @@ def is_english_like(text: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9\s.,&'()/_-]+", text))
 
 
+def extract_hangul_segments(text: str) -> list[str]:
+    segments = re.findall(r"[가-힣][가-힣\s]*[가-힣]|[가-힣]", text)
+    return [normalize_space(seg) for seg in segments if normalize_space(seg)]
+
+
+def extract_english_segments(text: str) -> list[str]:
+    segments = re.findall(r"[A-Za-z][A-Za-z0-9\s.,&'()/_-]*[A-Za-z0-9)]", text)
+    cleaned = [normalize_space(seg) for seg in segments if normalize_space(seg)]
+    return [seg for seg in cleaned if is_english_like(seg)]
+
+
 def dedupe_keep_order(items: list[str]) -> list[str]:
     seen: set[str] = set()
     output: list[str] = []
@@ -82,8 +93,15 @@ def build_pred_structured(gt_item: dict, pred_raw_item: dict, score_threshold: f
 
     kept = dedupe_keep_order(kept)
     pred_text = " ".join(kept).strip()
-    kor_candidates = dedupe_keep_order([text for text in kept if has_hangul(text)])
-    eng_candidates = dedupe_keep_order([text for text in kept if is_english_like(text)])
+    # [Design Intent] VLM often returns mixed Korean/English in one line.
+    # Split mixed lines into language-specific segments before mapping to structured fields.
+    kor_candidates: list[str] = []
+    eng_candidates: list[str] = []
+    for text in kept:
+        kor_candidates.extend(extract_hangul_segments(text))
+        eng_candidates.extend(extract_english_segments(text))
+    kor_candidates = dedupe_keep_order(kor_candidates)
+    eng_candidates = dedupe_keep_order(eng_candidates)
 
     meta_keys = [
         "id",
