@@ -535,6 +535,187 @@ def convert_embedding_input(input_path: str, output_path: str, doc_id: str | Non
     print(f"Converted {count} rows -> {output_path}")
 
 
+def extract_ocr_images(input_dir: str, output_dir: str, limit: int = 0) -> None:
+    from pathlib import Path
+
+    from src.Parsing.ocr.inference.extract_hwp_images import extract_images_in_dir
+
+    saved = extract_images_in_dir(Path(input_dir), Path(output_dir), limit=limit)
+    print(f"saved_images: {len(saved)}")
+    print(f"output_dir: {output_dir}")
+
+
+def run_paddle_ocr(image_path: str, output_path: str, lang: str = "korean") -> None:
+    from pathlib import Path
+    import time
+
+    from src.Parsing.ocr.inference.run_paddle_ocr import run_single
+
+    image = Path(image_path)
+    if not image.exists():
+        raise FileNotFoundError(f"Image not found: {image}")
+    start = time.perf_counter()
+    rows = run_single(image, lang=lang)
+    latency_ms = (time.perf_counter() - start) * 1000.0
+    payload = {
+        "image_path": str(image),
+        "model": "paddleocr",
+        "lang": lang,
+        "status": "success",
+        "latency_ms": round(latency_ms, 2),
+        "ocr_lines": rows,
+    }
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"ocr_lines: {len(rows)}")
+    print(f"latency_ms: {payload['latency_ms']}")
+    print(f"output: {output}")
+
+
+def build_pred_structured(
+    gt_path: str,
+    pred_raw_path: str,
+    item_id: str,
+    output_path: str,
+    score_threshold: float = 0.0,
+) -> None:
+    from pathlib import Path
+
+    from src.Parsing.ocr.inference.build_pred_structured import (
+        build_pred_structured as build_structured_item,
+        load_item_by_id,
+        load_pred_raw,
+    )
+
+    gt_item = load_item_by_id(Path(gt_path), item_id)
+    pred_raw_item = load_pred_raw(Path(pred_raw_path), item_id)
+    structured = build_structured_item(gt_item, pred_raw_item, score_threshold=score_threshold)
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(structured, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"output: {output}")
+    print(f"pred_text: {structured['pred_text']}")
+
+
+def eval_pred_structured_vs_gt(
+    gt_path: str,
+    pred_structured_path: str,
+    item_id: str,
+    output_path: str,
+) -> None:
+    from pathlib import Path
+
+    from src.Parsing.ocr.evaluation.eval_pred_structured_vs_gt import (
+        compute_set_metrics,
+        levenshtein,
+        levenshtein_tokens,
+        load_item_by_id,
+        normalize,
+    )
+
+    gt_item = load_item_by_id(Path(gt_path), item_id)
+    pred_item = load_item_by_id(Path(pred_structured_path), item_id)
+    if "pred_structure" not in pred_item:
+        raise ValueError("Pred structured JSON missing key: pred_structure")
+
+    gt_text = str(gt_item.get("gt_text", ""))
+    pred_text = str(pred_item.get("pred_text", ""))
+    gt_norm = normalize(gt_text)
+    pred_norm = normalize(pred_text)
+    text_dist = levenshtein(gt_norm, pred_norm)
+    text_cer = text_dist / max(1, len(gt_norm))
+    char_similarity = max(0.0, 1.0 - (text_dist / max(1, len(gt_norm), len(pred_norm)))) * 100.0
+    gt_words = gt_norm.split() if gt_norm else []
+    pred_words = pred_norm.split() if pred_norm else []
+    word_dist = levenshtein_tokens(gt_words, pred_words)
+    text_wer = word_dist / max(1, len(gt_words))
+
+    fields = ["기관명", "영문명", "로고"]
+    structure_report: dict[str, dict] = {}
+    f1_scores: list[float] = []
+    matched_total = 0
+    gt_total = 0
+    gt_structure = gt_item.get("gt_structure", {}) if isinstance(gt_item.get("gt_structure", {}), dict) else {}
+    pred_structure = (
+        pred_item.get("pred_structure", {}) if isinstance(pred_item.get("pred_structure", {}), dict) else {}
+    )
+    for field in fields:
+        gt_values = gt_structure.get(field, [])
+        pred_values = pred_structure.get(field, [])
+        if not isinstance(gt_values, list):
+            gt_values = []
+        if not isinstance(pred_values, list):
+            pred_values = []
+        metrics = compute_set_metrics([str(v) for v in gt_values], [str(v) for v in pred_values])
+        structure_report[field] = metrics
+        f1_scores.append(metrics["f1"])
+        matched_total += metrics["matched"]
+        gt_total += metrics["gt_total"]
+
+    field_match_rate = (matched_total / gt_total * 100.0) if gt_total else 0.0
+
+    report = {
+        "id": item_id,
+        "type": pred_item.get("type", gt_item.get("image_type", "unknown")),
+        "status": pred_item.get("status", "success"),
+        "latency_ms": pred_item.get("latency_ms"),
+        "text": {
+            "gt_text": gt_text,
+            "pred_text": pred_text,
+            "exact_match": gt_norm == pred_norm,
+            "cer": text_cer,
+            "wer": text_wer,
+            "char_similarity_pct": round(char_similarity, 2),
+        },
+        "structure": structure_report,
+        "field_match": {
+            "rate_pct": round(field_match_rate, 2),
+            "matched": matched_total,
+            "total": gt_total,
+        },
+        "macro_f1": sum(f1_scores) / len(f1_scores) if f1_scores else 0.0,
+    }
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    print(f"saved: {output}")
+
+
+def ocr_run_all(
+    image_path: str,
+    gt_path: str,
+    item_id: str,
+    pred_raw_output: str,
+    pred_structured_output: str,
+    report_output: str,
+    lang: str = "korean",
+    score_threshold: float = 0.0,
+) -> None:
+    print("[1/3] run-paddle-ocr")
+    run_paddle_ocr(image_path=image_path, output_path=pred_raw_output, lang=lang)
+    print("[2/3] build-pred-structured")
+    build_pred_structured(
+        gt_path=gt_path,
+        pred_raw_path=pred_raw_output,
+        item_id=item_id,
+        output_path=pred_structured_output,
+        score_threshold=score_threshold,
+    )
+    print("[3/3] eval-pred-structured")
+    eval_pred_structured_vs_gt(
+        gt_path=gt_path,
+        pred_structured_path=pred_structured_output,
+        item_id=item_id,
+        output_path=report_output,
+    )
+    print("ocr_run_all_done")
+
+
 def _pipeline_paths_for_input(
     input_file: Path,
     output_dir: str,
@@ -989,6 +1170,60 @@ def main() -> None:
     convert_parser.add_argument("--output", required=True, help="Embedding input JSONL output path")
     convert_parser.add_argument("--doc-id", default=None, help="Optional doc id override")
 
+    ocr_parser = subparsers.add_parser(
+        "extract-ocr-images",
+        help="Extract embedded images from HWP files for OCR ground-truth preparation",
+    )
+    ocr_parser.add_argument("--input-dir", required=True, help="Directory containing HWP files")
+    ocr_parser.add_argument("--output-dir", required=True, help="Directory to save extracted images")
+    ocr_parser.add_argument("--limit", type=int, default=0, help="Process first N files only; 0=all")
+
+    build_pred_parser = subparsers.add_parser(
+        "build-pred-structured",
+        help="Convert raw OCR JSON to GT-aligned pred structured JSON",
+    )
+    build_pred_parser.add_argument("--gt", required=True, help="GT JSON path")
+    build_pred_parser.add_argument("--pred-raw", required=True, help="Raw OCR JSON path")
+    build_pred_parser.add_argument("--id", required=True, help="Target item id")
+    build_pred_parser.add_argument("--output", required=True, help="Pred structured JSON output path")
+    build_pred_parser.add_argument(
+        "--score-threshold",
+        type=float,
+        default=0.0,
+        help="Minimum OCR confidence threshold",
+    )
+
+    eval_pred_parser = subparsers.add_parser(
+        "eval-pred-structured",
+        help="Evaluate pred structured JSON against GT JSON",
+    )
+    eval_pred_parser.add_argument("--gt", required=True, help="GT JSON path")
+    eval_pred_parser.add_argument("--pred-structured", required=True, help="Pred structured JSON path")
+    eval_pred_parser.add_argument("--id", required=True, help="Target item id")
+    eval_pred_parser.add_argument("--output", required=True, help="Evaluation report output path")
+
+    ocr_all_parser = subparsers.add_parser(
+        "ocr-run-all",
+        help="Run OCR raw inference, build structured prediction, and evaluate against GT",
+    )
+    ocr_all_parser.add_argument("--image", required=True, help="Input image path")
+    ocr_all_parser.add_argument("--gt", required=True, help="GT JSON path")
+    ocr_all_parser.add_argument("--id", required=True, help="Target item id")
+    ocr_all_parser.add_argument("--pred-raw-output", required=True, help="OCR raw JSON output path")
+    ocr_all_parser.add_argument(
+        "--pred-structured-output",
+        required=True,
+        help="Structured prediction JSON output path",
+    )
+    ocr_all_parser.add_argument("--report-output", required=True, help="Evaluation report JSON output path")
+    ocr_all_parser.add_argument("--lang", default="korean", help="PaddleOCR language")
+    ocr_all_parser.add_argument(
+        "--score-threshold",
+        type=float,
+        default=0.0,
+        help="Minimum OCR confidence threshold for structured prediction",
+    )
+
     pipeline_parser = subparsers.add_parser(
         "run-pipeline",
         help="Run parse->chunk->embed->build-chroma in one command",
@@ -1151,6 +1386,34 @@ def main() -> None:
         )
     elif args.command == "convert-embedding-input":
         convert_embedding_input(input_path=args.input, output_path=args.output, doc_id=args.doc_id)
+    elif args.command == "extract-ocr-images":
+        extract_ocr_images(input_dir=args.input_dir, output_dir=args.output_dir, limit=args.limit)
+    elif args.command == "build-pred-structured":
+        build_pred_structured(
+            gt_path=args.gt,
+            pred_raw_path=args.pred_raw,
+            item_id=args.id,
+            output_path=args.output,
+            score_threshold=args.score_threshold,
+        )
+    elif args.command == "eval-pred-structured":
+        eval_pred_structured_vs_gt(
+            gt_path=args.gt,
+            pred_structured_path=args.pred_structured,
+            item_id=args.id,
+            output_path=args.output,
+        )
+    elif args.command == "ocr-run-all":
+        ocr_run_all(
+            image_path=args.image,
+            gt_path=args.gt,
+            item_id=args.id,
+            pred_raw_output=args.pred_raw_output,
+            pred_structured_output=args.pred_structured_output,
+            report_output=args.report_output,
+            lang=args.lang,
+            score_threshold=args.score_threshold,
+        )
     elif args.command == "run-pipeline":
         resolved_index = str(resolve_index_dir(args.config, args.index_dir))
         run_pipeline(
