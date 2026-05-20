@@ -294,7 +294,6 @@ def chunk_jsonl(
     print(f"sample_output: {sample}")
 
 
-<<<<<<< HEAD
 def _load_chunks_for_sampling(
     *,
     input_path: str | None,
@@ -303,7 +302,29 @@ def _load_chunks_for_sampling(
     recursive: bool,
 ) -> tuple[list[dict], list[Path]]:
     from src.sampling.sample_eval_chunks import read_jsonl
-=======
+
+    _require_exactly_one(
+        a=input_path,
+        b=input_dir,
+        a_name="--input (one JSONL)",
+        b_name="--input-dir (many JSONL files)",
+    )
+
+    if input_path:
+        path = Path(input_path)
+        return read_jsonl(path), [path]
+
+    root = Path(input_dir)  # type: ignore[arg-type]
+    iterator = root.rglob(pattern) if recursive else root.glob(pattern)
+    paths = sorted(path for path in iterator if path.is_file())
+    if not paths:
+        raise SystemExit(f"No chunk JSONL files found: {input_dir} ({pattern})")
+    rows: list[dict] = []
+    for path in paths:
+        rows.extend(read_jsonl(path))
+    return rows, paths
+
+
 def chunk_hwp_dir(
     input_dir: str,
     output_dir: str,
@@ -446,32 +467,6 @@ def chunk_hwp_slim(
     )
     for key, value in result.items():
         print(f"{key}: {value}")
-
-
-def convert_embedding_input(input_path: str, output_path: str, doc_id: str | None = None) -> None:
-    from pathlib import Path
->>>>>>> 8f9d0e9859aa2ddfb0a0f4c65c4a29dced204ba2
-
-    _require_exactly_one(
-        a=input_path,
-        b=input_dir,
-        a_name="--input (one JSONL)",
-        b_name="--input-dir (many JSONL files)",
-    )
-
-    if input_path:
-        path = Path(input_path)
-        return read_jsonl(path), [path]
-
-    root = Path(input_dir)  # type: ignore[arg-type]
-    iterator = root.rglob(pattern) if recursive else root.glob(pattern)
-    paths = sorted(path for path in iterator if path.is_file())
-    if not paths:
-        raise SystemExit(f"No chunk JSONL files found: {input_dir} ({pattern})")
-    rows: list[dict] = []
-    for path in paths:
-        rows.extend(read_jsonl(path))
-    return rows, paths
 
 
 def sampling(
@@ -868,7 +863,6 @@ def main() -> None:
     chunk_parser.add_argument("--exclude-cover", action="store_true", help="Exclude cover_text records")
     chunk_parser.add_argument("--include-debug-metadata", action="store_true", help="Keep debug metadata")
 
-<<<<<<< HEAD
     sampling_parser = subparsers.add_parser(
         "sampling",
         help="Sample evaluation chunks from slim RAG chunk JSONL (one file or many under a folder)",
@@ -940,7 +934,7 @@ def main() -> None:
         action="store_true",
         help="Add sample_strategy/sample_rank fields to metadata",
     )
-=======
+
     chunk_dir_parser = subparsers.add_parser(
         "chunk-hwp-dir",
         help="Parse and chunk HWP files in a directory without embedding or vector indexing",
@@ -986,7 +980,6 @@ def main() -> None:
     chunk_slim_parser.add_argument("--include-toc", action="store_true", help="Include TOC records")
     chunk_slim_parser.add_argument("--exclude-cover", action="store_true", help="Exclude cover_text records")
     chunk_slim_parser.add_argument("--stop-on-error", action="store_true", help="Stop when one file fails")
->>>>>>> 8f9d0e9859aa2ddfb0a0f4c65c4a29dced204ba2
 
     convert_parser = subparsers.add_parser(
         "convert-embedding-input",
@@ -1112,7 +1105,6 @@ def main() -> None:
             include_toc=args.include_toc,
             include_debug_metadata=args.include_debug_metadata,
         )
-<<<<<<< HEAD
     elif args.command == "sampling":
         sampling(
             args.output,
@@ -1127,7 +1119,7 @@ def main() -> None:
             min_chars=args.min_chars,
             limit_docs=args.limit_docs,
             add_sampling_metadata=args.add_sampling_metadata,
-=======
+        )
     elif args.command == "chunk-hwp-dir":
         chunk_hwp_dir(
             input_dir=args.input_dir,
@@ -1156,7 +1148,6 @@ def main() -> None:
             include_toc=args.include_toc,
             exclude_cover=args.exclude_cover,
             stop_on_error=args.stop_on_error,
->>>>>>> 8f9d0e9859aa2ddfb0a0f4c65c4a29dced204ba2
         )
     elif args.command == "convert-embedding-input":
         convert_embedding_input(input_path=args.input, output_path=args.output, doc_id=args.doc_id)
