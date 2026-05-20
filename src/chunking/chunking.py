@@ -370,6 +370,7 @@ def table_metadata(record: dict[str, Any]) -> dict[str, Any]:
         {
             "table_id": record.get("table_id", ""),
             "table_type": record.get("table_type", ""),
+            "table_shape": table.get("shape"),
             "table_rows": table.get("rows"),
             "table_cols": table.get("cols"),
             "table_cell_count": table.get("cell_count"),
@@ -394,6 +395,7 @@ def chunks_from_table(
     prefix_lines: list[str] = []
     if pending_context_note:
         prefix_lines.append(f"직전본문: {pending_context_note}")
+        prefix_lines.append("표위치: 위 직전본문 다음에 이 표가 이어짐")
 
     chunks: list[dict[str, Any]] = []
 
@@ -520,6 +522,7 @@ def flush_text_buffer(
     min_text_chars: int,
     short_context_chars: int,
     as_table_context: bool,
+    following_table: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], int, str]:
     if not text_records:
         return [], next_chunk_no, ""
@@ -554,7 +557,35 @@ def flush_text_buffer(
         part_metadata["part_index"] = part_index
         chunks.append(make_chunk(next_chunk_no, chunk_type=chunk_type, body=part, metadata=part_metadata))
         next_chunk_no += 1
+    if chunks and following_table:
+        marker = table_following_marker(following_table)
+        if marker:
+            chunks[-1]["chunk_text"] = clean_text_block(chunks[-1]["chunk_text"] + "\n\n" + marker)
+            chunks[-1]["metadata"]["next_table_id"] = following_table.get("table_id", "")
+            chunks[-1]["metadata"]["next_table_type"] = following_table.get("table_type", "")
+            chunks[-1]["metadata"]["next_table_shape"] = (following_table.get("table") or {}).get("shape", "")
     return chunks, next_chunk_no, ""
+
+
+def table_following_marker(record: dict[str, Any]) -> str:
+    table = record.get("table") or {}
+    table_id = record.get("table_id", "")
+    table_type = record.get("table_type", "")
+    table_shape_value = table.get("shape", "")
+    size = ""
+    if table.get("rows") and table.get("cols"):
+        size = f", {table.get('rows')}행x{table.get('cols')}열"
+    if not table_id:
+        return ""
+    parts = [f"[다음 표: {table_id}"]
+    if table_type:
+        parts.append(f", 유형={table_type}")
+    if table_shape_value:
+        parts.append(f", 형태={table_shape_value}")
+    if size:
+        parts.append(size)
+    parts.append("]")
+    return "".join(parts)
 
 
 def same_text_bucket(left: dict[str, Any], right: dict[str, Any]) -> bool:
@@ -576,7 +607,7 @@ def build_rag_chunks(records: list[dict[str, Any]], args: argparse.Namespace) ->
             flush_to_chunks(as_table_context=False)
         text_buffer.append(record)
 
-    def flush_to_chunks(*, as_table_context: bool) -> str:
+    def flush_to_chunks(*, as_table_context: bool, following_table: dict[str, Any] | None = None) -> str:
         nonlocal text_buffer, next_chunk_no, chunks
         emitted, next_chunk_no, context_note = flush_text_buffer(
             text_buffer,
@@ -586,6 +617,7 @@ def build_rag_chunks(records: list[dict[str, Any]], args: argparse.Namespace) ->
             min_text_chars=args.min_text_chars,
             short_context_chars=args.short_context_chars,
             as_table_context=as_table_context,
+            following_table=following_table,
         )
         chunks.extend(emitted)
         text_buffer = []
@@ -598,7 +630,7 @@ def build_rag_chunks(records: list[dict[str, Any]], args: argparse.Namespace) ->
             continue
 
         if content_type == "table":
-            context_note = flush_to_chunks(as_table_context=True)
+            context_note = flush_to_chunks(as_table_context=True, following_table=record)
             table_chunks, next_chunk_no = chunks_from_table(
                 record,
                 next_chunk_no=next_chunk_no,
@@ -678,7 +710,8 @@ def write_sample_jsonl(path: Path, chunks: list[dict[str, Any]], *, sample_size:
 def compact_output_metadata(chunks: list[dict[str, Any]]) -> None:
     """Keep only metadata that is useful for retrieval filters and citations."""
     common_keys = ["file_name", "section_path", "section_type", "heading"]
-    table_keys = ["table_type", "table_id", "row_range"]
+    table_keys = ["table_type", "table_shape", "table_id", "row_range"]
+    link_keys = ["next_table_id", "next_table_type", "next_table_shape"]
     for chunk in chunks:
         metadata = chunk.get("metadata", {})
         compact: dict[str, Any] = {}
@@ -688,6 +721,11 @@ def compact_output_metadata(chunks: list[dict[str, Any]]) -> None:
                 compact[key] = value
         if str(chunk.get("chunk_type", "")).startswith("table_"):
             for key in table_keys:
+                value = metadata.get(key)
+                if value not in ("", None, []):
+                    compact[key] = value
+        else:
+            for key in link_keys:
                 value = metadata.get(key)
                 if value not in ("", None, []):
                     compact[key] = value

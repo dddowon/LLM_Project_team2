@@ -1,0 +1,232 @@
+<!doctype html>
+    <html lang="ko">
+    <head>
+    <meta charset="utf-8">
+    <title>RAG 성능 평가 리포트</title>
+    <style>
+    body { font-family: 'Malgun Gothic', Arial, sans-serif; margin: 32px; background-color: #f4f7f9; color: #222; }
+    h1 { text-align: center; color: #333; }
+    h2 { border-left: 5px solid #4f7cff; padding-left: 12px; margin-top: 40px; font-size: 18px; }
+    h3 { margin-top: 0; font-size: 15px; }
+    .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-top: 20px; }
+    .card { border-radius: 12px; padding: 20px; background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.05); text-align: center; }
+    .metric { font-size: 26px; font-weight: 700; color: #4f7cff; margin-top: 8px; }
+    .chart-container { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px; }
+    .chart-box { background: #fff; padding: 15px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+    .note { margin-top: 10px; color: #666; font-size: 13px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 15px; background: #fff; border-radius: 8px; overflow: hidden; }
+    th, td { border: 1px solid #eee; padding: 12px; text-align: center; }
+    th { background: #f8f9fa; }
+    </style>
+    </head>
+    <body>
+    <h1>📊 RAG 성능 평가 리포트</h1>
+    <div class="cards">
+        <div class="card"><div>전체 질문 수</div><div class="metric">5개</div></div>
+        <div class="card"><div>평균 답변 정확도(f_score)</div><div class="metric">5.00</div></div>
+        <div class="card"><div>평균 질문 이해도(r_score)</div><div class="metric">4.80</div></div>
+        <div class="card"><div>평균 종합 능력(s_score)</div><div class="metric">4.80</div></div>
+        <div class="card"><div>평균 검색 성공률(Hit Rate)</div><div class="metric">100%</div></div>
+        <div class="card"><div>평균 응답 시간(total_latency_ms)</div><div class="metric">24.05초</div></div>
+    </div>
+    <h2>📈 유형별 지표 상세 분석</h2>
+    <div class="chart-container">
+        <div class="chart-box"><h3>🎯 답변의 정확도(f_score)</h3><svg viewBox="0 0 760 190" width="100%" role="img">
+<text x="0" y="26" class="svg-label" style="font-size:12px;">기능 요구사항</text>
+<rect x="210" y="8" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="8" width="460.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="26" class="svg-value" style="font-size:12px;">5.00</text>
+<text x="0" y="62" class="svg-label" style="font-size:12px;">보안 요구사항</text>
+<rect x="210" y="44" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="44" width="460.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="62" class="svg-value" style="font-size:12px;">5.00</text>
+<text x="0" y="98" class="svg-label" style="font-size:12px;">사이트 운영 현황</text>
+<rect x="210" y="80" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="80" width="460.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="98" class="svg-value" style="font-size:12px;">5.00</text>
+<text x="0" y="134" class="svg-label" style="font-size:12px;">입찰 참가 자격</text>
+<rect x="210" y="116" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="116" width="460.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="134" class="svg-value" style="font-size:12px;">5.00</text>
+<text x="0" y="170" class="svg-label" style="font-size:12px;">제안서 제출 방법</text>
+<rect x="210" y="152" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="152" width="460.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="170" class="svg-value" style="font-size:12px;">5.00</text>
+</svg></div>
+        <div class="chart-box"><h3>💡 질문 이해도(r_score)</h3><svg viewBox="0 0 760 190" width="100%" role="img">
+<text x="0" y="26" class="svg-label" style="font-size:12px;">기능 요구사항</text>
+<rect x="210" y="8" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="8" width="368.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="26" class="svg-value" style="font-size:12px;">4.00</text>
+<text x="0" y="62" class="svg-label" style="font-size:12px;">보안 요구사항</text>
+<rect x="210" y="44" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="44" width="460.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="62" class="svg-value" style="font-size:12px;">5.00</text>
+<text x="0" y="98" class="svg-label" style="font-size:12px;">사이트 운영 현황</text>
+<rect x="210" y="80" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="80" width="460.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="98" class="svg-value" style="font-size:12px;">5.00</text>
+<text x="0" y="134" class="svg-label" style="font-size:12px;">입찰 참가 자격</text>
+<rect x="210" y="116" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="116" width="460.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="134" class="svg-value" style="font-size:12px;">5.00</text>
+<text x="0" y="170" class="svg-label" style="font-size:12px;">제안서 제출 방법</text>
+<rect x="210" y="152" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="152" width="460.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="170" class="svg-value" style="font-size:12px;">5.00</text>
+</svg></div>
+        <div class="chart-box"><h3>🚀 종합 처리 능력(s_score)</h3><svg viewBox="0 0 760 190" width="100%" role="img">
+<text x="0" y="26" class="svg-label" style="font-size:12px;">기능 요구사항</text>
+<rect x="210" y="8" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="8" width="368.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="26" class="svg-value" style="font-size:12px;">4.00</text>
+<text x="0" y="62" class="svg-label" style="font-size:12px;">보안 요구사항</text>
+<rect x="210" y="44" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="44" width="460.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="62" class="svg-value" style="font-size:12px;">5.00</text>
+<text x="0" y="98" class="svg-label" style="font-size:12px;">사이트 운영 현황</text>
+<rect x="210" y="80" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="80" width="460.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="98" class="svg-value" style="font-size:12px;">5.00</text>
+<text x="0" y="134" class="svg-label" style="font-size:12px;">입찰 참가 자격</text>
+<rect x="210" y="116" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="116" width="460.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="134" class="svg-value" style="font-size:12px;">5.00</text>
+<text x="0" y="170" class="svg-label" style="font-size:12px;">제안서 제출 방법</text>
+<rect x="210" y="152" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="152" width="460.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="170" class="svg-value" style="font-size:12px;">5.00</text>
+</svg></div>
+        <div class="chart-box"><h3>🔍 정보 검색 성능(Hit Rate / retrieval_keyword_hit)</h3><svg viewBox="0 0 760 190" width="100%" role="img">
+<text x="0" y="26" class="svg-label" style="font-size:12px;">기능 요구사항</text>
+<rect x="210" y="8" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="8" width="460.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="26" class="svg-value" style="font-size:12px;">1.00</text>
+<text x="0" y="62" class="svg-label" style="font-size:12px;">보안 요구사항</text>
+<rect x="210" y="44" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="44" width="460.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="62" class="svg-value" style="font-size:12px;">1.00</text>
+<text x="0" y="98" class="svg-label" style="font-size:12px;">사이트 운영 현황</text>
+<rect x="210" y="80" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="80" width="460.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="98" class="svg-value" style="font-size:12px;">1.00</text>
+<text x="0" y="134" class="svg-label" style="font-size:12px;">입찰 참가 자격</text>
+<rect x="210" y="116" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="116" width="460.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="134" class="svg-value" style="font-size:12px;">1.00</text>
+<text x="0" y="170" class="svg-label" style="font-size:12px;">제안서 제출 방법</text>
+<rect x="210" y="152" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="152" width="460.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="170" class="svg-value" style="font-size:12px;">1.00</text>
+</svg></div>
+        <div class="chart-box"><h3>📌 문맥 정밀도(context_precision)</h3><svg viewBox="0 0 760 190" width="100%" role="img">
+<text x="0" y="26" class="svg-label" style="font-size:12px;">기능 요구사항</text>
+<rect x="210" y="8" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="8" width="92.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="26" class="svg-value" style="font-size:12px;">0.20</text>
+<text x="0" y="62" class="svg-label" style="font-size:12px;">보안 요구사항</text>
+<rect x="210" y="44" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="44" width="92.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="62" class="svg-value" style="font-size:12px;">0.20</text>
+<text x="0" y="98" class="svg-label" style="font-size:12px;">사이트 운영 현황</text>
+<rect x="210" y="80" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="80" width="184.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="98" class="svg-value" style="font-size:12px;">0.40</text>
+<text x="0" y="134" class="svg-label" style="font-size:12px;">입찰 참가 자격</text>
+<rect x="210" y="116" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="116" width="92.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="134" class="svg-value" style="font-size:12px;">0.20</text>
+<text x="0" y="170" class="svg-label" style="font-size:12px;">제안서 제출 방법</text>
+<rect x="210" y="152" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="152" width="92.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="170" class="svg-value" style="font-size:12px;">0.20</text>
+</svg></div>
+    </div>
+    <h2>📊 점수 분포</h2>
+    <div class="chart-container">
+        <div class="chart-box"><h3>🎯 답변 정확도 분포(f_score)</h3><svg viewBox="0 0 760 226" width="100%" role="img">
+<text x="0" y="26" class="svg-label" style="font-size:12px;">0점</text>
+<rect x="210" y="8" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="8" width="0.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="26" class="svg-value" style="font-size:12px;">0.00</text>
+<text x="0" y="62" class="svg-label" style="font-size:12px;">1점</text>
+<rect x="210" y="44" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="44" width="0.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="62" class="svg-value" style="font-size:12px;">0.00</text>
+<text x="0" y="98" class="svg-label" style="font-size:12px;">2점</text>
+<rect x="210" y="80" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="80" width="0.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="98" class="svg-value" style="font-size:12px;">0.00</text>
+<text x="0" y="134" class="svg-label" style="font-size:12px;">3점</text>
+<rect x="210" y="116" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="116" width="0.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="134" class="svg-value" style="font-size:12px;">0.00</text>
+<text x="0" y="170" class="svg-label" style="font-size:12px;">4점</text>
+<rect x="210" y="152" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="152" width="0.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="170" class="svg-value" style="font-size:12px;">0.00</text>
+<text x="0" y="206" class="svg-label" style="font-size:12px;">5점</text>
+<rect x="210" y="188" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="188" width="460.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="206" class="svg-value" style="font-size:12px;">1.00</text>
+</svg></div>
+        <div class="chart-box"><h3>💡 질문 이해도 분포(r_score)</h3><svg viewBox="0 0 760 226" width="100%" role="img">
+<text x="0" y="26" class="svg-label" style="font-size:12px;">0점</text>
+<rect x="210" y="8" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="8" width="0.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="26" class="svg-value" style="font-size:12px;">0.00</text>
+<text x="0" y="62" class="svg-label" style="font-size:12px;">1점</text>
+<rect x="210" y="44" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="44" width="0.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="62" class="svg-value" style="font-size:12px;">0.00</text>
+<text x="0" y="98" class="svg-label" style="font-size:12px;">2점</text>
+<rect x="210" y="80" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="80" width="0.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="98" class="svg-value" style="font-size:12px;">0.00</text>
+<text x="0" y="134" class="svg-label" style="font-size:12px;">3점</text>
+<rect x="210" y="116" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="116" width="0.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="134" class="svg-value" style="font-size:12px;">0.00</text>
+<text x="0" y="170" class="svg-label" style="font-size:12px;">4점</text>
+<rect x="210" y="152" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="152" width="115.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="170" class="svg-value" style="font-size:12px;">0.25</text>
+<text x="0" y="206" class="svg-label" style="font-size:12px;">5점</text>
+<rect x="210" y="188" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="188" width="460.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="206" class="svg-value" style="font-size:12px;">1.00</text>
+</svg></div>
+        <div class="chart-box"><h3>🚀 종합 능력 분포(s_score)</h3><svg viewBox="0 0 760 226" width="100%" role="img">
+<text x="0" y="26" class="svg-label" style="font-size:12px;">0점</text>
+<rect x="210" y="8" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="8" width="0.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="26" class="svg-value" style="font-size:12px;">0.00</text>
+<text x="0" y="62" class="svg-label" style="font-size:12px;">1점</text>
+<rect x="210" y="44" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="44" width="0.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="62" class="svg-value" style="font-size:12px;">0.00</text>
+<text x="0" y="98" class="svg-label" style="font-size:12px;">2점</text>
+<rect x="210" y="80" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="80" width="0.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="98" class="svg-value" style="font-size:12px;">0.00</text>
+<text x="0" y="134" class="svg-label" style="font-size:12px;">3점</text>
+<rect x="210" y="116" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="116" width="0.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="134" class="svg-value" style="font-size:12px;">0.00</text>
+<text x="0" y="170" class="svg-label" style="font-size:12px;">4점</text>
+<rect x="210" y="152" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="152" width="115.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="170" class="svg-value" style="font-size:12px;">0.25</text>
+<text x="0" y="206" class="svg-label" style="font-size:12px;">5점</text>
+<rect x="210" y="188" width="460" height="26" rx="5" style="fill:#f0f2f5;"/>
+<rect x="210" y="188" width="460.0" height="26" rx="5" style="fill:#4f7cff;"/>
+<text x="682" y="206" class="svg-value" style="font-size:12px;">1.00</text>
+</svg></div>
+    </div>
+    <h2>📋 유형별 데이터 요약</h2>
+    <table><thead><tr><th>질문 유형</th><th>질문 수</th><th>답변 정확도(f_score)</th><th>질문 이해도(r_score)</th><th>종합 능력(s_score)</th><th>검색 성공률(Hit Rate)</th><th>문맥 정밀도(context_precision)</th><th>평균 응답 시간(total_latency_ms)</th></tr></thead><tbody><tr><td>기능 요구사항</td><td>1개</td><td>5.00</td><td>4.00</td><td>4.00</td><td>100%</td><td>20%</td><td>19.57초</td></tr><tr><td>보안 요구사항</td><td>1개</td><td>5.00</td><td>5.00</td><td>5.00</td><td>100%</td><td>20%</td><td>24.57초</td></tr><tr><td>사이트 운영 현황</td><td>1개</td><td>5.00</td><td>5.00</td><td>5.00</td><td>100%</td><td>40%</td><td>26.93초</td></tr><tr><td>입찰 참가 자격</td><td>1개</td><td>5.00</td><td>5.00</td><td>5.00</td><td>100%</td><td>20%</td><td>22.25초</td></tr><tr><td>제안서 제출 방법</td><td>1개</td><td>5.00</td><td>5.00</td><td>5.00</td><td>100%</td><td>20%</td><td>26.92초</td></tr></tbody></table>
+    <h2>📝 오답 노트 / 실패 사례</h2>
+    <div class="note">답변 품질 점수가 낮거나 검색 성공률·문맥 정밀도가 0인 케이스를 우선 표시합니다.</div>
+    <table><thead><tr><th>질문 유형</th><th>답변 정확도(f_score)</th><th>질문 이해도(r_score)</th><th>종합 능력(s_score)</th><th>검색 성공(Hit Rate)</th><th>문맥 정밀도(context_precision)</th><th>질문</th><th>근거 청크</th></tr></thead><tbody></tbody></table>
+    </body>
+    </html>

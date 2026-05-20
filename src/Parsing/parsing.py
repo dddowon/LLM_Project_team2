@@ -44,9 +44,13 @@ BARE_SECTION_RE = re.compile(
 )
 
 REQUIREMENT_RE = re.compile(r"요구사항|요구\s*ID|SFR|SER|DAR|DIR|기능요구|보안요구", re.I)
-EVALUATION_RE = re.compile(r"평가|배점|점수|기술평가|가격평가|정량|정성|협상대상")
-SCHEDULE_RE = re.compile(r"20\d{2}년|기간|일정|월|착수|완료|추진")
+EVALUATION_RE = re.compile(r"평가|배점|점수|평점|기술평가|가격평가|정량|정성|협상대상")
+SCHEDULE_RE = re.compile(r"20\d{2}(?:년)?|[1-4]/4|M\+\d+|월별|분기|착수|완료")
+SCHEDULE_CONTEXT_RE = re.compile(r"추진\s*일정|공모\s*추진\s*일정|사업\s*기간|수행\s*기간|일정표|월별|연차별|착수|완료")
 FORM_RE = re.compile(r"신청서|서약서|각서|기관명|대표자|주소|인감|사업자등록번호")
+MENU_CONTEXT_RE = re.compile(r"기능\s*메뉴도|메뉴\s*구성|사이트맵|화면\s*구성|메뉴\s*구조")
+ORG_CONTEXT_RE = re.compile(r"추진\s*체계|수행\s*체계|사업수행\s*체계|조직도|역할\s*분담|분담\s*사항")
+COMPLIANCE_RE = re.compile(r"기술\s*적용\s*계획|적용계획/결과|부분적용|미적용|준수\s*여부|검토\s*결과")
 
 ROMAN_TOKEN_RE = r"(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+|IX|IV|V(?:I{0,3})?|X|I{1,3})"
 ROMAN_RE = re.compile(rf"^{ROMAN_TOKEN_RE}[.)]?$")
@@ -242,6 +246,61 @@ def compact_grid_lines(grid: list[list[str]], *, max_rows: int = 12) -> list[str
     return lines
 
 
+def markdown_cell(value: Any) -> str:
+    text = normalize_text(value)
+    text = text.replace("\\", "\\\\").replace("|", "\\|")
+    return text.replace("\n", "<br>")
+
+
+def grid_to_markdown(grid: list[list[str]]) -> str:
+    """Render a parsed HWP table grid as GitHub-flavored Markdown.
+
+    Markdown cannot express row/column spans, so the parser uses the span-filled
+    grid. That gives retrieval and review a readable approximation while keeping
+    the structured payload for chunking.
+    """
+    non_empty_rows = [row for row in grid if any(normalize_text(value) for value in row)]
+    if not non_empty_rows:
+        return ""
+
+    col_count = max(len(row) for row in non_empty_rows)
+    normalized_rows = [row + [""] * (col_count - len(row)) for row in non_empty_rows]
+
+    header = [markdown_cell(value) for value in normalized_rows[0]]
+    separator = ["---"] * col_count
+    body_rows = normalized_rows[1:] or [[""] * col_count]
+
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join(separator) + " |",
+    ]
+    for row in body_rows:
+        lines.append("| " + " | ".join(markdown_cell(value) for value in row) + " |")
+    return "\n".join(lines)
+
+
+def table_shape(grid: list[list[str]]) -> str:
+    rows = [row for row in grid if any(normalize_text(value) for value in row)]
+    if not rows:
+        return "empty"
+    row_count = len(rows)
+    col_count = max(len(row) for row in rows)
+    first_col_filled = sum(1 for row in rows if row and normalize_text(row[0]))
+    first_row_filled = sum(1 for value in rows[0] if normalize_text(value))
+
+    if row_count == 1 or col_count == 1:
+        return "freeform"
+    if col_count <= 3 and first_col_filled >= max(2, int(row_count * 0.6)):
+        return "vertical_key_value"
+    if col_count >= 5 and row_count >= 5:
+        return "matrix"
+    if row_count <= 4 and col_count >= 4:
+        return "horizontal_matrix"
+    if first_row_filled >= max(2, int(col_count * 0.5)):
+        return "header_rows"
+    return "mixed"
+
+
 def layout_heading_from_table(table: TableBlock, grid: list[list[str]]) -> tuple[int, str] | None:
     """Treat small layout tables such as 'Ⅰ | 사업안내' as headings, not tables."""
     values: list[str] = []
@@ -284,23 +343,45 @@ def classify_table(table: TableBlock, grid: list[list[str]]) -> str:
     page_like = sum(1 for value in last_values if re.fullmatch(r"\d{1,3}", value))
     page_ratio = page_like / max(1, len(last_values))
 
-    if has_nested_table(table):
-        return "nested_table"
     if "목차" in flat or (
         page_ratio >= 0.45 and span_ratio >= 0.25 and re.search(r"[ⅠⅡⅢⅣⅤ]|사업안내|과업안내|제안서", flat)
     ):
         return "toc_table"
-    if SCHEDULE_RE.search(flat) and table.cols >= 5:
-        return "schedule_table"
+    if table.rows == 1 and table.cols == 1 and not FORM_RE.search(flat):
+        return "note_table"
     if REQUIREMENT_RE.search(flat):
         return "requirement_table"
+    if COMPLIANCE_RE.search(flat):
+        return "compliance_table"
+    if has_nested_table(table):
+        return "nested_table"
     if EVALUATION_RE.search(flat):
         return "evaluation_table"
+    if SCHEDULE_RE.search(flat) and table.cols >= 5:
+        return "schedule_table"
     if FORM_RE.search(flat):
         return "form_table"
     if table.rows <= 2 or (table.cols <= 2 and empty_ratio >= 0.5):
         return "layout_table"
     return "data_table"
+
+
+def refine_table_type_by_context(table_type: str, path_items: list[str]) -> str:
+    """Use the surrounding heading path to fix table type when table text is ambiguous."""
+    context = normalize_text(" ".join(path_items))
+    if table_type in {"form_table", "note_table", "toc_table"}:
+        return table_type
+    if MENU_CONTEXT_RE.search(context):
+        return "menu_table"
+    if ORG_CONTEXT_RE.search(context):
+        return "organization_table"
+    if SCHEDULE_CONTEXT_RE.search(context):
+        return "schedule_table"
+    if table_type == "requirement_table":
+        return table_type
+    if COMPLIANCE_RE.search(context):
+        return "compliance_table"
+    return table_type
 
 
 def header_value_rows(grid: list[list[str]]) -> list[dict[str, Any]]:
@@ -354,19 +435,28 @@ def group_rows(rows: list[dict[str, Any]], *, group_size: int) -> list[dict[str,
     return groups
 
 
-def table_payload(table: TableBlock, table_type: str, grid: list[list[str]], *, group_size: int) -> dict[str, Any]:
+def table_payload(
+    table: TableBlock,
+    table_type: str,
+    grid: list[list[str]],
+    *,
+    group_size: int,
+    markdown_grid: list[list[str]] | None = None,
+) -> dict[str, Any]:
     """Build compact table payload for pre-chunk JSONL."""
     payload: dict[str, Any] = {
         "rows": table.rows,
         "cols": table.cols,
         "cell_count": len(table.cells),
+        "shape": table_shape(markdown_grid or grid),
+        "markdown": grid_to_markdown(markdown_grid or grid),
     }
 
     if table_type == "toc_table":
         payload["items"] = generic_rows(grid)
         return payload
 
-    if table_type in {"layout_table", "form_table", "nested_table"}:
+    if table_type in {"layout_table", "form_table", "nested_table", "note_table"}:
         payload["summary_lines"] = compact_grid_lines(grid, max_rows=16)
         if table_type == "nested_table":
             payload["nested_table_count"] = sum(
@@ -388,6 +478,16 @@ def table_payload(table: TableBlock, table_type: str, grid: list[list[str]], *, 
     else:
         payload["row_groups"] = group_rows(generic_rows(grid, start_row=1), group_size=group_size)
     return payload
+
+
+def table_payload_has_content(payload: dict[str, Any]) -> bool:
+    if payload.get("markdown"):
+        return True
+    for key in ("rows_data", "row_groups", "summary_lines", "items"):
+        values = payload.get(key)
+        if isinstance(values, list) and values:
+            return True
+    return False
 
 
 def table_text_for_record(table_type: str, payload: dict[str, Any]) -> str:
@@ -608,10 +708,14 @@ def build_prechunk_records(
             flush_text()
             table_index += 1
             table_id = f"table_{table_index:04d}"
-            payload = table_payload(block, table_type, grid, group_size=group_size)
             path_items = section_path(stack)
             if table_path_items:
                 path_items = [*path_items, *table_path_items]
+            table_type = refine_table_type_by_context(table_type, path_items)
+            payload = table_payload(block, table_type, grid, group_size=group_size, markdown_grid=grid_no_fill)
+            if not table_payload_has_content(payload):
+                add_debug("empty_table_skipped", table_type, table_id=table_id, section_path=path_items)
+                continue
             add_debug(
                 "table",
                 table_type,

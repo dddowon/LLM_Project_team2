@@ -237,6 +237,150 @@ def chunk_jsonl(
     print(f"sample_output: {sample}")
 
 
+def chunk_hwp_dir(
+    input_dir: str,
+    output_dir: str,
+    limit: int = 0,
+    group_size: int = 8,
+    sample_size: int = 10,
+    text_chunk_size: int = 900,
+    text_overlap: int = 180,
+) -> None:
+    from pathlib import Path
+
+    input_root = Path(input_dir)
+    output_root = Path(output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    files = sorted(input_root.rglob("*.hwp"))
+    if limit > 0:
+        files = files[:limit]
+    if not files:
+        raise RuntimeError(f"No HWP files found under {input_root}")
+
+    manifest: list[dict[str, object]] = []
+    failures: list[dict[str, str]] = []
+    for index, input_file in enumerate(files, start=1):
+        stem = input_file.stem
+        safe_stem = re.sub(r"[\\/:*?\"<>|&\s]+", "_", stem).strip("._")
+        safe_stem = re.sub(r"_+", "_", safe_stem) or f"document_{index:04d}"
+        doc_dir = output_root / safe_stem
+        doc_dir.mkdir(parents=True, exist_ok=True)
+
+        prechunk = doc_dir / "prechunk.jsonl"
+        headings = doc_dir / "heading_debug.jsonl"
+        chunks = doc_dir / "chunks.jsonl"
+        summary = doc_dir / "chunks_summary.csv"
+        sample = doc_dir / "chunks_sample.jsonl"
+
+        print(f"[{index}/{len(files)}] {input_file.name}")
+        try:
+            parse_hwp(
+                input_path=str(input_file),
+                output_path=str(prechunk),
+                debug_headings=str(headings),
+                group_size=group_size,
+            )
+            chunk_jsonl(
+                input_path=str(prechunk),
+                output_path=str(chunks),
+                summary_output=str(summary),
+                sample_output=str(sample),
+                sample_size=sample_size,
+                text_chunk_size=text_chunk_size,
+                text_overlap=text_overlap,
+            )
+            manifest.append(
+                {
+                    "source": str(input_file),
+                    "output_dir": str(doc_dir),
+                    "prechunk": str(prechunk),
+                    "chunks": str(chunks),
+                    "summary": str(summary),
+                    "sample": str(sample),
+                }
+            )
+        except Exception as exc:
+            failures.append(
+                {
+                    "source": str(input_file),
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+            )
+            print(f"FAILED: {type(exc).__name__}: {exc}")
+
+    manifest_path = output_root / "chunk_manifest.json"
+    failure_path = output_root / "chunk_failures.json"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    failure_path.write_text(json.dumps(failures, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print("chunk_hwp_dir_done")
+    print(f"processed: {len(manifest)}")
+    print(f"failed: {len(failures)}")
+    print(f"manifest: {manifest_path}")
+    print(f"failures: {failure_path}")
+
+
+def chunk_hwp_slim(
+    input_dir: str,
+    input_files: list[str] | None,
+    output_path: str | None,
+    errors_path: str | None,
+    tables_output_path: str | None,
+    glob_pattern: str,
+    recursive: bool,
+    limit_files: int,
+    group_size: int,
+    text_chunk_size: int,
+    text_overlap: int,
+    table_chunk_size: int,
+    max_table_rows: int,
+    include_toc: bool,
+    exclude_cover: bool,
+    stop_on_error: bool,
+) -> None:
+    from pathlib import Path
+
+    from src.pipeline.hwp_slim_pipeline import chunk_hwp_dir_to_slim_jsonl, safe_output_stem
+
+    selected_input_files = [Path(path) for path in input_files] if input_files else None
+    if output_path is None:
+        if selected_input_files and len(selected_input_files) == 1:
+            stem = safe_output_stem(selected_input_files[0].stem)
+            resolved_output_path = Path("data/v2/samples") / f"{stem}_slim_with_tables.jsonl"
+            resolved_tables_output_path = (
+                Path(tables_output_path) if tables_output_path else Path("data/v2/samples") / f"{stem}_tables_markdown.jsonl"
+            )
+        else:
+            resolved_output_path = Path("data/v2/hwp_chunks_slim.jsonl")
+            resolved_tables_output_path = Path(tables_output_path) if tables_output_path else None
+    else:
+        resolved_output_path = Path(output_path)
+        resolved_tables_output_path = Path(tables_output_path) if tables_output_path else None
+
+    result = chunk_hwp_dir_to_slim_jsonl(
+        input_dir=Path(input_dir),
+        input_files=selected_input_files,
+        output_path=resolved_output_path,
+        errors_path=Path(errors_path) if errors_path else None,
+        tables_output_path=resolved_tables_output_path,
+        glob_pattern=glob_pattern,
+        recursive=recursive,
+        limit_files=limit_files,
+        group_size=group_size,
+        text_chunk_size=text_chunk_size,
+        text_overlap=text_overlap,
+        table_chunk_size=table_chunk_size,
+        max_table_rows=max_table_rows,
+        include_cover=not exclude_cover,
+        include_toc=include_toc,
+        stop_on_error=stop_on_error,
+    )
+    for key, value in result.items():
+        print(f"{key}: {value}")
+
+
 def convert_embedding_input(input_path: str, output_path: str, doc_id: str | None = None) -> None:
     from pathlib import Path
 
@@ -412,6 +556,52 @@ def main() -> None:
     chunk_parser.add_argument("--exclude-cover", action="store_true", help="Exclude cover_text records")
     chunk_parser.add_argument("--include-debug-metadata", action="store_true", help="Keep debug metadata")
 
+    chunk_dir_parser = subparsers.add_parser(
+        "chunk-hwp-dir",
+        help="Parse and chunk HWP files in a directory without embedding or vector indexing",
+    )
+    chunk_dir_parser.add_argument("--input-dir", default="data/v1/raw", help="Directory containing HWP files")
+    chunk_dir_parser.add_argument("--output-dir", default="data/v2/chunked_hwp", help="Chunk output directory")
+    chunk_dir_parser.add_argument("--limit", type=int, default=0, help="Process first N HWP files; 0=all")
+    chunk_dir_parser.add_argument("--group-size", type=int, default=8, help="Table row group size for parser")
+    chunk_dir_parser.add_argument("--sample-size", type=int, default=10, help="Sample chunks per document")
+    chunk_dir_parser.add_argument("--text-chunk-size", type=int, default=900, help="Text chunk body size")
+    chunk_dir_parser.add_argument("--text-overlap", type=int, default=180, help="Text overlap chars")
+
+    chunk_slim_parser = subparsers.add_parser(
+        "chunk-hwp-slim",
+        help="Parse HWP files into one slim JSONL including section and table chunks",
+    )
+    chunk_slim_parser.add_argument("--input-dir", default="data/v1/raw", help="Directory containing HWP files")
+    chunk_slim_parser.add_argument(
+        "--input-file",
+        action="append",
+        default=None,
+        help="Specific HWP file to process; can be passed multiple times. Overrides directory discovery.",
+    )
+    chunk_slim_parser.add_argument(
+        "--output",
+        default=None,
+        help="Output JSONL. If omitted with one --input-file, uses data/v2/samples/<input_name>_slim_with_tables.jsonl",
+    )
+    chunk_slim_parser.add_argument("--errors-output", default=None, help="Optional errors JSON path")
+    chunk_slim_parser.add_argument(
+        "--tables-output",
+        default=None,
+        help="Optional table-only JSONL path with Markdown tables; defaults to <output_stem>_tables.jsonl",
+    )
+    chunk_slim_parser.add_argument("--glob", default="*.hwp", help="HWP filename glob")
+    chunk_slim_parser.add_argument("--recursive", action="store_true", help="Search input directory recursively")
+    chunk_slim_parser.add_argument("--limit-files", type=int, default=0, help="Process first N HWP files; 0=all")
+    chunk_slim_parser.add_argument("--group-size", type=int, default=8, help="Table row group size")
+    chunk_slim_parser.add_argument("--text-chunk-size", type=int, default=900, help="Text chunk body size")
+    chunk_slim_parser.add_argument("--text-overlap", type=int, default=150, help="Text overlap chars")
+    chunk_slim_parser.add_argument("--table-chunk-size", type=int, default=1000, help="Table chunk body size")
+    chunk_slim_parser.add_argument("--max-table-rows", type=int, default=6, help="Max table rows per chunk")
+    chunk_slim_parser.add_argument("--include-toc", action="store_true", help="Include TOC records")
+    chunk_slim_parser.add_argument("--exclude-cover", action="store_true", help="Exclude cover_text records")
+    chunk_slim_parser.add_argument("--stop-on-error", action="store_true", help="Stop when one file fails")
+
     convert_parser = subparsers.add_parser(
         "convert-embedding-input",
         help="Convert prechunk/chunk JSONL to embedding input JSONL",
@@ -506,6 +696,35 @@ def main() -> None:
             include_cover=not args.exclude_cover,
             include_toc=args.include_toc,
             include_debug_metadata=args.include_debug_metadata,
+        )
+    elif args.command == "chunk-hwp-dir":
+        chunk_hwp_dir(
+            input_dir=args.input_dir,
+            output_dir=args.output_dir,
+            limit=args.limit,
+            group_size=args.group_size,
+            sample_size=args.sample_size,
+            text_chunk_size=args.text_chunk_size,
+            text_overlap=args.text_overlap,
+        )
+    elif args.command == "chunk-hwp-slim":
+        chunk_hwp_slim(
+            input_dir=args.input_dir,
+            input_files=args.input_file,
+            output_path=args.output,
+            errors_path=args.errors_output,
+            tables_output_path=args.tables_output,
+            glob_pattern=args.glob,
+            recursive=args.recursive,
+            limit_files=args.limit_files,
+            group_size=args.group_size,
+            text_chunk_size=args.text_chunk_size,
+            text_overlap=args.text_overlap,
+            table_chunk_size=args.table_chunk_size,
+            max_table_rows=args.max_table_rows,
+            include_toc=args.include_toc,
+            exclude_cover=args.exclude_cover,
+            stop_on_error=args.stop_on_error,
         )
     elif args.command == "convert-embedding-input":
         convert_embedding_input(input_path=args.input, output_path=args.output, doc_id=args.doc_id)
