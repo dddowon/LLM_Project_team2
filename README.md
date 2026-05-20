@@ -107,8 +107,10 @@ pip install -e ".[hwp]"
 
 ```bash
 python -m src.cli run-pipeline \
-  --input "data/raw/(사)부산국제영화제_2024년 BIFF & ACFM 온라인서비스 재개발 및 행사지원시.hwp" \
-  --output-dir "data/v2"
+  --input-dir "data/raw/폴더 이름" \
+  --output-dir "data/v2" \
+  --index-dir "checkpoints/chroma_openai" \
+  --force-real
 ```
 
 메타데이터 샘플 저장이 필요한 경우:
@@ -153,7 +155,10 @@ python -m src.cli run-pipeline \
 
 ### 단계별 실행
 
-단계별 실행은 디버깅 또는 중간 산출물(prechunk/chunks/embedded) 확인이 필요한 경우에만 사용하고, 일반 실행은 원클릭 `run-pipeline`을 권장합니다.
+디버깅 또는 중간 산출물(prechunk/chunks/embedded) 확인이 필요할 때만 사용합니다. 일반 실행은 원클릭 `run-pipeline`을 권장합니다.
+
+- 원본 HWP: `data/raw/`
+- 산출 경로: `run-pipeline`과 동일 (`data/v2/<sanitize된_파일명>/` 아래, 파일명은 원본 stem 유지)
 
 ```bash
 python -m src.cli parse-hwp \
@@ -168,12 +173,15 @@ python -m src.cli chunk-jsonl \
 python -m src.cli embed-jsonl \
   --input "data/v2/(사)부산국제영화제_2024년_BIFF_ACFM_온라인서비스_재개발_및_행사지원시/(사)부산국제영화제_2024년 BIFF & ACFM 온라인서비스 재개발 및 행사지원시_chunks.jsonl" \
   --output "data/v2/(사)부산국제영화제_2024년_BIFF_ACFM_온라인서비스_재개발_및_행사지원시/(사)부산국제영화제_2024년 BIFF & ACFM 온라인서비스 재개발 및 행사지원시_embedded.jsonl" \
-  --model "text-embedding-3-small"
+  --model "text-embedding-3-small" \
+  --force-real
 
 python -m src.cli build-chroma \
   --input "data/v2/(사)부산국제영화제_2024년_BIFF_ACFM_온라인서비스_재개발_및_행사지원시/(사)부산국제영화제_2024년 BIFF & ACFM 온라인서비스 재개발 및 행사지원시_embedded.jsonl" \
-  --index-dir "data/v2/(사)부산국제영화제_2024년_BIFF_ACFM_온라인서비스_재개발_및_행사지원시/chroma_index"
+  --index-dir "checkpoints/chroma_openai"
 ```
+
+`build-chroma`의 `--index-dir`은 원클릭 실행과 같이 팀 공용 인덱스(`configs/default.yaml`의 `paths.index_dir`)를 쓰는 것을 권장합니다. 문서 폴더 안에만 두려면 `data/v2/(사)부산국제영화제_2024년_BIFF_ACFM_온라인서비스_재개발_및_행사지원시/chroma_index`처럼 지정할 수 있습니다.
 
 ### `embed-jsonl` 입력 포맷(고정)
 
@@ -203,32 +211,42 @@ python -m src.cli build-chroma \
 
 ## 파싱/청킹/샘플링 단독 실행
 
-아래 명령은 임베딩이나 Chroma 인덱싱 없이 HWP 파싱, 청킹, 평가용 샘플링만 순서대로 실행합니다.
+임베딩·Chroma 인덱싱 없이 **파싱 → 청킹 → (선택) 평가용 샘플링**만 실행합니다. 경로 규칙은 위 단계별 실행과 동일합니다.
 
 파싱:
 
 ```bash
-venv/bin/python -m src.cli parse-hwp \
-  --input "data/v2/(사)부산국제영화제_2024년 BIFF & ACFM 온라인서비스 재개발 및 행사지원시.hwp" \
-  --output "data/v2/biff_acfm_parse_chunk_test/prechunk.jsonl"
+python -m src.cli parse-hwp \
+  --input "data/raw/(사)부산국제영화제_2024년 BIFF & ACFM 온라인서비스 재개발 및 행사지원시.hwp" \
+  --output "data/v2/(사)부산국제영화제_2024년_BIFF_ACFM_온라인서비스_재개발_및_행사지원시/(사)부산국제영화제_2024년 BIFF & ACFM 온라인서비스 재개발 및 행사지원시_prechunk.jsonl" \
+  --debug-headings "data/v2/(사)부산국제영화제_2024년_BIFF_ACFM_온라인서비스_재개발_및_행사지원시/(사)부산국제영화제_2024년 BIFF & ACFM 온라인서비스 재개발 및 행사지원시_heading_debug.jsonl"
 ```
 
-청킹:
+청킹 (`chunks_summary.csv`, `chunks_sample.jsonl`은 옵션으로 함께 저장):
 
 ```bash
-venv/bin/python -m src.cli chunk-jsonl \
-  --input "data/v2/biff_acfm_parse_chunk_test/prechunk.jsonl" \
-  --output "data/v2/biff_acfm_parse_chunk_test/chunks.jsonl" \
-  --summary-output "data/v2/biff_acfm_parse_chunk_test/chunks_summary.csv" \
-  --sample-output "data/v2/biff_acfm_parse_chunk_test/chunks_sample.jsonl"
+python -m src.cli chunk-jsonl \
+  --input "data/v2/(사)부산국제영화제_2024년_BIFF_ACFM_온라인서비스_재개발_및_행사지원시/(사)부산국제영화제_2024년 BIFF & ACFM 온라인서비스 재개발 및 행사지원시_prechunk.jsonl" \
+  --output "data/v2/(사)부산국제영화제_2024년_BIFF_ACFM_온라인서비스_재개발_및_행사지원시/(사)부산국제영화제_2024년 BIFF & ACFM 온라인서비스 재개발 및 행사지원시_chunks.jsonl"
 ```
 
-평가용 샘플링:
+`chunks_sample.jsonl`은 문서당 청크 미리보기(기본 20개)이며, 아래 `eval_sample_chunks.jsonl`과는 다릅니다.
+
+평가용 샘플링 — 문서 1개:
 
 ```bash
-venv/bin/python -m src.cli sampling \
-  --input "data/v2/biff_acfm_parse_chunk_test/chunks.jsonl" \
-  --output "data/v2/biff_acfm_parse_chunk_test/eval_sample_chunks.jsonl"
+python -m src.cli sampling \
+  --input "data/v2/(사)부산국제영화제_2024년_BIFF_ACFM_온라인서비스_재개발_및_행사지원시/(사)부산국제영화제_2024년 BIFF & ACFM 온라인서비스 재개발 및 행사지원시_chunks.jsonl" \
+  --output "data/v2/eval_sample_chunks.jsonl"
+```
+
+`run-pipeline`으로 여러 문서를 처리한 뒤 일괄 샘플링:
+
+```bash
+python -m src.cli sampling \
+  --input-dir "data/v2" \
+  --pattern "*_chunks.jsonl" \
+  --output "data/v2/eval_sample_chunks.jsonl"
 ```
 
 기준 청킹 결과와 overlap을 맞춰야 하는 경우 `chunk-jsonl`에 `--text-overlap 150`을 추가합니다.
