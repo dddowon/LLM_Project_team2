@@ -585,6 +585,7 @@ def group_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return grouped
 
 
+<<<<<<< HEAD
 def split_long_unit(unit: str, chunk_size: int) -> list[str]:
     unit = unit.strip()
     if len(unit) <= chunk_size:
@@ -595,6 +596,24 @@ def split_long_unit(unit: str, chunk_size: int) -> list[str]:
         parts.append(unit[start : start + chunk_size].strip())
         start += chunk_size
     return [part for part in parts if part]
+=======
+def table_metadata(record: dict[str, Any]) -> dict[str, Any]:
+    metadata = base_metadata(record)
+    table = record.get("table") or {}
+    metadata.update(
+        {
+            "table_id": record.get("table_id", ""),
+            "table_type": record.get("table_type", ""),
+            "table_shape": table.get("shape"),
+            "table_rows": table.get("rows"),
+            "table_cols": table.get("cols"),
+            "table_cell_count": table.get("cell_count"),
+        }
+    )
+    if table.get("nested_table_count") is not None:
+        metadata["nested_table_count"] = table.get("nested_table_count")
+    return {key: value for key, value in metadata.items() if value not in ("", None, [])}
+>>>>>>> 8f9d0e9859aa2ddfb0a0f4c65c4a29dced204ba2
 
 
 def overlap_tail(text: str, overlap: int) -> str:
@@ -668,10 +687,26 @@ def compact_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
 def make_chunks(
     grouped_records: list[dict[str, Any]],
     *,
+<<<<<<< HEAD
     chunk_size: int,
     overlap: int,
     include_doc_name_in_text: bool,
 ) -> list[dict[str, Any]]:
+=======
+    next_chunk_no: int,
+    table_chunk_size: int,
+    max_rows_per_chunk: int,
+    pending_context_note: str = "",
+) -> tuple[list[dict[str, Any]], int]:
+    table = record.get("table") or {}
+    metadata = table_metadata(record)
+    table_type = str(metadata.get("table_type", "table"))
+    prefix_lines: list[str] = []
+    if pending_context_note:
+        prefix_lines.append(f"직전본문: {pending_context_note}")
+        prefix_lines.append("표위치: 위 직전본문 다음에 이 표가 이어짐")
+
+>>>>>>> 8f9d0e9859aa2ddfb0a0f4c65c4a29dced204ba2
     chunks: list[dict[str, Any]] = []
     for record in grouped_records:
         chunk_type = str(record.get("content_type") or "section_text")
@@ -707,6 +742,7 @@ def make_chunks(
     return chunks
 
 
+<<<<<<< HEAD
 def build_rag_chunks(
     records: list[dict[str, Any]], args: argparse.Namespace
 ) -> list[dict[str, Any]]:
@@ -731,6 +767,160 @@ def build_rag_chunks(
 
 def compact_output_metadata(chunks: list[dict[str, Any]]) -> None:
     _ = chunks
+=======
+def flush_text_buffer(
+    text_records: list[dict[str, Any]],
+    *,
+    next_chunk_no: int,
+    text_chunk_size: int,
+    text_overlap: int,
+    min_text_chars: int,
+    short_context_chars: int,
+    as_table_context: bool,
+    following_table: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], int, str]:
+    if not text_records:
+        return [], next_chunk_no, ""
+
+    body = clean_text_block("\n\n".join(str(record.get("text", "")) for record in text_records))
+    if not body:
+        return [], next_chunk_no, ""
+
+    first = text_records[0]
+    if is_low_value_text(body, content_type=str(first.get("content_type", ""))):
+        return [], next_chunk_no, ""
+
+    if as_table_context and len(body) <= short_context_chars:
+        return [], next_chunk_no, body
+
+    metadata = base_metadata(first)
+    metadata["source_record_indices"] = [record.get("_source_record_index") for record in text_records]
+    metadata["merged_record_count"] = len(text_records)
+    chunk_type = "cover_text" if first.get("content_type") == "cover_text" else "section_text"
+
+    chunks: list[dict[str, Any]] = []
+    for part_index, part in enumerate(
+        split_section_text(body, chunk_size=text_chunk_size, overlap=text_overlap, min_chars=min_text_chars), start=1
+    ):
+        if len(part) < min_text_chars and chunks:
+            previous = chunks[-1]
+            previous["chunk_text"] = clean_text_block(previous["chunk_text"] + "\n\n" + part)
+            previous["metadata"]["body_chars"] += len(part)
+            previous["metadata"]["chunk_chars"] = len(previous["chunk_text"])
+            continue
+        part_metadata = dict(metadata)
+        part_metadata["part_index"] = part_index
+        chunks.append(make_chunk(next_chunk_no, chunk_type=chunk_type, body=part, metadata=part_metadata))
+        next_chunk_no += 1
+    if chunks and following_table:
+        marker = table_following_marker(following_table)
+        if marker:
+            chunks[-1]["chunk_text"] = clean_text_block(chunks[-1]["chunk_text"] + "\n\n" + marker)
+            chunks[-1]["metadata"]["next_table_id"] = following_table.get("table_id", "")
+            chunks[-1]["metadata"]["next_table_type"] = following_table.get("table_type", "")
+            chunks[-1]["metadata"]["next_table_shape"] = (following_table.get("table") or {}).get("shape", "")
+    return chunks, next_chunk_no, ""
+
+
+def table_following_marker(record: dict[str, Any]) -> str:
+    table = record.get("table") or {}
+    table_id = record.get("table_id", "")
+    table_type = record.get("table_type", "")
+    table_shape_value = table.get("shape", "")
+    size = ""
+    if table.get("rows") and table.get("cols"):
+        size = f", {table.get('rows')}행x{table.get('cols')}열"
+    if not table_id:
+        return ""
+    parts = [f"[다음 표: {table_id}"]
+    if table_type:
+        parts.append(f", 유형={table_type}")
+    if table_shape_value:
+        parts.append(f", 형태={table_shape_value}")
+    if size:
+        parts.append(size)
+    parts.append("]")
+    return "".join(parts)
+
+
+def same_text_bucket(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    return (
+        left.get("file_name") == right.get("file_name")
+        and left.get("content_type") == right.get("content_type")
+        and (left.get("section_path") or []) == (right.get("section_path") or [])
+    )
+
+
+def build_rag_chunks(records: list[dict[str, Any]], args: argparse.Namespace) -> list[dict[str, Any]]:
+    chunks: list[dict[str, Any]] = []
+    text_buffer: list[dict[str, Any]] = []
+    next_chunk_no = 1
+
+    def extend_text_buffer(record: dict[str, Any]) -> None:
+        nonlocal text_buffer
+        if text_buffer and not same_text_bucket(text_buffer[-1], record):
+            flush_to_chunks(as_table_context=False)
+        text_buffer.append(record)
+
+    def flush_to_chunks(*, as_table_context: bool, following_table: dict[str, Any] | None = None) -> str:
+        nonlocal text_buffer, next_chunk_no, chunks
+        emitted, next_chunk_no, context_note = flush_text_buffer(
+            text_buffer,
+            next_chunk_no=next_chunk_no,
+            text_chunk_size=args.text_chunk_size,
+            text_overlap=args.text_overlap,
+            min_text_chars=args.min_text_chars,
+            short_context_chars=args.short_context_chars,
+            as_table_context=as_table_context,
+            following_table=following_table,
+        )
+        chunks.extend(emitted)
+        text_buffer = []
+        return context_note
+
+    for record in records:
+        content_type = record.get("content_type")
+        if content_type == "section_text" or (content_type == "cover_text" and args.include_cover):
+            extend_text_buffer(record)
+            continue
+
+        if content_type == "table":
+            context_note = flush_to_chunks(as_table_context=True, following_table=record)
+            table_chunks, next_chunk_no = chunks_from_table(
+                record,
+                next_chunk_no=next_chunk_no,
+                table_chunk_size=args.table_chunk_size,
+                max_rows_per_chunk=args.max_table_rows,
+                pending_context_note=context_note,
+            )
+            chunks.extend(table_chunks)
+            continue
+
+        if content_type == "toc" and args.include_toc:
+            context_note = flush_to_chunks(as_table_context=False)
+            toc_record = dict(record)
+            toc_record["content_type"] = "section_text"
+            toc_record["text"] = clean_text_block(record.get("text", ""))
+            toc_chunks, next_chunk_no, _ = flush_text_buffer(
+                [toc_record],
+                next_chunk_no=next_chunk_no,
+                text_chunk_size=args.text_chunk_size,
+                text_overlap=0,
+                min_text_chars=args.min_text_chars,
+                short_context_chars=args.short_context_chars,
+                as_table_context=False,
+            )
+            if context_note:
+                for chunk in toc_chunks:
+                    chunk["chunk_text"] = clean_text_block(f"직전본문: {context_note}\n\n{chunk['chunk_text']}")
+            chunks.extend(toc_chunks)
+            continue
+
+        flush_to_chunks(as_table_context=False)
+
+    flush_to_chunks(as_table_context=False)
+    return chunks
+>>>>>>> 8f9d0e9859aa2ddfb0a0f4c65c4a29dced204ba2
 
 
 def write_summary_csv(path: Path, chunks: list[dict[str, Any]]) -> None:
@@ -766,6 +956,7 @@ def write_sample_jsonl(path: Path, chunks: list[dict[str, Any]], *, sample_size:
     write_jsonl(path, chunks[:sample_size])
 
 
+<<<<<<< HEAD
 def chunk_prechunk_jsonl(
     *,
     input_path: Path,
@@ -783,6 +974,50 @@ def chunk_prechunk_jsonl(
         strict_patterns=strict_patterns,
         include_cover=include_cover,
         split_inline_headings=split_inline_headings,
+=======
+def compact_output_metadata(chunks: list[dict[str, Any]]) -> None:
+    """Keep only metadata that is useful for retrieval filters and citations."""
+    common_keys = ["file_name", "section_path", "section_type", "heading"]
+    table_keys = ["table_type", "table_shape", "table_id", "row_range"]
+    link_keys = ["next_table_id", "next_table_type", "next_table_shape"]
+    for chunk in chunks:
+        metadata = chunk.get("metadata", {})
+        compact: dict[str, Any] = {}
+        for key in common_keys:
+            value = metadata.get(key)
+            if value not in ("", None, []):
+                compact[key] = value
+        if str(chunk.get("chunk_type", "")).startswith("table_"):
+            for key in table_keys:
+                value = metadata.get(key)
+                if value not in ("", None, []):
+                    compact[key] = value
+        else:
+            for key in link_keys:
+                value = metadata.get(key)
+                if value not in ("", None, []):
+                    compact[key] = value
+        chunk["metadata"] = compact
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Convert pre-chunk JSONL into RAG-ready chunks.")
+    parser.add_argument("--input", type=Path, default=Path("eda/hwp_prechunk_all.jsonl"), help="pre-chunk JSONL path")
+    parser.add_argument("--output", type=Path, default=Path("eda/hwp_rag_chunks_all.jsonl"), help="RAG chunk JSONL path")
+    parser.add_argument("--summary-output", type=Path, default=None, help="summary CSV path")
+    parser.add_argument("--sample-output", type=Path, default=None, help="sample JSONL path")
+    parser.add_argument("--sample-size", type=int, default=20, help="number of sample chunks to write")
+    parser.add_argument("--text-chunk-size", type=int, default=900, help="target body chars for section text chunks")
+    parser.add_argument("--text-overlap", type=int, default=180, help="section text overlap chars")
+    parser.add_argument("--table-chunk-size", type=int, default=1000, help="target body chars for table chunks")
+    parser.add_argument("--max-table-rows", type=int, default=6, help="max table rows per chunk")
+    parser.add_argument("--min-text-chars", type=int, default=40, help="minimum body chars for standalone text chunks")
+    parser.add_argument(
+        "--short-context-chars",
+        type=int,
+        default=140,
+        help="short text before a table is attached to the table instead of emitted alone",
+>>>>>>> 8f9d0e9859aa2ddfb0a0f4c65c4a29dced204ba2
     )
     grouped_records = group_records(clean_records)
     chunks = make_chunks(
