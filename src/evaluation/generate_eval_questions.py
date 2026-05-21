@@ -11,13 +11,28 @@ from openai import OpenAI
 from src.utils.jsonl import read_jsonl, write_jsonl
 
 
-def find_chunk_files(input_dir: Path, pattern: str = "*_chunks.jsonl") -> list[Path]:
-    return sorted(path for path in input_dir.glob(pattern) if path.is_file())
+_GENERIC_DOC_PARENT_NAMES = frozenset({"data", "v2", "raw", "processed", "outputs"})
 
 
-def load_chunk_files(input_dir: Path, pattern: str = "*_chunks.jsonl") -> list[dict[str, Any]]:
+def find_chunk_files(
+    input_dir: Path,
+    pattern: str = "*_chunks.jsonl",
+    *,
+    recursive: bool = True,
+) -> list[Path]:
+    """run-pipeline 산출물처럼 하위 폴더에 있는 chunks JSONL도 찾는다."""
+    iterator = input_dir.rglob(pattern) if recursive else input_dir.glob(pattern)
+    return sorted(path for path in iterator if path.is_file())
+
+
+def load_chunk_files(
+    input_dir: Path,
+    pattern: str = "*_chunks.jsonl",
+    *,
+    recursive: bool = True,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for path in find_chunk_files(input_dir, pattern):
+    for path in find_chunk_files(input_dir, pattern, recursive=recursive):
         for row in read_jsonl(path):
             item = dict(row)
             item["_source_chunk_file"] = str(path)
@@ -36,13 +51,24 @@ def chunk_metadata(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def resolve_doc_id(row: dict[str, Any]) -> str:
+    """문서별 하위 폴더(run-pipeline) 또는 메타데이터 기준으로 doc_id를 정한다."""
     metadata = chunk_metadata(row)
+    source = str(row.get("_source_chunk_file", "")).strip()
+    default_from_path = "document"
+    if source:
+        source_path = Path(source)
+        folder_name = source_path.parent.name
+        if folder_name and folder_name.lower() not in _GENERIC_DOC_PARENT_NAMES:
+            default_from_path = folder_name
+        else:
+            stem = source_path.stem
+            default_from_path = stem[: -len("_chunks")] if stem.endswith("_chunks") else stem
     return str(
         row.get("doc_id")
         or metadata.get("doc_id")
         or metadata.get("file_name")
         or metadata.get("source_file")
-        or Path(str(row.get("_source_chunk_file", "document"))).stem
+        or default_from_path
     )
 
 
@@ -72,8 +98,11 @@ def build_generation_inputs(
     questions_per_doc: int,
 ) -> list[dict[str, Any]]:
     grouped = group_chunks_by_doc(chunks)
+    doc_ids = sorted(grouped)
+    if max_docs > 0:
+        doc_ids = doc_ids[:max_docs]
     rows: list[dict[str, Any]] = []
-    for doc_id in sorted(grouped)[:max_docs]:
+    for doc_id in doc_ids:
         sampled = sample_chunks(grouped[doc_id], max_chunks_per_doc)
         context_chunks = []
         source_files = sorted({str(row.get("_source_chunk_file", "")) for row in sampled if row.get("_source_chunk_file")})
@@ -160,6 +189,8 @@ def generate_eval_questions(
     input_dir: Path,
     output_path: Path,
     pattern: str = "*_chunks.jsonl",
+    *,
+    recursive: bool = True,
     max_docs: int = 5,
     max_chunks_per_doc: int = 8,
     max_chars_per_chunk: int = 1200,
@@ -168,9 +199,10 @@ def generate_eval_questions(
 ) -> None:
     if output_path.exists() and not overwrite:
         raise FileExistsError(f"이미 파일이 있습니다: {output_path}")
-    chunks = load_chunk_files(input_dir, pattern)
+    chunks = load_chunk_files(input_dir, pattern, recursive=recursive)
     if not chunks:
-        raise RuntimeError(f"청크 JSONL 파일을 찾지 못했습니다: {input_dir / pattern}")
+        scope = f"{input_dir}/**/{pattern}" if recursive else f"{input_dir}/{pattern}"
+        raise RuntimeError(f"청크 JSONL 파일을 찾지 못했습니다: {scope}")
     rows = build_generation_inputs(
         chunks,
         max_docs=max_docs,
@@ -259,13 +291,34 @@ def generate_questions_with_openai(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input-dir", default="data/v2")
+    parser.add_argument(
+        "--input-dir",
+        default="data/v2",
+        help="청크 JSONL 루트 (하위 폴더까지 검색, run-pipeline 산출 구조)",
+    )
     parser.add_argument("--pattern", default="*_chunks.jsonl")
+    parser.add_argument(
+        "--recursive",
+        action="store_true",
+        default=True,
+        help="하위 폴더까지 glob (기본: 켜짐)",
+    )
+    parser.add_argument(
+        "--no-recursive",
+        action="store_false",
+        dest="recursive",
+        help="input-dir 바로 아래 파일만",
+    )
     parser.add_argument("--output", default="data/v2/eval_question_generation_inputs.jsonl")
     parser.add_argument("--generation-input", default="data/v2/eval_question_generation_inputs.jsonl")
     parser.add_argument("--eval-output", default="data/v2/eval_questions.jsonl")
     parser.add_argument("--model", default="gpt-4o-mini")
-    parser.add_argument("--max-docs", type=int, default=5)
+    parser.add_argument(
+        "--max-docs",
+        type=int,
+        default=5,
+        help="질문 생성에 쓸 문서 수 상한 (0이면 발견한 문서 전부)",
+    )
     parser.add_argument("--max-chunks-per-doc", type=int, default=8)
     parser.add_argument("--max-chars-per-chunk", type=int, default=1200)
     parser.add_argument("--questions-per-doc", type=int, default=3)
@@ -288,13 +341,23 @@ def main() -> None:
     input_dir = Path(args.input_dir)
     output_path = Path(args.output)
 
-    chunk_files = find_chunk_files(input_dir, args.pattern)
-    chunks = load_chunk_files(input_dir, args.pattern)
+    chunk_files = find_chunk_files(input_dir, args.pattern, recursive=args.recursive)
+    chunks = load_chunk_files(input_dir, args.pattern, recursive=args.recursive)
+    grouped = group_chunks_by_doc(chunks)
+    print(f"recursive: {args.recursive}")
     print(f"chunk_files: {len(chunk_files)}")
     for path in chunk_files:
         print(f"- {path}")
     print(f"chunks: {len(chunks)}")
-    print(f"docs: {len(group_chunks_by_doc(chunks))}")
+    print(f"docs: {len(grouped)}")
+    for doc_id in sorted(grouped):
+        items = grouped[doc_id]
+        table_like = sum(
+            1
+            for row in items
+            if "table" in str(row.get("chunk_type") or chunk_metadata(row).get("chunk_type") or "").lower()
+        )
+        print(f"  doc {doc_id}: chunks={len(items)} (table-ish={table_like})")
 
     if args.dry_run:
         return
@@ -303,6 +366,7 @@ def main() -> None:
         input_dir=input_dir,
         output_path=output_path,
         pattern=args.pattern,
+        recursive=args.recursive,
         max_docs=args.max_docs,
         max_chunks_per_doc=args.max_chunks_per_doc,
         max_chars_per_chunk=args.max_chars_per_chunk,
