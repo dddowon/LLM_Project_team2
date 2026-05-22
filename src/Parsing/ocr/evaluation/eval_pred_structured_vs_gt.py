@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+from difflib import SequenceMatcher
 from pathlib import Path
 
 
@@ -44,7 +46,7 @@ def levenshtein_tokens(a_tokens: list[str], b_tokens: list[str]) -> int:
 
 
 def load_item_by_id(path: Path, target_id: str) -> dict:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = _load_json_or_jsonl(path)
     if isinstance(payload, dict):
         if payload.get("id") and payload.get("id") != target_id:
             raise ValueError(f"id mismatch in {path}: expected={target_id}, found={payload.get('id')}")
@@ -55,6 +57,45 @@ def load_item_by_id(path: Path, target_id: str) -> dict:
                 return item
         raise ValueError(f"id not found in {path}: {target_id}")
     raise ValueError(f"Unsupported JSON shape in {path}: {type(payload).__name__}")
+
+
+def _load_json_or_jsonl(path: Path) -> dict | list:
+    raw = path.read_text(encoding="utf-8")
+    stripped = raw.strip()
+    if not stripped:
+        return []
+    decoder = json.JSONDecoder()
+    pos = 0
+    top_level: list[dict | list] = []
+    while pos < len(raw):
+        while pos < len(raw) and raw[pos].isspace():
+            pos += 1
+        if pos >= len(raw):
+            break
+        item, next_pos = decoder.raw_decode(raw, pos)
+        top_level.append(item)
+        pos = next_pos
+
+    if len(top_level) == 1:
+        only = top_level[0]
+        if isinstance(only, (dict, list)):
+            return only
+        raise ValueError(f"Unsupported JSON shape in {path}: {type(only).__name__}")
+
+    rows: list[dict] = []
+    for idx, block in enumerate(top_level, start=1):
+        if isinstance(block, dict):
+            rows.append(block)
+            continue
+        if isinstance(block, list):
+            for row in block:
+                if isinstance(row, dict):
+                    rows.append(row)
+                    continue
+                raise ValueError(f"Unsupported item type in block {idx} at {path}: {type(row).__name__}")
+            continue
+        raise ValueError(f"Unsupported block type {idx} in {path}: {type(block).__name__}")
+    return rows
 
 
 def compute_set_metrics(gt_values: list[str], pred_values: list[str]) -> dict:
@@ -79,9 +120,48 @@ def compute_set_metrics(gt_values: list[str], pred_values: list[str]) -> dict:
     }
 
 
+def normalize_text_relaxed(text: object) -> str:
+    text = str(text).lower()
+    text = text.replace("\n", " ")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def compact_text(text: object) -> str:
+    return re.sub(r"[^0-9a-z가-힣]+", "", normalize_text_relaxed(text))
+
+
+def flatten_structure(obj: object, path: str = "") -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            next_path = f"{path}.{key}" if path else str(key)
+            rows.extend(flatten_structure(value, next_path))
+        return rows
+    if isinstance(obj, list):
+        for value in obj:
+            rows.extend(flatten_structure(value, path))
+        return rows
+    value = str(obj).strip()
+    if value:
+        rows.append({"field_path": path, "expected_value": value})
+    return rows
+
+
+def value_match_score(expected: object, pred_text: str, threshold: float = 0.65) -> tuple[float, bool]:
+    expected_norm = compact_text(expected)
+    pred_norm = compact_text(pred_text)
+    if not expected_norm:
+        return 0.0, False
+    if expected_norm in pred_norm:
+        return 1.0, True
+    score = SequenceMatcher(None, expected_norm, pred_norm).ratio()
+    return score, score >= threshold
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate GT JSON against pred_structured JSON")
-    parser.add_argument("--gt", required=True, help="GT JSON path")
+    parser.add_argument("--gt", required=True, help="GT path (.json/.jsonl)")
     parser.add_argument("--pred-structured", required=True, help="Pred structured JSON path")
     parser.add_argument("--id", required=True, help="Target id")
     parser.add_argument("--output", required=True, help="Output report path")
@@ -104,30 +184,18 @@ def main() -> None:
     word_dist = levenshtein_tokens(gt_words, pred_words)
     text_wer = word_dist / max(1, len(gt_words))
 
-    fields = ["기관명", "영문명", "로고"]
-    structure_report: dict[str, dict] = {}
-    f1_scores: list[float] = []
-    matched_total = 0
-    gt_total = 0
     gt_structure = gt_item.get("gt_structure", {}) if isinstance(gt_item.get("gt_structure", {}), dict) else {}
     pred_structure = (
         pred_item.get("pred_structure", {}) if isinstance(pred_item.get("pred_structure", {}), dict) else {}
     )
 
-    for field in fields:
-        gt_values = gt_structure.get(field, [])
-        pred_values = pred_structure.get(field, [])
-        if not isinstance(gt_values, list):
-            gt_values = []
-        if not isinstance(pred_values, list):
-            pred_values = []
-        metrics = compute_set_metrics([str(v) for v in gt_values], [str(v) for v in pred_values])
-        structure_report[field] = metrics
-        f1_scores.append(metrics["f1"])
-        matched_total += metrics["matched"]
-        gt_total += metrics["gt_total"]
-
-    field_match_rate = (matched_total / gt_total * 100.0) if gt_total else 0.0
+    expected_fields = flatten_structure(gt_structure)
+    matched_total = 0
+    for field in expected_fields:
+        _, matched = value_match_score(field["expected_value"], pred_text, threshold=0.65)
+        if matched:
+            matched_total += 1
+    field_match_rate = matched_total / len(expected_fields) if expected_fields else 0.0
 
     report = {
         "id": args.id,
@@ -142,13 +210,18 @@ def main() -> None:
             "wer": text_wer,
             "char_similarity_pct": round(char_similarity, 2),
         },
-        "structure": structure_report,
-        "field_match": {
-            "rate_pct": round(field_match_rate, 2),
-            "matched": matched_total,
-            "total": gt_total,
+        "structure": {
+            "mode": "gt_schema_value_match",
+            "gt_structure": gt_structure,
+            "pred_structure": pred_structure,
         },
-        "macro_f1": sum(f1_scores) / len(f1_scores) if f1_scores else 0.0,
+        "field_match": {
+            "rate_pct": round(field_match_rate * 100.0, 2),
+            "matched": matched_total,
+            "total": len(expected_fields),
+            "threshold": 0.65,
+        },
+        "macro_f1": field_match_rate,
     }
 
     output = Path(args.output)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from difflib import SequenceMatcher
 import re
 from pathlib import Path
 
@@ -43,8 +44,50 @@ def dedupe_keep_order(items: list[str]) -> list[str]:
     return output
 
 
+def normalize_text(text: object) -> str:
+    text = str(text).lower()
+    text = text.replace("\n", " ")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def compact_text(text: object) -> str:
+    return re.sub(r"[^0-9a-z가-힣]+", "", normalize_text(text))
+
+
+def is_value_matched(expected: object, pred_text: str, threshold: float = 0.65) -> tuple[bool, float]:
+    expected_norm = compact_text(expected)
+    pred_norm = compact_text(pred_text)
+    if not expected_norm:
+        return False, 0.0
+    if expected_norm in pred_norm:
+        return True, 1.0
+    score = SequenceMatcher(None, expected_norm, pred_norm).ratio()
+    return score >= threshold, score
+
+
+def build_pred_structure_from_gt_schema(gt_obj: object, pred_text: str, threshold: float = 0.65) -> object:
+    if isinstance(gt_obj, dict):
+        return {
+            str(key): build_pred_structure_from_gt_schema(value, pred_text, threshold=threshold)
+            for key, value in gt_obj.items()
+        }
+    if isinstance(gt_obj, list):
+        matched_values: list[str] = []
+        for value in gt_obj:
+            matched, _ = is_value_matched(value, pred_text, threshold=threshold)
+            if matched:
+                matched_values.append(str(value))
+        return matched_values
+    value = str(gt_obj).strip()
+    if not value:
+        return ""
+    matched, _ = is_value_matched(value, pred_text, threshold=threshold)
+    return value if matched else ""
+
+
 def load_item_by_id(path: Path, target_id: str) -> dict:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = _load_json_or_jsonl(path)
     if isinstance(payload, list):
         for item in payload:
             if isinstance(item, dict) and item.get("id") == target_id:
@@ -55,6 +98,45 @@ def load_item_by_id(path: Path, target_id: str) -> dict:
             return payload
         raise ValueError(f"id mismatch in {path}: expected={target_id}, found={payload.get('id')}")
     raise ValueError(f"Unsupported JSON shape in {path}: {type(payload).__name__}")
+
+
+def _load_json_or_jsonl(path: Path) -> dict | list:
+    raw = path.read_text(encoding="utf-8")
+    stripped = raw.strip()
+    if not stripped:
+        return []
+    decoder = json.JSONDecoder()
+    pos = 0
+    top_level: list[dict | list] = []
+    while pos < len(raw):
+        while pos < len(raw) and raw[pos].isspace():
+            pos += 1
+        if pos >= len(raw):
+            break
+        item, next_pos = decoder.raw_decode(raw, pos)
+        top_level.append(item)
+        pos = next_pos
+
+    if len(top_level) == 1:
+        only = top_level[0]
+        if isinstance(only, (dict, list)):
+            return only
+        raise ValueError(f"Unsupported JSON shape in {path}: {type(only).__name__}")
+
+    rows: list[dict] = []
+    for idx, block in enumerate(top_level, start=1):
+        if isinstance(block, dict):
+            rows.append(block)
+            continue
+        if isinstance(block, list):
+            for row in block:
+                if isinstance(row, dict):
+                    rows.append(row)
+                    continue
+                raise ValueError(f"Unsupported item type in block {idx} at {path}: {type(row).__name__}")
+            continue
+        raise ValueError(f"Unsupported block type {idx} in {path}: {type(block).__name__}")
+    return rows
 
 
 def load_pred_raw(path: Path, target_id: str) -> dict:
@@ -93,16 +175,6 @@ def build_pred_structured(gt_item: dict, pred_raw_item: dict, score_threshold: f
 
     kept = dedupe_keep_order(kept)
     pred_text = " ".join(kept).strip()
-    # [Design Intent] VLM often returns mixed Korean/English in one line.
-    # Split mixed lines into language-specific segments before mapping to structured fields.
-    kor_candidates: list[str] = []
-    eng_candidates: list[str] = []
-    for text in kept:
-        kor_candidates.extend(extract_hangul_segments(text))
-        eng_candidates.extend(extract_english_segments(text))
-    kor_candidates = dedupe_keep_order(kor_candidates)
-    eng_candidates = dedupe_keep_order(eng_candidates)
-
     meta_keys = [
         "id",
         "source_file_name",
@@ -116,11 +188,11 @@ def build_pred_structured(gt_item: dict, pred_raw_item: dict, score_threshold: f
     ]
     result = {key: gt_item.get(key) for key in meta_keys}
     result["pred_text"] = pred_text
-    result["pred_structure"] = {
-        "기관명": kor_candidates[:1],
-        "영문명": eng_candidates[:1],
-        "로고": kept,
-    }
+    result["pred_structure"] = build_pred_structure_from_gt_schema(
+        gt_item.get("gt_structure", {}),
+        pred_text,
+        threshold=0.65,
+    )
     result["type"] = gt_item.get("image_type", "unknown")
     result["status"] = pred_raw_item.get("status", "success" if kept else "empty")
     result["latency_ms"] = pred_raw_item.get("latency_ms")
@@ -135,7 +207,7 @@ def build_pred_structured(gt_item: dict, pred_raw_item: dict, score_threshold: f
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Convert OCR raw JSON to GT-aligned structured prediction JSON")
-    parser.add_argument("--gt", required=True, help="GT JSON path")
+    parser.add_argument("--gt", required=True, help="GT path (.json/.jsonl)")
     parser.add_argument("--pred-raw", required=True, help="Raw OCR JSON path from run_paddle_ocr.py")
     parser.add_argument("--id", required=True, help="Target item id")
     parser.add_argument("--output", required=True, help="Output pred_structured JSON path")

@@ -7,6 +7,18 @@ import re
 import sys
 from pathlib import Path
 
+DEFAULT_OCR_ENGINE_MATRIX = ("pp_ocrv5", "pp_structurev3", "table_recognition_v2", "paddleocr_vl")
+
+
+def _normalize_ocr_engine(ocr_engine: str) -> str:
+    key = str(ocr_engine).strip().lower()
+    if key in DEFAULT_OCR_ENGINE_MATRIX:
+        return key
+    supported = ", ".join(DEFAULT_OCR_ENGINE_MATRIX)
+    raise ValueError(
+        f"Unsupported OCR engine: {ocr_engine}. Use one of: {supported}"
+    )
+
 
 def _require_exactly_one(*, a, b, a_name: str, b_name: str) -> None:
     if bool(a) == bool(b):
@@ -546,136 +558,403 @@ def extract_ocr_images(input_dir: str, output_dir: str, limit: int = 0) -> None:
     print(f"output_dir: {output_dir}")
 
 
-def run_paddle_ocr(image_path: str, output_path: str, lang: str = "korean") -> None:
-    from pathlib import Path
-    import time
-
-    from src.Parsing.ocr.inference.run_paddle_ocr import run_single
-
-    image = Path(image_path)
-    if not image.exists():
-        raise FileNotFoundError(f"Image not found: {image}")
-    start = time.perf_counter()
-    rows = run_single(image, lang=lang)
-    latency_ms = (time.perf_counter() - start) * 1000.0
-    payload = {
-        "image_path": str(image),
-        "model": "paddleocr",
-        "lang": lang,
-        "status": "success",
-        "latency_ms": round(latency_ms, 2),
-        "ocr_lines": rows,
-    }
-
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"ocr_lines: {len(rows)}")
-    print(f"latency_ms: {payload['latency_ms']}")
-    print(f"output: {output}")
+def _to_list(value: object) -> list[object]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, str):
+        return [value]
+    try:
+        return list(value)  # type: ignore[arg-type]
+    except TypeError:
+        return [value]
 
 
-def run_docvlm_ocr(
-    image_path: str,
-    output_path: str,
-    model_name: str = "PP-DocBee-2B",
-    device: str = "gpu:0",
-    batch_size: int = 1,
-) -> None:
-    from pathlib import Path
-    import time
+def _make_json_safe(value: object) -> object:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _make_json_safe(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_make_json_safe(item) for item in value]
+    if hasattr(value, "tolist"):
+        try:
+            return _make_json_safe(value.tolist())
+        except Exception:
+            pass
+    if hasattr(value, "item"):
+        try:
+            return _make_json_safe(value.item())
+        except Exception:
+            pass
+    return str(value)
 
-    from paddleocr import DocVLM
 
-    image = Path(image_path)
-    if not image.exists():
-        raise FileNotFoundError(f"Image not found: {image}")
+def _result_item_to_dict(item: object) -> dict:
+    candidate: object
+    if hasattr(item, "to_dict"):
+        try:
+            candidate = item.to_dict()  # type: ignore[no-any-return]
+            safe = _make_json_safe(candidate)
+            if isinstance(safe, dict):
+                return safe
+            return {"raw": str(safe)}
+        except Exception:
+            pass
+    if isinstance(item, dict):
+        safe = _make_json_safe(item)
+        if isinstance(safe, dict):
+            return safe
+        return {"raw": str(safe)}
+    return {"raw": str(_make_json_safe(item))}
 
-    vlm = DocVLM(model_name=model_name, device=device)
-    start = time.perf_counter()
-    results = vlm.predict(
-        input={"image": str(image), "query": "Extract all visible text from this image."},
-        batch_size=batch_size,
-    )
-    latency_ms = (time.perf_counter() - start) * 1000.0
 
-    def _collect_texts(value: object) -> list[str]:
-        texts: list[str] = []
-        if value is None:
-            return texts
-        if isinstance(value, str):
-            text = value.strip()
-            if text:
-                texts.append(text)
-            return texts
-        if isinstance(value, dict):
-            # [Design Intent] DocVLM result payloads vary by model/version, so parse common text-bearing keys first.
-            preferred_keys = [
-                "text",
-                "markdown",
-                "content",
-                "result",
-                "answer",
-                "output",
-                "prediction",
-            ]
-            ignore_keys = {"image", "image_path", "input_path", "query", "prompt"}
-            for key in preferred_keys:
-                if key in value:
-                    texts.extend(_collect_texts(value.get(key)))
-            # Fallback: traverse all fields to avoid dropping nested text-only outputs.
-            for key, nested in value.items():
-                if key not in preferred_keys and key not in ignore_keys:
-                    texts.extend(_collect_texts(nested))
-            return texts
-        if isinstance(value, (list, tuple)):
-            for item in value:
-                texts.extend(_collect_texts(item))
-            return texts
+def _collect_texts(value: object) -> list[str]:
+    texts: list[str] = []
+    if value is None:
         return texts
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            texts.append(text)
+        return texts
+    if isinstance(value, dict):
+        preferred_keys = [
+            "text",
+            "texts",
+            "rec_texts",
+            "markdown",
+            "content",
+            "result",
+            "answer",
+            "output",
+            "prediction",
+            "html",
+            "table_html",
+            "table_markdown",
+        ]
+        ignore_keys = {"image", "image_path", "input_path", "query", "prompt"}
+        used_keys: set[str] = set()
+        for key in preferred_keys:
+            if key in value:
+                texts.extend(_collect_texts(value.get(key)))
+                used_keys.add(key)
+        for key, nested in value.items():
+            if key in ignore_keys or key in used_keys:
+                continue
+            texts.extend(_collect_texts(nested))
+        return texts
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            texts.extend(_collect_texts(item))
+        return texts
+    return texts
 
+
+def _dedupe_text_rows(rows: list[dict]) -> list[dict]:
+    deduped_rows: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        key = str(row.get("text", "")).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped_rows.append({"text": key, "score": row.get("score"), "poly": row.get("poly")})
+    return deduped_rows
+
+
+def _extract_generic_rows_and_raw(results: object) -> tuple[list[dict], list[dict]]:
     rows: list[dict] = []
     raw_items: list[dict] = []
-    for item in results:
-        if hasattr(item, "to_dict"):
-            item_dict = item.to_dict()
-        elif isinstance(item, dict):
-            item_dict = item
-        else:
-            item_dict = {"raw": str(item)}
+    for item in _to_list(results):
+        item_dict = _result_item_to_dict(item)
         raw_items.append(item_dict)
         extracted = _collect_texts(item_dict)
         for text_block in extracted:
             for line in (seg.strip() for seg in str(text_block).splitlines()):
                 if line:
                     rows.append({"text": line, "score": None, "poly": None})
+    return _dedupe_text_rows(rows), raw_items
 
-    # [Design Intent] Keep order while dropping exact duplicates to stabilize downstream structured matching.
-    deduped_rows: list[dict] = []
-    seen: set[str] = set()
-    for row in rows:
-        key = row["text"].strip()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        deduped_rows.append(row)
 
+def _extract_ppocr_rows_and_raw(results: object) -> tuple[list[dict], list[dict]]:
+    rows: list[dict] = []
+    raw_items: list[dict] = []
+    for item in _to_list(results):
+        item_dict = _result_item_to_dict(item)
+        raw_items.append(item_dict)
+        rec_texts = _to_list(item_dict.get("rec_texts"))
+        rec_scores = _to_list(item_dict.get("rec_scores"))
+        rec_polys = _to_list(item_dict.get("rec_polys"))
+        for idx, text in enumerate(rec_texts):
+            poly = rec_polys[idx] if idx < len(rec_polys) else None
+            rows.append(
+                {
+                    "text": str(text),
+                    "score": float(rec_scores[idx]) if idx < len(rec_scores) and rec_scores[idx] is not None else None,
+                    "poly": poly.tolist() if hasattr(poly, "tolist") else poly,
+                }
+            )
+    if rows:
+        return _dedupe_text_rows(rows), raw_items
+    generic_rows, _ = _extract_generic_rows_and_raw(raw_items)
+    return generic_rows, raw_items
+
+
+def _write_ocr_payload(output_path: str, payload: dict) -> None:
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    safe_payload = _make_json_safe(payload)
+    output.write_text(json.dumps(safe_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"ocr_lines: {len(payload.get('ocr_lines', []))}")
+    print(f"latency_ms: {payload.get('latency_ms')}")
+    print(f"output: {output}")
+
+
+def _build_pp_ocrv5_model(*, lang: str, device: str) -> object:
+    from paddleocr import PaddleOCR
+
+    candidates = [
+        {
+            "lang": lang,
+            "device": device,
+            "use_doc_orientation_classify": False,
+            "use_doc_unwarping": False,
+            "use_textline_orientation": False,
+        },
+        {
+            "lang": lang,
+            "use_doc_orientation_classify": False,
+            "use_doc_unwarping": False,
+            "use_textline_orientation": False,
+        },
+        {"lang": lang},
+        {},
+    ]
+    last_error: Exception | None = None
+    for kwargs in candidates:
+        try:
+            return PaddleOCR(**kwargs)
+        except Exception as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    return PaddleOCR()
+
+
+def _build_pp_structurev3_model(*, lang: str, device: str) -> object:
+    from paddleocr import PPStructureV3
+
+    candidates = [
+        {
+            "device": device,
+            "use_doc_orientation_classify": False,
+            "use_doc_unwarping": False,
+        },
+        {"use_doc_orientation_classify": False, "use_doc_unwarping": False},
+        {"device": device},
+        {},
+    ]
+    last_error: Exception | None = None
+    for kwargs in candidates:
+        try:
+            return PPStructureV3(**kwargs)
+        except Exception as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    return PPStructureV3()
+
+
+def _build_table_recognition_v2_model(*, lang: str, device: str) -> object:
+    from paddleocr import TableRecognitionPipelineV2
+
+    candidates = [
+        {"device": device, "use_doc_orientation_classify": False, "use_doc_unwarping": False},
+        {"use_doc_orientation_classify": False, "use_doc_unwarping": False},
+        {"device": device},
+        {},
+    ]
+    last_error: Exception | None = None
+    for kwargs in candidates:
+        try:
+            return TableRecognitionPipelineV2(**kwargs)
+        except Exception as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    return TableRecognitionPipelineV2()
+
+
+def _build_paddleocr_vl_model(*, device: str) -> object:
+    from paddleocr import PaddleOCRVL
+
+    candidates = [{"device": device}, {}]
+    last_error: Exception | None = None
+    for kwargs in candidates:
+        try:
+            return PaddleOCRVL(**kwargs)
+        except Exception as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    return PaddleOCRVL()
+
+
+def run_paddle_ocr(
+    image_path: str,
+    output_path: str,
+    lang: str = "korean",
+    device: str = "gpu:0",
+    ocr_model: object | None = None,
+) -> None:
+    import time
+
+    image = Path(image_path)
+    if not image.exists():
+        raise FileNotFoundError(f"Image not found: {image}")
+
+    model = ocr_model if ocr_model is not None else _build_pp_ocrv5_model(lang=lang, device=device)
+    start = time.perf_counter()
+    results = model.predict(str(image))
+    latency_ms = (time.perf_counter() - start) * 1000.0
+    rows, raw_items = _extract_ppocr_rows_and_raw(results)
     payload = {
         "image_path": str(image),
-        "model": f"docvlm:{model_name}",
+        "model": "pp_ocrv5",
+        "lang": lang,
+        "status": "success",
+        "latency_ms": round(latency_ms, 2),
+        "ocr_lines": rows,
+        "raw_pipeline_output": raw_items,
+    }
+    _write_ocr_payload(output_path, payload)
+
+
+def run_pp_structurev3_ocr(
+    image_path: str,
+    output_path: str,
+    lang: str = "korean",
+    device: str = "gpu:0",
+    structure_model: object | None = None,
+) -> None:
+    import time
+
+    image = Path(image_path)
+    if not image.exists():
+        raise FileNotFoundError(f"Image not found: {image}")
+
+    model = structure_model if structure_model is not None else _build_pp_structurev3_model(lang=lang, device=device)
+    start = time.perf_counter()
+    results = model.predict(
+        input=str(image),
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+    )
+    latency_ms = (time.perf_counter() - start) * 1000.0
+    rows, raw_items = _extract_generic_rows_and_raw(results)
+    payload = {
+        "image_path": str(image),
+        "model": "pp_structurev3",
+        "lang": lang,
+        "status": "success",
+        "latency_ms": round(latency_ms, 2),
+        "ocr_lines": rows,
+        "raw_pipeline_output": raw_items,
+    }
+    _write_ocr_payload(output_path, payload)
+
+
+def run_paddleocr_vl_ocr(
+    image_path: str,
+    output_path: str,
+    device: str = "gpu:0",
+    batch_size: int = 1,
+    ocr_model: object | None = None,
+) -> None:
+    import time
+
+    image = Path(image_path)
+    if not image.exists():
+        raise FileNotFoundError(f"Image not found: {image}")
+
+    model = ocr_model if ocr_model is not None else _build_paddleocr_vl_model(device=device)
+
+    start = time.perf_counter()
+    results = model.predict(input=str(image), batch_size=batch_size)
+    latency_ms = (time.perf_counter() - start) * 1000.0
+    rows, raw_items = _extract_generic_rows_and_raw(results)
+    payload = {
+        "image_path": str(image),
+        "model": "paddleocr_vl",
         "lang": "multilingual",
         "status": "success",
         "latency_ms": round(latency_ms, 2),
-        "ocr_lines": deduped_rows,
-        "raw_docvlm_output": raw_items,
+        "ocr_lines": rows,
+        "raw_pipeline_output": raw_items,
     }
+    _write_ocr_payload(output_path, payload)
 
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"ocr_lines: {len(deduped_rows)}")
-    print(f"latency_ms: {payload['latency_ms']}")
-    print(f"output: {output}")
+
+def run_table_recognition_v2_ocr(
+    image_path: str,
+    output_path: str,
+    lang: str = "korean",
+    device: str = "gpu:0",
+    table_model: object | None = None,
+) -> None:
+    import time
+
+    image = Path(image_path)
+    if not image.exists():
+        raise FileNotFoundError(f"Image not found: {image}")
+
+    model = table_model if table_model is not None else _build_table_recognition_v2_model(lang=lang, device=device)
+    start = time.perf_counter()
+    results = model.predict(
+        input=str(image),
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+        use_layout_detection=True,
+        use_ocr_model=True,
+    )
+    latency_ms = (time.perf_counter() - start) * 1000.0
+    rows, raw_items = _extract_generic_rows_and_raw(results)
+    payload = {
+        "image_path": str(image),
+        "model": "table_recognition_v2",
+        "lang": lang,
+        "status": "success",
+        "latency_ms": round(latency_ms, 2),
+        "ocr_lines": rows,
+        "raw_pipeline_output": raw_items,
+    }
+    _write_ocr_payload(output_path, payload)
+
+
+def _build_shared_ocr_model(
+    *,
+    ocr_engine: str,
+    lang: str,
+    ocr_device: str,
+) -> object | None:
+    engine = _normalize_ocr_engine(ocr_engine)
+    if engine == "pp_ocrv5":
+        print(f"[PP-OCRv5] initialize once: lang={lang}, device={ocr_device}")
+        return _build_pp_ocrv5_model(lang=lang, device=ocr_device)
+    if engine == "pp_structurev3":
+        print(f"[PP-StructureV3] initialize once: lang={lang}, device={ocr_device}")
+        return _build_pp_structurev3_model(lang=lang, device=ocr_device)
+    if engine == "paddleocr_vl":
+        print(f"[PaddleOCR-VL] initialize once: device={ocr_device}")
+        return _build_paddleocr_vl_model(device=ocr_device)
+    if engine == "table_recognition_v2":
+        print(f"[table_recognition_v2] initialize once: lang={lang}, device={ocr_device}")
+        return _build_table_recognition_v2_model(lang=lang, device=ocr_device)
+    return None
 
 
 def build_pred_structured(
@@ -717,7 +996,6 @@ def eval_pred_structured_vs_gt(
     from pathlib import Path
 
     from src.Parsing.ocr.evaluation.eval_pred_structured_vs_gt import (
-        compute_set_metrics,
         levenshtein,
         levenshtein_tokens,
         load_item_by_id,
@@ -741,29 +1019,10 @@ def eval_pred_structured_vs_gt(
     word_dist = levenshtein_tokens(gt_words, pred_words)
     text_wer = word_dist / max(1, len(gt_words))
 
-    fields = ["기관명", "영문명", "로고"]
-    structure_report: dict[str, dict] = {}
-    f1_scores: list[float] = []
-    matched_total = 0
-    gt_total = 0
     gt_structure = gt_item.get("gt_structure", {}) if isinstance(gt_item.get("gt_structure", {}), dict) else {}
     pred_structure = (
         pred_item.get("pred_structure", {}) if isinstance(pred_item.get("pred_structure", {}), dict) else {}
     )
-    for field in fields:
-        gt_values = gt_structure.get(field, [])
-        pred_values = pred_structure.get(field, [])
-        if not isinstance(gt_values, list):
-            gt_values = []
-        if not isinstance(pred_values, list):
-            pred_values = []
-        metrics = compute_set_metrics([str(v) for v in gt_values], [str(v) for v in pred_values])
-        structure_report[field] = metrics
-        f1_scores.append(metrics["f1"])
-        matched_total += metrics["matched"]
-        gt_total += metrics["gt_total"]
-
-    field_match_rate = (matched_total / gt_total * 100.0) if gt_total else 0.0
 
     report = {
         "id": item_id,
@@ -778,13 +1037,11 @@ def eval_pred_structured_vs_gt(
             "wer": text_wer,
             "char_similarity_pct": round(char_similarity, 2),
         },
-        "structure": structure_report,
-        "field_match": {
-            "rate_pct": round(field_match_rate, 2),
-            "matched": matched_total,
-            "total": gt_total,
+        "structure": {
+            "mode": "gt_schema_value_match",
+            "gt_structure": gt_structure,
+            "pred_structure": pred_structure,
         },
-        "macro_f1": sum(f1_scores) / len(f1_scores) if f1_scores else 0.0,
     }
 
     output = Path(output_path)
@@ -853,32 +1110,24 @@ def eval_pred_structured_vs_gt(
         normalize_text_relaxed(pred_text),
     ).ratio()
     field_hit_rate = matched_count / len(expected_fields) if expected_fields else 0.0
-    relaxed_report = {
-        "id": item_id,
-        "type": pred_item.get("type", gt_item.get("image_type", "unknown")),
-        "status": pred_item.get("status", "success"),
-        "latency_ms": pred_item.get("latency_ms"),
-        "text": {
-            "text_similarity": text_similarity,
-            "cer": text_cer,
-            "wer": text_wer,
-        },
-        "field_match": {
-            "rate_pct": round(field_hit_rate * 100.0, 2),
-            "matched": matched_count,
-            "total": len(expected_fields),
-            "threshold": relaxed_threshold,
-        },
+    report["field_match"] = {
+        "rate_pct": round(field_hit_rate * 100.0, 2),
+        "matched": matched_count,
+        "total": len(expected_fields),
+        "threshold": relaxed_threshold,
     }
+    report["macro_f1"] = field_hit_rate
+    output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    # [Design Intent] Keep a single canonical report artifact (`report.json`) only.
     relaxed_output = (
         Path(relaxed_output_path)
         if relaxed_output_path
         else output.with_name("report_relaxed.json")
     )
-    relaxed_output.parent.mkdir(parents=True, exist_ok=True)
-    relaxed_output.write_text(json.dumps(relaxed_report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"saved_relaxed: {relaxed_output}")
+    if relaxed_output.exists():
+        relaxed_output.unlink()
+        print(f"removed_legacy_relaxed: {relaxed_output}")
 
     field_csv_output = (
         Path(field_match_csv_path)
@@ -905,25 +1154,48 @@ def ocr_run_all(
     report_output: str,
     lang: str = "korean",
     score_threshold: float = 0.0,
-    ocr_engine: str = "paddleocr",
+    ocr_engine: str = "pp_ocrv5",
     ocr_device: str = "gpu:0",
-    docvlm_model_name: str = "PP-DocBee-2B",
-    docvlm_batch_size: int = 1,
+    ocr_batch_size: int = 1,
+    ocr_model: object | None = None,
     relaxed_output_path: str | None = None,
     field_match_csv_path: str | None = None,
     relaxed_threshold: float = 0.65,
 ) -> None:
+    normalized_engine = _normalize_ocr_engine(ocr_engine)
     print("[1/3] run-ocr")
-    if ocr_engine == "docvlm":
-        run_docvlm_ocr(
+    if normalized_engine == "pp_structurev3":
+        run_pp_structurev3_ocr(
             image_path=image_path,
             output_path=pred_raw_output,
-            model_name=docvlm_model_name,
+            lang=lang,
             device=ocr_device,
-            batch_size=docvlm_batch_size,
+            structure_model=ocr_model,
+        )
+    elif normalized_engine == "paddleocr_vl":
+        run_paddleocr_vl_ocr(
+            image_path=image_path,
+            output_path=pred_raw_output,
+            device=ocr_device,
+            batch_size=ocr_batch_size,
+            ocr_model=ocr_model,
+        )
+    elif normalized_engine == "table_recognition_v2":
+        run_table_recognition_v2_ocr(
+            image_path=image_path,
+            output_path=pred_raw_output,
+            lang=lang,
+            device=ocr_device,
+            table_model=ocr_model,
         )
     else:
-        run_paddle_ocr(image_path=image_path, output_path=pred_raw_output, lang=lang)
+        run_paddle_ocr(
+            image_path=image_path,
+            output_path=pred_raw_output,
+            lang=lang,
+            device=ocr_device,
+            ocr_model=ocr_model,
+        )
     print("[2/3] build-pred-structured")
     build_pred_structured(
         gt_path=gt_path,
@@ -945,8 +1217,8 @@ def ocr_run_all(
     print("ocr_run_all_done")
 
 
-def _infer_item_id_from_gt(gt_path: Path) -> str:
-    payload = json.loads(gt_path.read_text(encoding="utf-8"))
+def _infer_item_id_from_gt(gt_path: Path, image_name: str | None = None) -> str:
+    payload = _load_gt_payload(gt_path)
     if isinstance(payload, dict):
         item_id = payload.get("id")
         if not item_id:
@@ -954,21 +1226,115 @@ def _infer_item_id_from_gt(gt_path: Path) -> str:
         return str(item_id)
 
     if isinstance(payload, list):
-        ids: list[str] = []
+        records: list[dict] = []
         for item in payload:
             if isinstance(item, dict) and item.get("id"):
-                item_id = str(item["id"])
-                if item_id not in ids:
-                    ids.append(item_id)
+                records.append(item)
+
+        if image_name:
+            image_stem = Path(image_name).stem.lower()
+            matched_ids: list[str] = []
+            for record in records:
+                record_id = str(record.get("id", ""))
+                original_name = str(record.get("original_image_file_name", ""))
+                derived_name = str(record.get("image_file_name", ""))
+                candidate_names = [original_name, derived_name]
+                candidate_stems = [Path(name).stem.lower() for name in candidate_names if name]
+                if image_name in candidate_names or image_stem in candidate_stems:
+                    if record_id and record_id not in matched_ids:
+                        matched_ids.append(record_id)
+            if len(matched_ids) == 1:
+                return matched_ids[0]
+            if len(matched_ids) > 1:
+                raise ValueError(
+                    "Multiple ids matched by image name. Pass --id explicitly. "
+                    f"image={image_name}, ids={matched_ids}"
+                )
+
+        ids: list[str] = []
+        for record in records:
+            item_id = str(record["id"])
+            if item_id not in ids:
+                ids.append(item_id)
         if not ids:
             raise ValueError(f"No `id` found in GT JSON list: {gt_path}")
         if len(ids) > 1:
             raise ValueError(
-                f"Multiple ids found in GT JSON ({len(ids)}). Pass --id explicitly. ids={ids}"
+                f"Multiple ids found in GT JSON ({len(ids)}). Pass --id explicitly."
+                f"{' image=' + image_name + ',' if image_name else ''} ids={ids}"
             )
         return ids[0]
 
     raise ValueError(f"Unsupported GT JSON shape: {type(payload).__name__}")
+
+
+def _load_gt_payload(gt_path: Path) -> dict | list[dict]:
+    raw = gt_path.read_text(encoding="utf-8")
+    stripped = raw.strip()
+    if not stripped:
+        return []
+    decoder = json.JSONDecoder()
+    pos = 0
+    top_level: list[dict | list] = []
+    while pos < len(raw):
+        while pos < len(raw) and raw[pos].isspace():
+            pos += 1
+        if pos >= len(raw):
+            break
+        item, next_pos = decoder.raw_decode(raw, pos)
+        top_level.append(item)
+        pos = next_pos
+
+    if len(top_level) == 1:
+        only = top_level[0]
+        if isinstance(only, dict):
+            return only
+        if isinstance(only, list):
+            return only
+        raise ValueError(f"Unsupported GT JSON shape in {gt_path}: {type(only).__name__}")
+
+    rows: list[dict] = []
+    for idx, block in enumerate(top_level, start=1):
+        if isinstance(block, dict):
+            rows.append(block)
+            continue
+        if isinstance(block, list):
+            for row in block:
+                if isinstance(row, dict):
+                    rows.append(row)
+                    continue
+                raise ValueError(
+                    f"Unsupported item type in GT block {idx} at {gt_path}: {type(row).__name__}"
+                )
+            continue
+        raise ValueError(f"Unsupported GT block type {idx} in {gt_path}: {type(block).__name__}")
+    return rows
+
+
+def _resolve_gt_path(gt_root: str, doc_key: str) -> Path:
+    gt_root_path = Path(gt_root)
+    jsonl_path = gt_root_path / f"{doc_key}.jsonl"
+    if jsonl_path.exists():
+        return jsonl_path
+    json_path = gt_root_path / f"{doc_key}.json"
+    if json_path.exists():
+        return json_path
+    for path in sorted(gt_root_path.glob("*.jsonl")) + sorted(gt_root_path.glob("*.json")):
+        try:
+            payload = _load_gt_payload(path)
+        except Exception:
+            continue
+        records = payload if isinstance(payload, list) else [payload]
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("source_doc_key", "")) == doc_key:
+                return path
+            record_id = str(record.get("id", ""))
+            if record_id.startswith(f"{doc_key}_"):
+                return path
+    # Prefer JSONL by default for new runs.
+    return jsonl_path
 
 
 def _resolve_ocr_doc_paths(
@@ -978,14 +1344,22 @@ def _resolve_ocr_doc_paths(
     gt_root: str,
     output_root: str,
     image_name: str,
+    ocr_engine: str,
 ) -> tuple[Path, Path, Path, Path, Path]:
+    normalized_engine = _normalize_ocr_engine(ocr_engine)
     image_path = Path(images_root) / doc_key / image_name
-    gt_path = Path(gt_root) / f"{doc_key}.json"
-    out_dir = Path(output_root) / doc_key
+    gt_path = _resolve_gt_path(gt_root, doc_key)
+    engine_dir_name = _engine_dir_name(normalized_engine)
+    image_stem = Path(image_name).stem
+    out_dir = Path(output_root) / engine_dir_name / doc_key / image_stem
     pred_raw = out_dir / "pred_raw.json"
     pred_structured = out_dir / "pred_structured.json"
     report = out_dir / "report.json"
     return image_path, gt_path, pred_raw, pred_structured, report
+
+
+def _engine_dir_name(ocr_engine: str) -> str:
+    return _normalize_ocr_engine(ocr_engine)
 
 
 def _resolve_image_path(doc_dir: Path, image_name: str) -> Path:
@@ -1019,7 +1393,23 @@ def _resolve_image_path(doc_dir: Path, image_name: str) -> Path:
     raise FileNotFoundError(f"No image files found in: {doc_dir}")
 
 
-def ocr_run_doc(
+def _list_image_paths(doc_dir: Path) -> list[Path]:
+    if not doc_dir.exists():
+        raise FileNotFoundError(f"Image folder not found: {doc_dir}")
+    image_files = sorted(
+        [
+            path
+            for path in doc_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
+        ],
+        key=lambda p: p.name,
+    )
+    if not image_files:
+        raise FileNotFoundError(f"No image files found in: {doc_dir}")
+    return image_files
+
+
+def ocr_run_image(
     *,
     doc_key: str,
     item_id: str | None,
@@ -1031,26 +1421,34 @@ def ocr_run_doc(
     score_threshold: float,
     ocr_engine: str,
     ocr_device: str,
-    docvlm_model_name: str,
-    docvlm_batch_size: int,
-) -> None:
+    ocr_batch_size: int,
+    ocr_model: object | None = None,
+) -> bool:
     image_path, gt_path, pred_raw, pred_structured, report = _resolve_ocr_doc_paths(
         doc_key=doc_key,
         images_root=images_root,
         gt_root=gt_root,
         output_root=output_root,
         image_name=image_name,
+        ocr_engine=ocr_engine,
     )
     image_path = _resolve_image_path(Path(images_root) / doc_key, image_name)
     if not gt_path.exists():
         raise FileNotFoundError(f"GT not found: {gt_path}")
 
-    final_item_id = item_id or _infer_item_id_from_gt(gt_path)
+    final_item_id = item_id or _infer_item_id_from_gt(gt_path, image_path.name)
+    gt_payload = _load_gt_payload(gt_path)
+    gt_records = gt_payload if isinstance(gt_payload, list) else [gt_payload]
+    gt_item = next(
+        (record for record in gt_records if isinstance(record, dict) and record.get("id") == final_item_id),
+        {},
+    )
     pred_raw.parent.mkdir(parents=True, exist_ok=True)
     print(f"doc_key: {doc_key}")
     print(f"image: {image_path}")
     print(f"gt: {gt_path}")
     print(f"id: {final_item_id}")
+    use_eval = bool(gt_item.get("use_eval", True))
     ocr_run_all(
         image_path=str(image_path),
         gt_path=str(gt_path),
@@ -1062,9 +1460,12 @@ def ocr_run_doc(
         score_threshold=score_threshold,
         ocr_engine=ocr_engine,
         ocr_device=ocr_device,
-        docvlm_model_name=docvlm_model_name,
-        docvlm_batch_size=docvlm_batch_size,
+        ocr_batch_size=ocr_batch_size,
+        ocr_model=ocr_model,
     )
+    if not use_eval:
+        print(f"[SKIP_EVAL_SUMMARY] use_eval=false: {final_item_id}")
+    return use_eval
 
 
 def ocr_run_batch(
@@ -1073,20 +1474,31 @@ def ocr_run_batch(
     gt_root: str,
     output_root: str,
     image_name: str,
+    doc_key: str | None,
     limit: int,
     stop_on_error: bool,
     lang: str,
     score_threshold: float,
     ocr_engine: str,
     ocr_device: str,
-    docvlm_model_name: str,
-    docvlm_batch_size: int,
+    ocr_batch_size: int,
 ) -> None:
+    normalized_engine = _normalize_ocr_engine(ocr_engine)
+    shared_model = _build_shared_ocr_model(
+        ocr_engine=normalized_engine,
+        lang=lang,
+        ocr_device=ocr_device,
+    )
+
     image_root_path = Path(images_root)
     if not image_root_path.exists():
         raise FileNotFoundError(f"images_root not found: {image_root_path}")
 
     doc_dirs = sorted([path for path in image_root_path.iterdir() if path.is_dir()], key=lambda p: p.name)
+    if doc_key:
+        doc_dirs = [path for path in doc_dirs if path.name == doc_key]
+        if not doc_dirs:
+            raise FileNotFoundError(f"doc_key folder not found under images_root: {doc_key}")
     if limit > 0:
         doc_dirs = doc_dirs[:limit]
 
@@ -1095,26 +1507,76 @@ def ocr_run_batch(
     skip_image_count = 0
     skip_gt_count = 0
     fail_count = 0
+    eval_rows: list[dict[str, object]] = []
 
     for doc_dir in doc_dirs:
         doc_key = doc_dir.name
         print(f"\n=== OCR Batch: {doc_key} ===")
         try:
-            ocr_run_doc(
-                doc_key=doc_key,
-                item_id=None,
-                images_root=images_root,
-                gt_root=gt_root,
-                output_root=output_root,
-                image_name=image_name,
-                lang=lang,
-                score_threshold=score_threshold,
-                ocr_engine=ocr_engine,
-                ocr_device=ocr_device,
-                docvlm_model_name=docvlm_model_name,
-                docvlm_batch_size=docvlm_batch_size,
-            )
-            ok_count += 1
+            doc_image_paths = _list_image_paths(doc_dir)
+            print(f"images_in_doc: {len(doc_image_paths)}")
+            for path in doc_image_paths:
+                include_in_eval = ocr_run_image(
+                    doc_key=doc_key,
+                    item_id=None,
+                    images_root=images_root,
+                    gt_root=gt_root,
+                    output_root=output_root,
+                    image_name=path.name,
+                    lang=lang,
+                    score_threshold=score_threshold,
+                    ocr_engine=ocr_engine,
+                    ocr_device=ocr_device,
+                    ocr_batch_size=ocr_batch_size,
+                    ocr_model=shared_model,
+                )
+                ok_count += 1
+                if not include_in_eval:
+                    continue
+
+                report_path = (
+                    Path(output_root) / _engine_dir_name(normalized_engine) / doc_key / Path(path.name).stem / "report.json"
+                )
+                if report_path.exists():
+                    result = json.loads(report_path.read_text(encoding="utf-8"))
+                    text_metrics = result.get("text", {}) if isinstance(result, dict) else {}
+                    field_metrics = result.get("field_match", {}) if isinstance(result, dict) else {}
+                    char_similarity_pct = text_metrics.get("char_similarity_pct")
+                    similarity_ratio = (
+                        float(char_similarity_pct) / 100.0 if char_similarity_pct is not None else None
+                    )
+                    row = {
+                        "id": result.get("id"),
+                        "doc_key": doc_key,
+                        "type": result.get("type"),
+                        "status": result.get("status"),
+                        "text_similarity": similarity_ratio,
+                        "cer": text_metrics.get("cer"),
+                        "wer": text_metrics.get("wer"),
+                        "field_hit_rate_pct": field_metrics.get("rate_pct"),
+                        "matched_fields": field_metrics.get("matched"),
+                        "total_fields": field_metrics.get("total"),
+                        "latency_ms": result.get("latency_ms"),
+                    }
+                    eval_rows.append(row)
+
+                    similarity_pct = (
+                        float(row["text_similarity"]) * 100.0 if row.get("text_similarity") is not None else 0.0
+                    )
+                    print("=" * 80)
+                    print(row["id"])
+                    print(f"type: {row['type']}")
+                    print(f"status: {row['status']}")
+                    print(f"문자 유사도: {round(similarity_pct, 2)} %")
+                    print(f"CER: {round(float(row['cer']), 4) if row.get('cer') is not None else 'N/A'}")
+                    print(f"WER: {round(float(row['wer']), 4) if row.get('wer') is not None else 'N/A'}")
+                    if row.get("field_hit_rate_pct") is not None:
+                        print(
+                            "필드값 매칭률: "
+                            f"{round(float(row['field_hit_rate_pct']), 2)} % "
+                            f"({row.get('matched_fields')}/{row.get('total_fields')})"
+                        )
+                    print(f"latency_ms: {row['latency_ms']}")
         except FileNotFoundError as e:
             message = str(e)
             if "Image folder not found" in message or "No image files found" in message or "Image not found" in message:
@@ -1139,6 +1601,81 @@ def ocr_run_batch(
     print(f"skip_image_missing: {skip_image_count}")
     print(f"skip_gt_missing: {skip_gt_count}")
     print(f"fail: {fail_count}")
+
+    if eval_rows:
+        engine_out_root = Path(output_root) / _engine_dir_name(normalized_engine)
+        engine_out_root.mkdir(parents=True, exist_ok=True)
+
+        summary_csv_path = engine_out_root / "ocr_eval_summary.csv"
+        with summary_csv_path.open("w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "id",
+                    "doc_key",
+                    "type",
+                    "status",
+                    "text_similarity",
+                    "cer",
+                    "wer",
+                    "field_hit_rate_pct",
+                    "matched_fields",
+                    "total_fields",
+                    "latency_ms",
+                ],
+            )
+            writer.writeheader()
+            writer.writerows(eval_rows)
+
+        summary_json_path = engine_out_root / "ocr_eval_summary.json"
+        summary_json_path.write_text(json.dumps(eval_rows, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        avg_similarity = sum(float(row["text_similarity"]) for row in eval_rows if row.get("text_similarity") is not None)
+        avg_similarity /= max(1, len([row for row in eval_rows if row.get("text_similarity") is not None]))
+
+        field_rates = [float(row["field_hit_rate_pct"]) for row in eval_rows if row.get("field_hit_rate_pct") is not None]
+        avg_field_hit_rate = sum(field_rates) / len(field_rates) if field_rates else 0.0
+        fail_rate = (
+            sum(1 for row in eval_rows if str(row.get("status", "")) != "success") / len(eval_rows) * 100.0
+            if eval_rows
+            else 0.0
+        )
+
+        summary_txt_path = engine_out_root / "ocr_eval_summary.txt"
+        lines: list[str] = []
+        for row in eval_rows:
+            similarity_pct = float(row["text_similarity"]) * 100.0 if row.get("text_similarity") is not None else 0.0
+            lines.append("=" * 80)
+            lines.append(str(row.get("id", "")))
+            lines.append(f"type: {row.get('type', '')}")
+            lines.append(f"status: {row.get('status', '')}")
+            lines.append(f"문자 유사도: {round(similarity_pct, 2)} %")
+            lines.append(f"CER: {round(float(row['cer']), 4) if row.get('cer') is not None else 'N/A'}")
+            lines.append(f"WER: {round(float(row['wer']), 4) if row.get('wer') is not None else 'N/A'}")
+            if row.get("field_hit_rate_pct") is not None:
+                lines.append(
+                    "필드값 매칭률: "
+                    f"{round(float(row['field_hit_rate_pct']), 2)} % "
+                    f"({row.get('matched_fields')}/{row.get('total_fields')})"
+                )
+            lines.append(f"latency_ms: {row.get('latency_ms')}")
+
+        lines.append("")
+        lines.append("[SUMMARY]")
+        lines.append(f"평가 이미지 수: {len(eval_rows)}")
+        lines.append(f"평균 문자 유사도: {round(avg_similarity * 100.0, 2)} %")
+        lines.append(f"평균 필드값 매칭률: {round(avg_field_hit_rate, 2)} %")
+        lines.append(f"실패율: {round(fail_rate, 2)} %")
+        summary_txt_path.write_text("\n".join(lines), encoding="utf-8")
+
+        print("\n[SUMMARY]")
+        print(f"평가 이미지 수: {len(eval_rows)}")
+        print(f"평균 문자 유사도: {round(avg_similarity * 100.0, 2)} %")
+        print(f"평균 필드값 매칭률: {round(avg_field_hit_rate, 2)} %")
+        print(f"실패율: {round(fail_rate, 2)} %")
+        print(f"saved_eval_summary_csv: {summary_csv_path}")
+        print(f"saved_eval_summary_json: {summary_json_path}")
+        print(f"saved_eval_summary_txt: {summary_txt_path}")
 
 
 def _pipeline_paths_for_input(
@@ -1424,6 +1961,10 @@ def main() -> None:
         action="store_true",
         help="Make a real OpenAI API request to verify the key and network connection",
     )
+    subparsers.add_parser(
+        "check-ocr3-setup",
+        help="Validate PaddleOCR 3.x package/module installation status",
+    )
 
     embed_parser = subparsers.add_parser("embed-jsonl", help="Embed prepared JSONL rows")
     embed_parser.add_argument("--input", required=True, help="Input JSONL path")
@@ -1607,7 +2148,7 @@ def main() -> None:
         "build-pred-structured",
         help="Convert raw OCR JSON to GT-aligned pred structured JSON",
     )
-    build_pred_parser.add_argument("--gt", required=True, help="GT JSON path")
+    build_pred_parser.add_argument("--gt", required=True, help="GT path (.json/.jsonl)")
     build_pred_parser.add_argument("--pred-raw", required=True, help="Raw OCR JSON path")
     build_pred_parser.add_argument("--id", required=True, help="Target item id")
     build_pred_parser.add_argument("--output", required=True, help="Pred structured JSON output path")
@@ -1620,65 +2161,47 @@ def main() -> None:
 
     eval_pred_parser = subparsers.add_parser(
         "eval-pred-structured",
-        help="Evaluate pred structured JSON against GT JSON",
+        help="Evaluate pred structured JSON against GT (.json/.jsonl)",
     )
-    eval_pred_parser.add_argument("--gt", required=True, help="GT JSON path")
+    eval_pred_parser.add_argument("--gt", required=True, help="GT path (.json/.jsonl)")
     eval_pred_parser.add_argument("--pred-structured", required=True, help="Pred structured JSON path")
     eval_pred_parser.add_argument("--id", required=True, help="Target item id")
     eval_pred_parser.add_argument("--output", required=True, help="Evaluation report output path")
 
-    ocr_all_parser = subparsers.add_parser(
-        "ocr-run-all",
-        help="Run OCR raw inference, build structured prediction, and evaluate against GT",
+    ocr_image_parser = subparsers.add_parser(
+        "ocr-run-image",
+        help="Run OCR/eval for one image with doc_key-based path resolution",
     )
-    ocr_all_parser.add_argument("--image", required=True, help="Input image path")
-    ocr_all_parser.add_argument("--gt", required=True, help="GT JSON path")
-    ocr_all_parser.add_argument("--id", required=True, help="Target item id")
-    ocr_all_parser.add_argument("--pred-raw-output", required=True, help="OCR raw JSON output path")
-    ocr_all_parser.add_argument(
-        "--pred-structured-output",
-        required=True,
-        help="Structured prediction JSON output path",
-    )
-    ocr_all_parser.add_argument("--report-output", required=True, help="Evaluation report JSON output path")
-    ocr_all_parser.add_argument("--lang", default="korean", help="PaddleOCR language")
-    ocr_all_parser.add_argument(
-        "--ocr-config",
-        default="configs/ocr_default.yaml",
-        help="OCR config path (engine/device/model settings)",
-    )
-    ocr_all_parser.add_argument(
-        "--score-threshold",
-        type=float,
-        default=0.0,
-        help="Minimum OCR confidence threshold for structured prediction",
-    )
-
-    ocr_doc_parser = subparsers.add_parser(
-        "ocr-run-doc",
-        help="Run OCR/eval for one doc_key with auto path resolution",
-    )
-    ocr_doc_parser.add_argument("--doc-key", required=True, help="Document key (folder name under ocr_images)")
-    ocr_doc_parser.add_argument(
+    ocr_image_parser.add_argument("--doc-key", required=True, help="Document key (folder name under ocr_images)")
+    ocr_image_parser.add_argument(
         "--id",
         default=None,
         help="Target item id. If omitted, auto-detected from GT JSON when unique.",
     )
-    ocr_doc_parser.add_argument("--images-root", default="data/v2/ocr_images", help="Root folder of OCR images")
-    ocr_doc_parser.add_argument("--gt-root", default="data/v2/ocr_eval/incoming_gt", help="Root folder of GT JSONs")
-    ocr_doc_parser.add_argument("--output-root", default="data/v2/ocr_eval", help="Root folder of OCR outputs")
-    ocr_doc_parser.add_argument("--image-name", default="img_001.jpg", help="Image filename inside doc folder")
-    ocr_doc_parser.add_argument("--lang", default="korean", help="PaddleOCR language fallback")
-    ocr_doc_parser.add_argument(
+    ocr_image_parser.add_argument("--images-root", default="data/v2/ocr_images", help="Root folder of OCR images")
+    ocr_image_parser.add_argument(
+        "--gt-root",
+        default="data/v2/ocr_eval/incoming_gt",
+        help="Root folder of GT files (.jsonl preferred, .json supported)",
+    )
+    ocr_image_parser.add_argument("--output-root", default="data/v2/ocr_eval", help="Root folder of OCR outputs")
+    ocr_image_parser.add_argument("--image-name", default="img_001.jpg", help="Image filename inside doc folder")
+    ocr_image_parser.add_argument("--lang", default="korean", help="PaddleOCR language fallback")
+    ocr_image_parser.add_argument(
         "--ocr-config",
         default="configs/ocr_default.yaml",
         help="OCR config path (engine/device/model settings)",
     )
-    ocr_doc_parser.add_argument(
+    ocr_image_parser.add_argument(
         "--score-threshold",
         type=float,
         default=0.0,
         help="Minimum OCR confidence threshold for structured prediction",
+    )
+    ocr_image_parser.add_argument(
+        "--all-engines",
+        action="store_true",
+        help="Run default OCR engine matrix (pp_ocrv5, pp_structurev3, table_recognition_v2, paddleocr_vl)",
     )
 
     ocr_batch_parser = subparsers.add_parser(
@@ -1686,8 +2209,17 @@ def main() -> None:
         help="Run OCR/eval for all doc folders under ocr_images",
     )
     ocr_batch_parser.add_argument("--images-root", default="data/v2/ocr_images", help="Root folder of OCR images")
-    ocr_batch_parser.add_argument("--gt-root", default="data/v2/ocr_eval/incoming_gt", help="Root folder of GT JSONs")
+    ocr_batch_parser.add_argument(
+        "--gt-root",
+        default="data/v2/ocr_eval/incoming_gt",
+        help="Root folder of GT files (.jsonl preferred, .json supported)",
+    )
     ocr_batch_parser.add_argument("--output-root", default="data/v2/ocr_eval", help="Root folder of OCR outputs")
+    ocr_batch_parser.add_argument(
+        "--doc-key",
+        default=None,
+        help="Run batch only for one document key folder under images-root",
+    )
     ocr_batch_parser.add_argument("--image-name", default="img_001.jpg", help="Image filename inside doc folder")
     ocr_batch_parser.add_argument("--limit", type=int, default=0, help="Process first N doc folders only; 0=all")
     ocr_batch_parser.add_argument(
@@ -1706,6 +2238,11 @@ def main() -> None:
         type=float,
         default=0.0,
         help="Minimum OCR confidence threshold for structured prediction",
+    )
+    ocr_batch_parser.add_argument(
+        "--all-engines",
+        action="store_true",
+        help="Run default OCR engine matrix (pp_ocrv5, pp_structurev3, table_recognition_v2, paddleocr_vl)",
     )
 
     pipeline_parser = subparsers.add_parser(
@@ -1784,6 +2321,10 @@ def main() -> None:
         from src.utils.setup_check import run_setup_check
 
         sys.exit(run_setup_check(args.config, check_openai=args.check_openai))
+    elif args.command == "check-ocr3-setup":
+        from src.utils.ocr3_setup_check import run_ocr3_setup_check
+
+        sys.exit(run_ocr3_setup_check())
     elif args.command == "embed-jsonl":
         embed_jsonl(
             input_path=args.input,
@@ -1887,60 +2428,65 @@ def main() -> None:
             item_id=args.id,
             output_path=args.output,
         )
-    elif args.command == "ocr-run-all":
+    elif args.command == "ocr-run-image":
         from src.config_ocr import load_ocr_config
 
         ocr_cfg = load_ocr_config(args.ocr_config).ocr
-        ocr_run_all(
-            image_path=args.image,
-            gt_path=args.gt,
-            item_id=args.id,
-            pred_raw_output=args.pred_raw_output,
-            pred_structured_output=args.pred_structured_output,
-            report_output=args.report_output,
-            lang=ocr_cfg.lang or args.lang,
-            score_threshold=ocr_cfg.score_threshold if ocr_cfg.score_threshold is not None else args.score_threshold,
-            ocr_engine=ocr_cfg.engine,
-            ocr_device=ocr_cfg.device,
-            docvlm_model_name=ocr_cfg.docvlm_model_name,
-            docvlm_batch_size=ocr_cfg.batch_size,
-        )
-    elif args.command == "ocr-run-doc":
-        from src.config_ocr import load_ocr_config
-
-        ocr_cfg = load_ocr_config(args.ocr_config).ocr
-        ocr_run_doc(
-            doc_key=args.doc_key,
-            item_id=args.id,
-            images_root=args.images_root,
-            gt_root=args.gt_root,
-            output_root=args.output_root,
-            image_name=args.image_name,
-            lang=ocr_cfg.lang or args.lang,
-            score_threshold=ocr_cfg.score_threshold if ocr_cfg.score_threshold is not None else args.score_threshold,
-            ocr_engine=ocr_cfg.engine,
-            ocr_device=ocr_cfg.device,
-            docvlm_model_name=ocr_cfg.docvlm_model_name,
-            docvlm_batch_size=ocr_cfg.batch_size,
-        )
+        engines = list(DEFAULT_OCR_ENGINE_MATRIX) if args.all_engines else [_normalize_ocr_engine(ocr_cfg.engine)]
+        failed_engines: list[str] = []
+        for engine_name in engines:
+            print(f"\n=== OCR Image Engine: {engine_name} ===")
+            try:
+                ocr_run_image(
+                    doc_key=args.doc_key,
+                    item_id=args.id,
+                    images_root=args.images_root,
+                    gt_root=args.gt_root,
+                    output_root=args.output_root,
+                    image_name=args.image_name,
+                    lang=ocr_cfg.lang or args.lang,
+                    score_threshold=ocr_cfg.score_threshold if ocr_cfg.score_threshold is not None else args.score_threshold,
+                    ocr_engine=engine_name,
+                    ocr_device=ocr_cfg.device,
+                    ocr_batch_size=ocr_cfg.batch_size,
+                )
+            except Exception as exc:
+                failed_engines.append(engine_name)
+                print(f"[FAIL_ENGINE] {engine_name}: {exc}")
+                if not args.all_engines:
+                    raise
+        if failed_engines:
+            raise SystemExit(f"Failed engines: {', '.join(failed_engines)}")
     elif args.command == "ocr-run-batch":
         from src.config_ocr import load_ocr_config
 
         ocr_cfg = load_ocr_config(args.ocr_config).ocr
-        ocr_run_batch(
-            images_root=args.images_root,
-            gt_root=args.gt_root,
-            output_root=args.output_root,
-            image_name=args.image_name,
-            limit=args.limit,
-            stop_on_error=args.stop_on_error,
-            lang=ocr_cfg.lang or args.lang,
-            score_threshold=ocr_cfg.score_threshold if ocr_cfg.score_threshold is not None else args.score_threshold,
-            ocr_engine=ocr_cfg.engine,
-            ocr_device=ocr_cfg.device,
-            docvlm_model_name=ocr_cfg.docvlm_model_name,
-            docvlm_batch_size=ocr_cfg.batch_size,
-        )
+        engines = list(DEFAULT_OCR_ENGINE_MATRIX) if args.all_engines else [_normalize_ocr_engine(ocr_cfg.engine)]
+        failed_engines: list[str] = []
+        for engine_name in engines:
+            print(f"\n=== OCR Batch Engine: {engine_name} ===")
+            try:
+                ocr_run_batch(
+                    images_root=args.images_root,
+                    gt_root=args.gt_root,
+                    output_root=args.output_root,
+                    image_name=args.image_name,
+                    doc_key=args.doc_key,
+                    limit=args.limit,
+                    stop_on_error=args.stop_on_error,
+                    lang=ocr_cfg.lang or args.lang,
+                    score_threshold=ocr_cfg.score_threshold if ocr_cfg.score_threshold is not None else args.score_threshold,
+                    ocr_engine=engine_name,
+                    ocr_device=ocr_cfg.device,
+                    ocr_batch_size=ocr_cfg.batch_size,
+                )
+            except Exception as exc:
+                failed_engines.append(engine_name)
+                print(f"[FAIL_ENGINE] {engine_name}: {exc}")
+                if not args.all_engines:
+                    raise
+        if failed_engines:
+            raise SystemExit(f"Failed engines: {', '.join(failed_engines)}")
     elif args.command == "run-pipeline":
         resolved_index = str(resolve_index_dir(args.config, args.index_dir))
         run_pipeline(
