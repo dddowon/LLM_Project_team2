@@ -5,6 +5,8 @@ from typing import Any
 
 from openai import OpenAI
 
+from src.models.openai_client import supports_chat_temperature
+
 
 def _contexts_to_plain_text(contexts: list[Any], max_chars: int = 24_000) -> str:
     parts: list[str] = []
@@ -22,7 +24,7 @@ def judge_faithfulness_relevance(
     contexts: list[Any],
     answer: str,
     *,
-    model: str = "gpt-4o",
+    model: str = "gpt-5-mini",
 ) -> dict[str, int | str]:
     client = OpenAI()
     context_text = _contexts_to_plain_text(contexts)
@@ -40,12 +42,14 @@ def judge_faithfulness_relevance(
     {{"f_score": 점수(0~5 정수), "r_score": 점수(0~5 정수), "s_score": 점수(0~5 정수)}}
     """
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            temperature=0,
-        )
+        request: dict[str, Any] = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "response_format": {"type": "json_object"},
+        }
+        if supports_chat_temperature(model):
+            request["temperature"] = 0
+        response = client.chat.completions.create(**request)
         raw = response.choices[0].message.content or "{}"
         data = json.loads(raw)
         f_score = int(data.get("f_score", 0))

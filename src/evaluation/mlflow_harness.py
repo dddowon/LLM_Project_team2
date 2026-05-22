@@ -113,7 +113,7 @@ def run_eval_harness_mlflow(
     *,
     evaluation_set: Path | None = None,
     output_path: Path | None = None,
-    judge_model: str = "gpt-4o-mini",
+    judge_model: str = "gpt-5-mini",
     run_llm_judge: bool = True,
     tracking_uri: str | None = None,
     experiment_name: str = DEFAULT_EXPERIMENT,

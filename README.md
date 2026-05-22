@@ -8,6 +8,7 @@
 - 문서를 청킹하고 `text-embedding-3-small`로 임베딩합니다.
 - Chroma vector DB를 생성합니다.
 - 검색된 문서 근거를 바탕으로 `gpt-5-mini`가 답변합니다.
+- 평가 harness의 LLM judge·질문 자동생성(`--call-openai`)도 기본 `gpt-5-mini`입니다.
 - 평가 질문셋으로 검색/생성 결과를 반복 비교합니다.
 
 ## 기술 스택

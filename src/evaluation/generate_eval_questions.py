@@ -8,6 +8,7 @@ from typing import Any
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from src.models.openai_client import supports_chat_temperature
 from src.utils.jsonl import read_jsonl, write_jsonl
 
 
@@ -250,12 +251,14 @@ def parse_question_response(content: str) -> list[dict[str, Any]]:
 
 def call_openai_for_questions(prompt: str, model: str) -> list[dict[str, Any]]:
     client = OpenAI()
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"},
-        temperature=0.2,
-    )
+    request: dict[str, Any] = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "response_format": {"type": "json_object"},
+    }
+    if supports_chat_temperature(model):
+        request["temperature"] = 0.2
+    response = client.chat.completions.create(**request)
     content = response.choices[0].message.content or "[]"
     return parse_question_response(content)
 
@@ -312,7 +315,7 @@ def main() -> None:
     parser.add_argument("--output", default="data/v2/eval_question_generation_inputs.jsonl")
     parser.add_argument("--generation-input", default="data/v2/eval_question_generation_inputs.jsonl")
     parser.add_argument("--eval-output", default="data/v2/eval_questions.jsonl")
-    parser.add_argument("--model", default="gpt-4o-mini")
+    parser.add_argument("--model", default="gpt-5-mini")
     parser.add_argument(
         "--max-docs",
         type=int,

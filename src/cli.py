@@ -755,7 +755,7 @@ def main() -> None:
     )
     harness_parser.add_argument(
         "--judge-model",
-        default="gpt-4o",
+        default="gpt-5-mini",
         help="OpenAI chat model for faithfulness/relevance scoring",
     )
     harness_parser.add_argument(
@@ -785,7 +785,7 @@ def main() -> None:
     )
     mlflow_parser.add_argument(
         "--judge-model",
-        default="gpt-4o-mini",
+        default="gpt-5-mini",
         help="OpenAI chat model for faithfulness/relevance scoring",
     )
     mlflow_parser.add_argument(

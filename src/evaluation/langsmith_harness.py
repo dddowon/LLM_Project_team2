@@ -158,7 +158,7 @@ def run_eval_harness(
     *,
     evaluation_set: Path | None = None,
     output_path: Path | None = None,
-    judge_model: str = "gpt-4o",
+    judge_model: str = "gpt-5-mini",
     run_llm_judge: bool = True,
     langsmith_feedback: bool = True,
 ) -> tuple[Path, dict[str, Any]]:
