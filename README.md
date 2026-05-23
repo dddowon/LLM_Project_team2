@@ -194,6 +194,21 @@ python -m src.cli build-chroma \
 
 `build-chroma`의 `--index-dir`은 원클릭 실행과 같이 팀 공용 인덱스(`configs/default.yaml`의 `paths.index_dir`)를 쓰는 것을 권장합니다. 문서 폴더 안에만 두려면 `data/v2/(사)부산국제영화제_2024년_BIFF_ACFM_온라인서비스_재개발_및_행사지원시/chroma_index`처럼 지정할 수 있습니다.
 
+### 통합 인덱스(여러 문서 embedded 병합)
+
+`run-pipeline --input-dir`로 문서별 `*_embedded.jsonl`을 만든 뒤, **eval/query가 쓰는 통합 Chroma**는 아래 명령으로 한 번에 만듭니다.
+(`--index-dir`로 파일마다 build-chroma를 반복하면 마지막 문서만 남습니다.)
+
+```bash
+python -m src.cli merge-embedded \
+  --config configs/default.yaml \
+  --input-dir data/v2 \
+  --index-dir checkpoints/chroma_openai
+```
+
+- 병합 JSONL 기본 경로: `checkpoints/all_embedded.jsonl`
+- 완료 후 `evaluate-harness` / `query`는 `checkpoints/chroma_openai`를 사용합니다.
+
 ### `embed-jsonl` 입력 포맷(고정)
 
 `embed-jsonl`은 아래 청킹 포맷만 입력으로 받습니다.
