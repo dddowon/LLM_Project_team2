@@ -48,15 +48,8 @@ def evaluate_row_metrics(
     run_llm_judge: bool = True,
     run_correctness_judge: bool = True,
 ) -> dict[str, Any]:
-    """Run retrieval → generation → answer metrics for one harness row."""
+    """Run retrieval → (optional) generation judge → answer metrics for one harness row."""
     retrieval = evaluate_retrieval_metrics(row, sources)
-    generation = evaluate_generation_metrics(
-        str(row.get("question") or ""),
-        sources,
-        answer,
-        judge_model=judge_model,
-        run_llm_judge=run_llm_judge,
-    )
     answer_metrics = evaluate_answer_metrics(
         row,
         answer,
@@ -65,4 +58,14 @@ def evaluate_row_metrics(
         doc_hit=retrieval.get("doc_hit"),
         keyword_hit=retrieval.get("retrieval_keyword_hit"),
     )
-    return {**retrieval, **generation, **answer_metrics}
+    merged: dict[str, Any] = {**retrieval, **answer_metrics}
+    if run_llm_judge:
+        generation = evaluate_generation_metrics(
+            str(row.get("question") or ""),
+            sources,
+            answer,
+            judge_model=judge_model,
+            run_llm_judge=True,
+        )
+        merged.update(generation)
+    return merged

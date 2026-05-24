@@ -6,7 +6,7 @@ from typing import Any
 
 from openai import OpenAI
 
-from src.evaluation.answer import is_refusal_answer
+from src.evaluation.answer import classify_answer_refusal
 from src.models.openai_client import supports_chat_temperature
 
 
@@ -99,7 +99,7 @@ def evaluate_generation_metrics(
     f_score, r_score, s_score, judge_err = parse_judge_scores(judge_payload)
 
     faithfulness_given_answer: int | None = None
-    if not is_refusal_answer(answer):
+    if classify_answer_refusal(answer) != "full":
         faithfulness_given_answer = f_score
 
     result: dict[str, Any] = {

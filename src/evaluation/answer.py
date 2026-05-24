@@ -2,24 +2,69 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 from openai import OpenAI
 
 from src.models.openai_client import supports_chat_temperature
 
 UNANSWERABLE_TYPES = frozenset({"unanswerable"})
+RefusalKind = Literal["none", "full", "partial"]
+MIN_SUBSTANTIVE_CHARS = 80
 
 
-def is_refusal_answer(answer: str) -> bool:
-    text = str(answer or "").strip()
-    if not text:
-        return True
+def _has_refusal_phrase(text: str) -> bool:
     if "확인되지 않" in text or "확인할 수 없" in text or "존재하지 않" in text:
         return True
     if "제공된 문서" in text and any(token in text for token in ("없", "포함", "확인")):
         return True
     return False
+
+
+def _line_is_refusal_boilerplate(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return True
+    if "확인되지 않" in stripped or "확인할 수 없" in stripped or "존재하지 않" in stripped:
+        return True
+    if "제공된 문서" in stripped and any(token in stripped for token in ("없", "포함", "확인")):
+        return True
+    if stripped.startswith("문서에서 확인") and len(stripped) < 72:
+        return True
+    if "추측하지 않" in stripped and len(stripped) < 96:
+        return True
+    if stripped.startswith("결론") and "확인되지" in stripped and len(stripped) < 120:
+        return True
+    return False
+
+
+def classify_answer_refusal(answer: str) -> RefusalKind:
+    """전면 거절(full) vs 본문 답변 + 일부 부재 표기(partial) vs 없음(none)."""
+    text = str(answer or "").strip()
+    if not text:
+        return "full"
+    if not _has_refusal_phrase(text):
+        return "none"
+
+    substantive_chars = 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or _line_is_refusal_boilerplate(line):
+            continue
+        substantive_chars += len(line)
+
+    if substantive_chars < MIN_SUBSTANTIVE_CHARS:
+        return "full"
+    return "partial"
+
+
+def is_full_refusal_answer(answer: str) -> bool:
+    return classify_answer_refusal(answer) == "full"
+
+
+def is_refusal_answer(answer: str) -> bool:
+    """전면 거절 여부. 부분 범위 제한(일부만 '문서에 없음' 표기)은 False."""
+    return is_full_refusal_answer(answer)
 
 
 def is_answerable_question_type(question_type: str | None) -> bool:
@@ -54,6 +99,7 @@ def judge_answer_correctness(
 
     "문서에서 확인되지 않습니다" 등 근거 없는 거절만 했고 기대 답안이 실제로 찾을 수 있는 질문이면 0~2로 채점하세요.
     기대 답안이 "문서에서 확인되지 않음" 이고 거절이 적절하면 5점입니다.
+    본문에 핵심을 답한 뒤 일부 항목만 '문서에 없음'이라고 한 경우는 내용이 맞으면 감점하지 마세요.
 
     [질문]
     {question}
@@ -117,7 +163,9 @@ def evaluate_answer_metrics(
     keyword_hit: float | None,
 ) -> dict[str, Any]:
     question_type = str(row.get("question_type") or "").strip()
-    refusal = is_refusal_answer(answer)
+    refusal_kind = classify_answer_refusal(answer)
+    full_refusal = refusal_kind == "full"
+    partial_limitation = refusal_kind == "partial"
 
     correctness_score: int | None = None
     correctness_pass: bool | None = None
@@ -141,28 +189,30 @@ def evaluate_answer_metrics(
     answerable = is_answerable_question_type(question_type)
     if answerable:
         if correctness_pass is None:
-            task_success = not refusal
+            task_success = not full_refusal
         else:
-            task_success = (not refusal) and correctness_pass
+            task_success = (not full_refusal) and correctness_pass
     else:
-        task_success = refusal
+        task_success = full_refusal
 
     failure_reason = classify_failure_reason(
         question_type=question_type,
         doc_hit=doc_hit,
         keyword_hit=keyword_hit,
-        is_refusal=refusal,
+        is_refusal=full_refusal,
         correctness_pass=correctness_pass,
         has_doc_id=bool(str(row.get("doc_id") or "").strip()),
     )
 
     return {
-        "is_refusal": refusal,
+        "refusal_kind": refusal_kind,
+        "partial_limitation": partial_limitation,
+        "is_refusal": full_refusal,
         "correctness_score": correctness_score,
         "correctness_pass": correctness_pass,
         "task_success": task_success,
-        "wrong_refusal": answerable and refusal,
-        "appropriate_refusal": (not answerable) and refusal,
+        "wrong_refusal": answerable and full_refusal,
+        "appropriate_refusal": (not answerable) and full_refusal,
         "failure_reason": failure_reason,
         **({"correctness_judge_error": correctness_error} if correctness_error else {}),
     }

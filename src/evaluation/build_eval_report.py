@@ -7,7 +7,12 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-from src.evaluation.answer import is_answerable_question_type, is_refusal_answer
+from src.evaluation.answer import (
+    classify_answer_refusal,
+    classify_failure_reason,
+    is_answerable_question_type,
+    score_pass,
+)
 from src.utils.jsonl import read_jsonl
 
 QUESTION_TYPE_LABELS = {
@@ -122,6 +127,7 @@ table.failure-detail .hallucination-answer { background: #fff0f0; border-left: 3
 table.failure-detail tbody tr.data-row:nth-child(4n+1) { background: #fcfdff; }
 .tag { display: inline-block; margin: 2px 4px 2px 0; padding: 2px 6px; border-radius: 4px; font-size: 11px; background: #eef2ff; color: #334; }
 .tag-refusal { background: #fff3cd; color: #856404; font-weight: 600; }
+.tag-partial { background: #e8f4fd; color: #0c5460; font-weight: 600; }
 .tag-hallucination { background: #f8d7da; color: #721c24; font-weight: 600; }
 table.failure-detail tr.failure-evidence-row td { border-top: 1px dashed #dde3ea; background: #fafbfd; font-size: 12px; }
 .evidence-section-title { font-size: 11px; font-weight: 700; color: #4f7cff; margin: 8px 0 4px; }
@@ -159,13 +165,34 @@ def row_is_answerable(row: dict[str, Any]) -> bool:
     return is_answerable_question_type(row_question_type_key(row))
 
 
+def row_refusal_kind(row: dict[str, Any]) -> str:
+    kind = str(row.get("refusal_kind") or "").strip().lower()
+    if kind in ("none", "full", "partial"):
+        return kind
+    return classify_answer_refusal(str(row.get("answer") or ""))
+
+
+def row_is_full_refusal(row: dict[str, Any]) -> bool:
+    if row.get("is_refusal") is not None and row.get("refusal_kind"):
+        return bool(row.get("is_refusal"))
+    return row_refusal_kind(row) == "full"
+
+
+def row_partial_limitation(row: dict[str, Any]) -> bool:
+    if row.get("partial_limitation") is not None:
+        return bool(row.get("partial_limitation"))
+    return row_refusal_kind(row) == "partial"
+
+
 def row_wrong_refusal(row: dict[str, Any]) -> bool | None:
-    """JSONL에 wrong_refusal이 없으면 답변 가능 + 거절 패턴으로 추정."""
-    if row.get("wrong_refusal") is not None:
-        return bool(row.get("wrong_refusal"))
+    """무단 거절 = 답변 가능 질문의 전면 거절만 (부분 범위 제한 제외)."""
     if not row_is_answerable(row):
         return None
-    return row_is_refusal(row)
+    if row_partial_limitation(row):
+        return False
+    if row.get("wrong_refusal") is not None:
+        return bool(row.get("wrong_refusal"))
+    return row_is_full_refusal(row)
 
 
 def fmt_wrong_refusal_flag(row: dict[str, Any]) -> str:
@@ -242,9 +269,50 @@ def row_question_type(row: dict[str, Any]) -> str:
 
 
 def row_is_refusal(row: dict[str, Any]) -> bool:
-    if row.get("is_refusal") is not None:
-        return bool(row.get("is_refusal"))
-    return is_refusal_answer(str(row.get("answer") or ""))
+    """하위 호환: 전면 거절 여부."""
+    return row_is_full_refusal(row)
+
+
+def enrich_eval_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """구버전 JSONL도 리포트에서 전면/부분 거절·task_success를 일관되게 재계산."""
+    enriched: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        kind = classify_answer_refusal(str(item.get("answer") or ""))
+        full_refusal = kind == "full"
+        partial = kind == "partial"
+        item["refusal_kind"] = kind
+        item["partial_limitation"] = partial
+        item["is_refusal"] = full_refusal
+
+        answerable = row_is_answerable(item)
+        correctness_score = item.get("correctness_score")
+        correctness_pass = item.get("correctness_pass")
+        if correctness_pass is None and isinstance(correctness_score, int):
+            correctness_pass = score_pass(int(correctness_score))
+
+        if answerable:
+            item["wrong_refusal"] = full_refusal
+            if correctness_pass is None:
+                item["task_success"] = not full_refusal
+            else:
+                item["task_success"] = (not full_refusal) and correctness_pass
+            item["appropriate_refusal"] = False
+        else:
+            item["wrong_refusal"] = False
+            item["task_success"] = full_refusal
+            item["appropriate_refusal"] = full_refusal
+
+        item["failure_reason"] = classify_failure_reason(
+            question_type=str(item.get("question_type") or ""),
+            doc_hit=as_number(item.get("doc_hit")),
+            keyword_hit=as_number(item.get("retrieval_keyword_hit")),
+            is_refusal=full_refusal,
+            correctness_pass=correctness_pass if isinstance(correctness_pass, bool) else None,
+            has_doc_id=bool(str(item.get("doc_id") or "").strip()),
+        )
+        enriched.append(item)
+    return enriched
 
 
 def score_values(rows: list[dict[str, Any]], key: str) -> list[float]:
@@ -322,7 +390,7 @@ def _binary_metric_is_zero(row: dict[str, Any], key: str) -> bool:
 
 
 def is_hallucination_candidate(row: dict[str, Any]) -> bool:
-    if row_is_refusal(row):
+    if row_is_full_refusal(row):
         return False
     if _score_below(row, "f_score"):
         return True
@@ -335,11 +403,15 @@ def failure_tags(row: dict[str, Any]) -> list[str]:
     reason = str(row.get("failure_reason") or "").strip()
     if reason:
         tags.append(FAILURE_REASON_LABELS.get(reason, reason))
-    if row_is_refusal(row) and not any("거절" in tag for tag in tags):
-        if row_wrong_refusal(row) or reason == "wrong_refusal":
+    if row_wrong_refusal(row) or reason == "wrong_refusal":
+        if not any("무단 거절" in tag for tag in tags):
             tags.append("무단 거절")
-        elif reason != "should_refuse":
-            tags.append("거절 응답")
+    elif row_is_full_refusal(row) and reason != "should_refuse" and not any(
+        "거절" in tag for tag in tags
+    ):
+        tags.append("거절 응답")
+    if row_partial_limitation(row) and not any("부분 범위" in tag for tag in tags):
+        tags.append("부분 범위 제한")
     if is_hallucination_candidate(row):
         tags.append("환각 의심")
     return tags or ["기타 저점수"]
@@ -357,13 +429,17 @@ def failure_primary_kind(row: dict[str, Any]) -> str:
 
 
 def should_include_in_failures(row: dict[str, Any]) -> bool:
-    if row.get("failure_reason") or row.get("wrong_refusal"):
+    if row_partial_limitation(row) and not (
+        row.get("failure_reason") or row_wrong_refusal(row) or row.get("task_success") is False
+    ):
+        return False
+    if row.get("failure_reason") or row_wrong_refusal(row):
         return True
     if is_hallucination_candidate(row):
         return True
     if row.get("task_success") is False:
         return True
-    if row_is_refusal(row) and row.get("task_success") is not True:
+    if row_is_full_refusal(row) and row.get("task_success") is not True:
         return True
     if any(_score_below(row, key) for key in ("f_score", "r_score", "s_score", "correctness_score")):
         return True
@@ -471,7 +547,7 @@ def cell_text_html(text: Any, *, max_chars: int = 1200) -> str:
 
 def answer_cell_html(row: dict[str, Any]) -> str:
     css_classes = ["failure-text"]
-    if row_is_refusal(row):
+    if row_is_full_refusal(row):
         css_classes.append("refusal-answer")
     if is_hallucination_candidate(row):
         css_classes.append("hallucination-answer")
@@ -485,6 +561,8 @@ def failure_tags_html(row: dict[str, Any]) -> str:
         cls = "tag"
         if tag == "환각 의심":
             cls += " tag-hallucination"
+        elif tag == "부분 범위 제한":
+            cls += " tag-partial"
         elif "거절" in tag:
             cls += " tag-refusal"
         parts.append(f'<span class="{cls}">{html.escape(tag)}</span>')
@@ -573,10 +651,17 @@ def failure_reason_table_html(counts: Counter[str]) -> str:
     return table_html(["실패 유형 정의", "발생 건수"], rows)
 
 
-def write_failures_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = [
-        "실패 유형",
+PARTIAL_LIMITATION_CSV_LABEL = "부분 범위 제한 (partial_limitation)"
+
+
+def row_dedupe_key(row: dict[str, Any]) -> tuple[str, str]:
+    return (str(row.get("question") or ""), str(row.get("doc_id") or ""))
+
+
+def eval_csv_fieldnames() -> list[str]:
+    return [
+        "결과 분류",
+        "CSV 비고",
         "질문 성격",
         "RFP 항목(category)",
         metric_label("doc_hit"),
@@ -588,7 +673,8 @@ def write_failures_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         metric_label("correctness_score"),
         metric_label("task_success"),
         FAILURE_METRIC_TITLES["wrong_refusal"] + " (wrong_refusal)",
-        "거절 응답 (is_refusal)",
+        "전면 거절 (is_refusal)",
+        PARTIAL_LIMITATION_CSV_LABEL,
         "환각 의심",
         metric_label("total_latency_ms"),
         "질문",
@@ -597,37 +683,112 @@ def write_failures_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "근거 문서",
         "근거 청크 ID",
     ]
+
+
+def eval_row_to_csv_dict(row: dict[str, Any], *, outcome: str) -> dict[str, str | bool]:
+    return {
+        "결과 분류": outcome,
+        "CSV 비고": str(row.get("_csv_note") or ""),
+        "질문 성격": row_question_type(row),
+        "RFP 항목(category)": row_category(row),
+        metric_label("doc_hit"): fmt_metric_value(row.get("doc_hit")),
+        metric_label("retrieval_keyword_hit"): fmt_metric_value(row.get("retrieval_keyword_hit")),
+        metric_label("context_precision"): fmt_metric_value(row.get("context_precision")),
+        metric_label("f_score"): fmt_metric_value(row.get("f_score")),
+        metric_label("r_score"): fmt_metric_value(row.get("r_score")),
+        metric_label("s_score"): fmt_metric_value(row.get("s_score")),
+        metric_label("correctness_score"): fmt_metric_value(row.get("correctness_score")),
+        metric_label("task_success"): fmt_task_success(row.get("task_success")),
+        FAILURE_METRIC_TITLES["wrong_refusal"] + " (wrong_refusal)": fmt_wrong_refusal_flag(row),
+        "전면 거절 (is_refusal)": row_is_full_refusal(row),
+        PARTIAL_LIMITATION_CSV_LABEL: row_partial_limitation(row),
+        "환각 의심": is_hallucination_candidate(row),
+        metric_label("total_latency_ms"): fmt_seconds(as_number(row.get("total_latency_ms"))),
+        "질문": str(row.get("question") or ""),
+        "기대 답변": str(row.get("expected_answer") or ""),
+        "모델 답변": str(row.get("answer") or ""),
+        "근거 문서": source_file_names_short(row),
+        "근거 청크 ID": source_chunk_ids_csv_field(row),
+    }
+
+
+def write_eval_rows_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = eval_csv_fieldnames()
     with path.open("w", encoding="utf-8-sig", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
-            writer.writerow(
-                {
-                    "실패 유형": " | ".join(row.get("_failure_tags") or failure_tags(row)),
-                    "질문 성격": row_question_type(row),
-                    "RFP 항목(category)": row_category(row),
-                    metric_label("doc_hit"): row.get("doc_hit"),
-                    metric_label("retrieval_keyword_hit"): row.get("retrieval_keyword_hit"),
-                    metric_label("context_precision"): row.get("context_precision"),
-                    metric_label("f_score"): row.get("f_score"),
-                    metric_label("r_score"): row.get("r_score"),
-                    metric_label("s_score"): row.get("s_score"),
-                    metric_label("correctness_score"): row.get("correctness_score"),
-                    metric_label("task_success"): row.get("task_success"),
-                    FAILURE_METRIC_TITLES["wrong_refusal"]
-                    + " (wrong_refusal)": fmt_wrong_refusal_flag(row),
-                    "거절 응답 (is_refusal)": row_is_refusal(row),
-                    "환각 의심": is_hallucination_candidate(row),
-                    metric_label("total_latency_ms"): fmt_seconds(
-                        as_number(row.get("total_latency_ms"))
-                    ),
-                    "질문": row.get("question", ""),
-                    "기대 답변": row.get("expected_answer", ""),
-                    "모델 답변": row.get("answer", ""),
-                    "근거 문서": source_file_names_short(row),
-                    "근거 청크 ID": source_chunk_ids_csv_field(row),
-                }
-            )
+            outcome = str(row.get("_csv_outcome") or "")
+            writer.writerow(eval_row_to_csv_dict(row, outcome=outcome))
+
+
+def partial_limitation_rows_for_csv(
+    all_rows: list[dict[str, Any]],
+    html_failures: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    seen = {row_dedupe_key(row) for row in html_failures}
+    extra: list[dict[str, Any]] = []
+    for row in all_rows:
+        if not row_partial_limitation(row):
+            continue
+        key = row_dedupe_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        enriched = dict(row)
+        enriched["_csv_outcome"] = "부분 범위 제한"
+        enriched["_csv_note"] = "HTML 오답 노트 제외·CSV 전용"
+        extra.append(enriched)
+    return extra
+
+
+def success_rows_for_csv(
+    all_rows: list[dict[str, Any]],
+    html_failures: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """HTML 오답 노트에 없고 task_success 합격인 문항."""
+    html_keys = {row_dedupe_key(row) for row in html_failures}
+    successes: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in all_rows:
+        key = row_dedupe_key(row)
+        if key in html_keys or key in seen:
+            continue
+        if row.get("task_success") is not True:
+            continue
+        seen.add(key)
+        enriched = dict(row)
+        parts = ["태스크 성공"]
+        if row_partial_limitation(row):
+            parts.append("부분 범위 제한")
+        enriched["_csv_outcome"] = " · ".join(parts)
+        enriched["_csv_note"] = "HTML 오답 노트 제외·합격"
+        successes.append(enriched)
+    return successes
+
+
+def write_failures_csv(
+    path: Path,
+    html_failures: list[dict[str, Any]],
+    *,
+    all_rows: list[dict[str, Any]] | None = None,
+) -> None:
+    partial_only = (
+        partial_limitation_rows_for_csv(all_rows, html_failures) if all_rows is not None else []
+    )
+    csv_rows: list[dict[str, Any]] = []
+    for row in html_failures:
+        enriched = dict(row)
+        enriched["_csv_outcome"] = " | ".join(row.get("_failure_tags") or failure_tags(row))
+        enriched.setdefault("_csv_note", "")
+        csv_rows.append(enriched)
+    csv_rows.extend(partial_only)
+    write_eval_rows_csv(path, csv_rows)
+
+
+def write_successes_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    write_eval_rows_csv(path, rows)
 
 
 def bar_svg(items: list[tuple[str, float | None]], *, max_value: float) -> str:
@@ -859,17 +1020,18 @@ def metrics_legend_body_html() -> str:
     • <strong>답변 불가능 질문</strong> (<code>unanswerable</code>): 억지로 오답을 지어내지 않고,
     가이드라인대로 올바르게 답변을 거절한 경우 합격</dd>
     <dt>wrong_refusal · 무단 거절 오류율</dt>
-    <dd>근거 문서에 정답이 존재하여 <strong>'답변이 가능한 질문'들 중에서, 모델이 내용을 찾을 수 없다며
-    무단으로 답변을 거부한 비율</strong>입니다.<br>
-    • <strong>주의</strong>: 답변 불가능한 질문은 계산에서 제외(해당 없음)됩니다.<br>
-    • <strong>지표 해석</strong>: 시스템의 실패 유형에는 무단 거절 외에도 '검색 실패', '오답(환각)' 등이 따로 존재하므로,
-    <u>[성공률 + 무단 거절률]의 합이 반드시 100%가 되지는 않습니다.</u></dd>
+    <dd>답변 가능 질문에서 <strong>본문 없이 전면 거절</strong>한 비율입니다.
+    일부만 「문서에 없음」이라고 적은 <strong>부분 범위 제한</strong> 답변은 포함하지 않습니다.<br>
+    • <strong>주의</strong>: 답변 불가능 질문은 계산에서 제외(해당 없음)됩니다.<br>
+    • <strong>부분 범위 제한</strong>·<strong>합격 사례</strong>는 HTML 오답 노트에는 넣지 않고
+    <code>eval_failures.csv</code> / <code>eval_successes.csv</code>로 확인합니다.</dd>
     </dl>
 
-    <p class="legend-footnote">💡 <strong>오답 노트 시각화 가이드:</strong> 시스템 오동작 유형 중
-    <strong>무단 거절</strong> 케이스는 <span class="tag tag-refusal">노란색 배경</span>,
-    <strong>환각 의심</strong> 케이스는 <span class="tag tag-hallucination">붉은색 배경</span>으로 표기됩니다.
-    상세 목록 건수는 <code>--top-n</code>으로 조절합니다.</p>
+    <p class="legend-footnote">💡 <strong>오답 노트 시각화 가이드:</strong>
+    <strong>무단 거절(전면)</strong> <span class="tag tag-refusal">노란색</span>,
+    동일 행에 부분 한계가 있으면 <span class="tag tag-partial">부분 범위 제한</span> 태그,
+    <strong>환각 의심</strong> <span class="tag tag-hallucination">붉은색</span>.
+    HTML 목록 건수는 <code>--top-n</code>, 부분 범위 제한 전용 행은 CSV에 추가됩니다.</p>
     </div>"""
 
 
@@ -944,7 +1106,8 @@ def render_html(
 </section>
 <section id="failures" class="report-section">
 <h2>📝 디버깅 오답 노트 (Error Analysis)</h2>
-<p class="note">무단 거절·환각 의심 등 실패 케이스입니다. 표는 가로 스크롤이 가능합니다.</p>
+<p class="note">전면 거절·오답·환각 등 실패 케이스입니다. 합격·부분 범위 제한만 있는 항목은
+<code>eval_successes.csv</code> / <code>eval_failures.csv</code>를 참고하세요. 표는 가로 스크롤이 가능합니다.</p>
 <h3>실패 유형 분포</h3>
 {failure_reason_table_html(failure_reason_counts(rows))}
 {failure_table_html(failures)}
@@ -954,8 +1117,15 @@ def render_html(
 </html>"""
 
 
-def build_report(input_path: Path, html_output: Path, failures_output: Path, top_n: int) -> None:
-    rows = read_jsonl(input_path)
+def build_report(
+    input_path: Path,
+    html_output: Path,
+    failures_output: Path,
+    top_n: int,
+    *,
+    successes_output: Path | None = None,
+) -> None:
+    rows = enrich_eval_rows(read_jsonl(input_path))
     if not rows:
         print("데이터가 없습니다.")
         return
@@ -967,9 +1137,19 @@ def build_report(input_path: Path, html_output: Path, failures_output: Path, top
         render_html(rows, failures, failure_pool_count=pool_count),
         encoding="utf-8",
     )
-    write_failures_csv(failures_output, failures)
+    partial_only = partial_limitation_rows_for_csv(rows, failures)
+    write_failures_csv(failures_output, failures, all_rows=rows)
+
+    successes_path = successes_output or failures_output.with_name("eval_successes.csv")
+    successes = success_rows_for_csv(rows, failures)
+    write_successes_csv(successes_path, successes)
+
     print(f"리포트 생성 완료: {html_output}")
-    print(f"오답 CSV: {failures_output} ({len(failures)}건 / 후보 {pool_count}건)")
+    print(
+        f"오답 CSV: {failures_output} "
+        f"(HTML {len(failures)}건 + 부분범위 CSV전용 {len(partial_only)}건 / 후보 {pool_count}건)"
+    )
+    print(f"합격 CSV: {successes_path} ({len(successes)}건)")
 
 
 def main() -> None:
@@ -977,6 +1157,11 @@ def main() -> None:
     parser.add_argument("--input", default="outputs/eval_harness_results.jsonl")
     parser.add_argument("--html-output", default="outputs/eval_report.html")
     parser.add_argument("--failures-output", default="outputs/eval_failures.csv")
+    parser.add_argument(
+        "--successes-output",
+        default="outputs/eval_successes.csv",
+        help="HTML 오답 노트에 없는 합격(task_success) 사례 CSV",
+    )
     parser.add_argument("--top-n", type=int, default=20, help="오답 노트에 표시할 최대 건수")
     args = parser.parse_args()
     build_report(
@@ -984,6 +1169,7 @@ def main() -> None:
         html_output=Path(args.html_output),
         failures_output=Path(args.failures_output),
         top_n=args.top_n,
+        successes_output=Path(args.successes_output),
     )
 
 

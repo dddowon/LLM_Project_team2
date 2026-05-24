@@ -6,13 +6,18 @@ import json
 import tempfile
 from pathlib import Path
 
-from src.evaluation.answer import evaluate_answer_metrics
+from src.evaluation.answer import (
+    classify_answer_refusal,
+    evaluate_answer_metrics,
+    is_full_refusal_answer,
+)
 from src.evaluation.build_eval_report import (
     build_report,
     count_failure_candidates,
     failure_rows,
     failure_tags,
     render_html,
+    success_rows_for_csv,
 )
 from src.evaluation.harness_metrics import evaluate_row_metrics
 from src.evaluation.retrieval import evaluate_retrieval_metrics
@@ -38,6 +43,62 @@ def _load_fixture_rows() -> list[dict]:
         if line:
             rows.append(json.loads(line))
     return rows
+
+
+def test_harness_merge_keeps_generation_scores_when_row_metrics_skips_judge() -> None:
+    """구 merge 버그: base에 f_score=None이 있으면 generation 점수가 덮어쓰이지 않음."""
+    base = {
+        "doc_hit": 1.0,
+        "f_score": None,
+        "r_score": None,
+        "s_score": None,
+        "task_success": True,
+    }
+    generation = {
+        "f_score": 4,
+        "r_score": 5,
+        "s_score": 4,
+        "faithfulness_given_answer": 4,
+    }
+
+    buggy = {
+        **base,
+        **{k: v for k, v in generation.items() if k not in base},
+    }
+    assert buggy.get("f_score") is None
+
+    fixed = {**base, **generation}
+    assert fixed["f_score"] == 4
+
+
+def test_row_metrics_omits_generation_keys_when_judge_off() -> None:
+    from src.evaluation.harness_metrics import evaluate_row_metrics
+
+    row = {
+        "question": "예산은?",
+        "expected_answer": "12억",
+        "question_type": "fact",
+        "doc_id": "예산안",
+        "ground_truth_keywords": ["12억"],
+    }
+    sources = [
+        {
+            "chunk_id": "c1",
+            "text": "총 사업비 12억 원",
+            "metadata": {"file_name": "예산안.hwp"},
+        }
+    ]
+    metrics = evaluate_row_metrics(
+        row,
+        answer="총 사업비는 12억 원입니다.",
+        sources=sources,
+        judge_model="gpt-5-mini",
+        run_llm_judge=False,
+        run_correctness_judge=False,
+    )
+    assert "f_score" not in metrics
+    assert "r_score" not in metrics
+    assert "s_score" not in metrics
 
 
 def test_harness_metrics_shape_on_synthetic_row() -> None:
@@ -72,6 +133,16 @@ def test_harness_metrics_shape_on_synthetic_row() -> None:
     assert metrics["task_success"] is True
 
 
+def test_partial_limitation_is_not_full_refusal() -> None:
+    answer = (
+        "네트워크 스위치 요구(ECR-04): CPU Load Balancing, IPv6 지원, "
+        "Static/Dynamic 라우팅 프로토콜 지원 등 문서에 명시되어 있습니다.\n"
+        "제출 방식 등 추가 항목: 문서에서 확인되지 않습니다."
+    )
+    assert classify_answer_refusal(answer) == "partial"
+    assert not is_full_refusal_answer(answer)
+
+
 def test_wrong_refusal_detected_without_field() -> None:
     row = {
       "question": "예산?",
@@ -88,7 +159,9 @@ def test_wrong_refusal_detected_without_field() -> None:
         doc_hit=1.0,
         keyword_hit=0.0,
     )
+    assert out["refusal_kind"] == "full"
     assert out["wrong_refusal"] is True
+    assert out["partial_limitation"] is False
     assert out["failure_reason"] == "wrong_refusal"
 
 
@@ -100,14 +173,16 @@ def test_build_report_from_fixture() -> None:
         tmp_path = Path(tmp)
         html_out = tmp_path / "report.html"
         csv_out = tmp_path / "failures.csv"
+        successes_out = tmp_path / "successes.csv"
         build_report(
             input_path=FIXTURE,
             html_output=html_out,
             failures_output=csv_out,
             top_n=50,
+            successes_output=successes_out,
         )
         html = html_out.read_text(encoding="utf-8")
-        assert html_out.exists() and csv_out.exists()
+        assert html_out.exists() and csv_out.exists() and successes_out.exists()
 
         summary_pos = html.index('id="summary"')
         legend_pos = html.index('id="legend"')
@@ -127,8 +202,17 @@ def test_build_report_from_fixture() -> None:
             reader = csv.DictReader(f)
             fieldnames = reader.fieldnames or []
             csv_rows = list(reader)
-        assert len(csv_rows) == len(failures)
+        assert len(csv_rows) >= len(failures)
         assert "무단 거절 여부 (wrong_refusal)" in fieldnames
+        assert "부분 범위 제한 (partial_limitation)" in fieldnames
+        assert "결과 분류" in fieldnames
+
+        expected_successes = success_rows_for_csv(rows, failures)
+        with successes_out.open(encoding="utf-8-sig", newline="") as f:
+            success_reader = csv.DictReader(f)
+            success_rows = list(success_reader)
+        assert len(success_rows) == len(expected_successes)
+        assert all(r.get("결과 분류", "").startswith("태스크 성공") for r in success_rows)
 
 
 def test_failure_tags_cover_fixture_reasons() -> None:

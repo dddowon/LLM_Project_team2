@@ -104,7 +104,7 @@ def _eval_one_row(
         "resolved_doc_id": result.get("resolved_doc_id"),
         "total_latency_ms": total_latency_ms,
         **retrieval_and_answer,
-        **{k: v for k, v in generation.items() if k not in retrieval_and_answer},
+        **generation,
     }
     if generation.get("judge_error"):
         merged["judge_error"] = generation["judge_error"]
