@@ -8,6 +8,7 @@ import chromadb
 import numpy as np
 
 from src.dataset.schema import Chunk
+from src.engine.doc_scope import build_doc_id_lookup, resolve_doc_filter_value
 
 
 COLLECTION_NAME = "rfp_chunks"
@@ -19,10 +20,13 @@ class ChromaVectorStore:
         collection: Any,
         chunks: list[Chunk],
         embeddings: list[list[float]] | None = None,
+        *,
+        doc_id_lookup: dict[str, str] | None = None,
     ) -> None:
         self.collection = collection
         self.chunks = chunks
         self.embeddings = embeddings
+        self._doc_id_lookup = doc_id_lookup or build_doc_id_lookup(chunks)
 
     @classmethod
     def build(
@@ -120,12 +124,33 @@ class ChromaVectorStore:
 
         return cls(collection=collection, chunks=chunks)
 
-    def search(self, query_embedding: list[float], top_k: int) -> list[tuple[Chunk, float]]:
-        results = self.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=top_k,
-            include=["metadatas", "distances"],
-        )
+    def resolve_doc_id(self, doc_id: str | None) -> str | None:
+        if not doc_id:
+            return None
+        return resolve_doc_filter_value(doc_id, self._doc_id_lookup)
+
+    def search(
+        self,
+        query_embedding: list[float],
+        top_k: int,
+        *,
+        doc_id: str | None = None,
+    ) -> list[tuple[Chunk, float]]:
+        query_kwargs: dict[str, Any] = {
+            "query_embeddings": [query_embedding],
+            "n_results": top_k,
+            "include": ["metadatas", "distances"],
+        }
+        resolved_doc = self.resolve_doc_id(doc_id)
+        if resolved_doc:
+            query_kwargs["where"] = {
+                "$or": [
+                    {"file_name": {"$eq": resolved_doc}},
+                    {"doc_id": {"$eq": resolved_doc}},
+                ]
+            }
+
+        results = self.collection.query(**query_kwargs)
 
         metadatas = results.get("metadatas", [[]])[0]
         distances = results.get("distances", [[]])[0]

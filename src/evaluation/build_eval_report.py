@@ -100,14 +100,23 @@ def score_values(rows: list[dict[str, Any]], key: str) -> list[float]:
     return [value for value in values if value is not None]
 
 
+def bool_rate(rows: list[dict[str, Any]], key: str) -> float | None:
+    values = [1.0 if row.get(key) else 0.0 for row in rows if row.get(key) is not None]
+    return mean(values)
+
+
 def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "n": len(rows),
+        "mean_doc_hit": mean(score_values(rows, "doc_hit")),
         "mean_f_score": mean(score_values(rows, "f_score")),
         "mean_r_score": mean(score_values(rows, "r_score")),
         "mean_s_score": mean(score_values(rows, "s_score")),
+        "mean_correctness_score": mean(score_values(rows, "correctness_score")),
         "mean_retrieval_keyword_hit": mean(score_values(rows, "retrieval_keyword_hit")),
         "mean_context_precision": mean(score_values(rows, "context_precision")),
+        "mean_task_success": bool_rate(rows, "task_success"),
+        "mean_wrong_refusal": bool_rate(rows, "wrong_refusal"),
         "mean_total_latency_ms": mean(score_values(rows, "total_latency_ms")),
     }
 
@@ -246,27 +255,33 @@ def failure_table_html(failures: list[dict[str, Any]]) -> str:
     )
 
 
-def failure_score(row: dict[str, Any]) -> float:
-    f_score = as_number(row.get("f_score"))
-    r_score = as_number(row.get("r_score"))
-    s_score = as_number(row.get("s_score"))
-    hit = as_number(row.get("retrieval_keyword_hit"))
-    precision = as_number(row.get("context_precision"))
+FAILURE_PRIORITY = {
+    "wrong_doc": 0,
+    "wrong_refusal": 1,
+    "wrong_answer": 2,
+    "low_retrieval": 3,
+    "should_refuse": 4,
+}
 
-    score = 0.0
-    score += f_score if f_score is not None else 5.0
-    score += r_score if r_score is not None else 5.0
-    score += s_score if s_score is not None else 5.0
-    if hit == 0.0:
-        score -= 2.0
-    if precision == 0.0:
-        score -= 1.0
-    return score
+
+def failure_sort_key(row: dict[str, Any]) -> tuple[int, float, float]:
+    reason = str(row.get("failure_reason") or "")
+    priority = FAILURE_PRIORITY.get(reason, 99)
+    doc_hit = as_number(row.get("doc_hit"))
+    correctness = as_number(row.get("correctness_score"))
+    return (
+        priority,
+        doc_hit if doc_hit is not None else 1.0,
+        correctness if correctness is not None else 5.0,
+    )
 
 
 def failure_rows(rows: list[dict[str, Any]], top_n: int) -> list[dict[str, Any]]:
-    candidates = []
+    candidates = [row for row in rows if row.get("failure_reason")]
+    legacy: list[dict[str, Any]] = []
     for row in rows:
+        if row.get("failure_reason"):
+            continue
         f_score = as_number(row.get("f_score"))
         r_score = as_number(row.get("r_score"))
         s_score = as_number(row.get("s_score"))
@@ -279,8 +294,9 @@ def failure_rows(rows: list[dict[str, Any]], top_n: int) -> list[dict[str, Any]]
             or hit == 0.0
             or precision == 0.0
         ):
-            candidates.append(row)
-    return sorted(candidates, key=failure_score)[:top_n]
+            legacy.append(row)
+    merged = candidates + legacy
+    return sorted(merged, key=failure_sort_key)[:top_n]
 
 
 def write_failures_csv(path: Path, rows: list[dict[str, Any]]) -> None:

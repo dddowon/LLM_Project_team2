@@ -86,7 +86,8 @@ def evaluate(config_path: str) -> None:
     rows = []
     for item in tqdm(questions, desc="Evaluating"):
         question = item["question"]
-        result = engine.answer(question)
+        doc_id = str(item.get("doc_id") or "").strip() or None
+        result = engine.answer(question, doc_id=doc_id)
         rows.append({**item, **result})
     write_jsonl(config.paths.evaluation_output, rows)
     print(f"Wrote evaluation results -> {config.paths.evaluation_output}")
@@ -98,6 +99,7 @@ def evaluate_mlflow(
     output_path: str | None,
     judge_model: str,
     no_llm_judge: bool,
+    no_correctness_judge: bool,
     tracking_uri: str | None,
     experiment_name: str,
     run_name: str | None,
@@ -121,6 +123,7 @@ def evaluate_mlflow(
         output_path=Path(output_path) if output_path else None,
         judge_model=judge_model,
         run_llm_judge=not no_llm_judge,
+        run_correctness_judge=not no_correctness_judge,
         tracking_uri=tracking_uri,
         experiment_name=experiment_name,
         run_name=run_name,
@@ -137,6 +140,7 @@ def evaluate_harness(
     output_path: str | None,
     judge_model: str,
     no_llm_judge: bool,
+    no_correctness_judge: bool,
     no_langsmith_feedback: bool,
 ) -> None:
     from src.evaluation.langsmith_harness import run_eval_harness
@@ -146,6 +150,7 @@ def evaluate_harness(
         output_path=Path(output_path) if output_path else None,
         judge_model=judge_model,
         run_llm_judge=not no_llm_judge,
+        run_correctness_judge=not no_correctness_judge,
         langsmith_feedback=not no_langsmith_feedback,
     )
     print(f"Wrote harness evaluation -> {out}")
@@ -800,6 +805,11 @@ def main() -> None:
         action="store_true",
         help="Do not attach LangSmith Client feedback scores (tracing still follows LANGSMITH_* env)",
     )
+    harness_parser.add_argument(
+        "--no-correctness-judge",
+        action="store_true",
+        help="Skip expected_answer correctness judge (retrieval + f/r/s only)",
+    )
 
     mlflow_parser = subparsers.add_parser(
         "evaluate-mlflow",
@@ -824,6 +834,11 @@ def main() -> None:
         "--no-llm-judge",
         action="store_true",
         help="Skip GPT judge (retrieval keyword metrics only if keywords are present)",
+    )
+    mlflow_parser.add_argument(
+        "--no-correctness-judge",
+        action="store_true",
+        help="Skip expected_answer correctness judge",
     )
     mlflow_parser.add_argument(
         "--tracking-uri",
@@ -1115,6 +1130,7 @@ def main() -> None:
             output_path=args.output,
             judge_model=args.judge_model,
             no_llm_judge=args.no_llm_judge,
+            no_correctness_judge=args.no_correctness_judge,
             no_langsmith_feedback=args.no_langsmith_feedback,
         )
     elif args.command == "evaluate-mlflow":
@@ -1123,6 +1139,7 @@ def main() -> None:
             output_path=args.output,
             judge_model=args.judge_model,
             no_llm_judge=args.no_llm_judge,
+            no_correctness_judge=args.no_correctness_judge,
             tracking_uri=args.tracking_uri,
             experiment_name=args.experiment_name,
             run_name=args.run_name,

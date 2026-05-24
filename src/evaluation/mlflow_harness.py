@@ -11,9 +11,7 @@ import mlflow
 from src.config import AppConfig, load_config
 from src.engine.rag import RagEngine
 from src.engine.vector_store import ChromaVectorStore
-from src.evaluation.llm_judge import judge_faithfulness_relevance, parse_judge_scores
-from src.evaluation.harness_metrics import summarize_harness_results
-from src.evaluation.retrieval import evaluate_context_precision, evaluate_retrieval
+from src.evaluation.harness_metrics import evaluate_row_metrics, summarize_harness_results
 from src.utils.jsonl import read_jsonl, write_jsonl
 
 
@@ -26,51 +24,34 @@ def _eval_one_row(
     *,
     judge_model: str,
     run_llm_judge: bool,
+    run_correctness_judge: bool,
 ) -> dict[str, Any]:
     question = row["question"]
-    keywords = row.get("ground_truth_keywords")
-    if keywords is not None and not isinstance(keywords, list):
-        keywords = None
-    keyword_list = [str(k) for k in keywords] if keywords else []
+    doc_id = str(row.get("doc_id") or "").strip() or None
 
     start = time.perf_counter()
-    result = engine.answer(question, include_source_text=True)
+    result = engine.answer(question, include_source_text=True, doc_id=doc_id)
     total_latency_ms = round((time.perf_counter() - start) * 1000, 2)
     contexts: list[Any] = list(result.get("sources") or [])
+    answer = str(result.get("answer", ""))
 
-    retrieval_hit: float | None = None
-    context_precision: float | None = None
-    if keyword_list:
-        retrieval_hit = evaluate_retrieval(contexts, keyword_list)
-        context_precision = evaluate_context_precision(contexts, keyword_list)
+    metrics = evaluate_row_metrics(
+        row,
+        answer=answer,
+        sources=contexts,
+        judge_model=judge_model,
+        run_llm_judge=run_llm_judge,
+        run_correctness_judge=run_correctness_judge,
+    )
 
-    judge_payload: dict[str, int | str] = {}
-    if run_llm_judge:
-        judge_payload = judge_faithfulness_relevance(
-            question,
-            contexts,
-            str(result.get("answer", "")),
-            model=judge_model,
-        )
-
-    f_score, r_score, s_score, judge_err = parse_judge_scores(judge_payload)
-
-    merged: dict[str, Any] = {
+    return {
         **row,
-        "answer": result.get("answer"),
-        "sources": result.get("sources"),
-        "retrieval_keyword_hit": retrieval_hit,
-        "context_precision": context_precision,
-        "f_score": f_score if run_llm_judge else None,
-        "r_score": r_score if run_llm_judge else None,
-        "s_score": s_score if run_llm_judge else None,
+        "answer": answer,
+        "sources": contexts,
+        "resolved_doc_id": result.get("resolved_doc_id"),
         "total_latency_ms": total_latency_ms,
+        **metrics,
     }
-    if judge_err:
-        merged["judge_error"] = judge_err
-    elif judge_payload.get("judge_error"):
-        merged["judge_error"] = judge_payload["judge_error"]
-    return merged
 
 
 def _log_config_params(config: AppConfig, config_path: Path) -> None:
@@ -115,6 +96,7 @@ def run_eval_harness_mlflow(
     output_path: Path | None = None,
     judge_model: str = "gpt-5-mini",
     run_llm_judge: bool = True,
+    run_correctness_judge: bool = True,
     tracking_uri: str | None = None,
     experiment_name: str = DEFAULT_EXPERIMENT,
     run_name: str | None = None,
@@ -144,6 +126,7 @@ def run_eval_harness_mlflow(
         _log_config_params(config, config_path)
         mlflow.log_param("judge_model", judge_model)
         mlflow.log_param("run_llm_judge", run_llm_judge)
+        mlflow.log_param("run_correctness_judge", run_correctness_judge)
 
         from tqdm.auto import tqdm
 
@@ -158,6 +141,7 @@ def run_eval_harness_mlflow(
                     row,
                     judge_model=judge_model,
                     run_llm_judge=run_llm_judge,
+                    run_correctness_judge=run_correctness_judge,
                 )
             )
 

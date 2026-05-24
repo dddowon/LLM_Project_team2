@@ -11,9 +11,8 @@ from langsmith.run_helpers import get_current_run_tree
 from src.config import load_config
 from src.engine.rag import RagEngine
 from src.engine.vector_store import ChromaVectorStore
-from src.evaluation.llm_judge import judge_faithfulness_relevance, parse_judge_scores
-from src.evaluation.harness_metrics import summarize_harness_results
-from src.evaluation.retrieval import evaluate_context_precision, evaluate_retrieval
+from src.evaluation.generation import evaluate_generation_metrics
+from src.evaluation.harness_metrics import evaluate_row_metrics, summarize_harness_results
 from src.utils.jsonl import read_jsonl, write_jsonl
 
 
@@ -34,24 +33,31 @@ def _feedback_scores_safe(client: Client | None, scores: dict[str, float]) -> No
 
 
 @traceable(name="llm_judge", run_type="llm", tags=["rag-harness", "judge"])
-def _traced_judge(
+def _traced_generation_metrics(
     query: str,
     contexts: list[Any],
     answer: str,
     *,
     judge_model: str,
+    run_llm_judge: bool,
     client: Client | None,
-) -> dict[str, int | str]:
-    out = judge_faithfulness_relevance(query, contexts, answer, model=judge_model)
-    f_score, r_score, s_score, _err = parse_judge_scores(out)
-    _feedback_scores_safe(
-        client,
-        {
-            "faithfulness_0_1": f_score / 5.0,
-            "relevance_0_1": r_score / 5.0,
-            "synthesis_0_1": s_score / 5.0,
-        },
+) -> dict[str, Any]:
+    out = evaluate_generation_metrics(
+        query,
+        contexts,
+        answer,
+        judge_model=judge_model,
+        run_llm_judge=run_llm_judge,
     )
+    if run_llm_judge and isinstance(out.get("f_score"), int):
+        _feedback_scores_safe(
+            client,
+            {
+                "faithfulness_0_1": int(out["f_score"]) / 5.0,
+                "relevance_0_1": int(out["r_score"]) / 5.0,
+                "synthesis_0_1": int(out["s_score"]) / 5.0,
+            },
+        )
     return out
 
 
@@ -62,70 +68,63 @@ def _eval_one_row(
     *,
     judge_model: str,
     run_llm_judge: bool,
+    run_correctness_judge: bool,
     langsmith_client: Client | None,
 ) -> dict[str, Any]:
     question = row["question"]
-    keywords = row.get("ground_truth_keywords")
-    if keywords is not None and not isinstance(keywords, list):
-        keywords = None
-    keyword_list = [str(k) for k in keywords] if keywords else []
+    doc_id = str(row.get("doc_id") or "").strip() or None
 
     start = time.perf_counter()
-    result = engine.answer(question, include_source_text=True)
+    result = engine.answer(question, include_source_text=True, doc_id=doc_id)
     total_latency_ms = round((time.perf_counter() - start) * 1000, 2)
     contexts: list[Any] = list(result.get("sources") or [])
+    answer = str(result.get("answer", ""))
 
-    retrieval_hit: float | None = None
-    context_precision: float | None = None
-    if keyword_list:
-        retrieval_hit = evaluate_retrieval(contexts, keyword_list)
-        context_precision = evaluate_context_precision(contexts, keyword_list)
-
-    judge_payload: dict[str, int | str] = {}
-    if run_llm_judge:
-        judge_payload = _traced_judge(
-            question,
-            contexts,
-            str(result.get("answer", "")),
-            judge_model=judge_model,
-            client=langsmith_client,
-        )
-
-    f_score, r_score, s_score, judge_err = parse_judge_scores(judge_payload)
+    retrieval_and_answer = evaluate_row_metrics(
+        row,
+        answer=answer,
+        sources=contexts,
+        judge_model=judge_model,
+        run_llm_judge=False,
+        run_correctness_judge=run_correctness_judge,
+    )
+    generation = _traced_generation_metrics(
+        question,
+        contexts,
+        answer,
+        judge_model=judge_model,
+        run_llm_judge=run_llm_judge,
+        client=langsmith_client,
+    )
 
     merged: dict[str, Any] = {
         **row,
-        "answer": result.get("answer"),
-        "sources": result.get("sources"),
-        "retrieval_keyword_hit": retrieval_hit,
-        "context_precision": context_precision,
-        "f_score": f_score if run_llm_judge else None,
-        "r_score": r_score if run_llm_judge else None,
-        "s_score": s_score if run_llm_judge else None,
+        "answer": answer,
+        "sources": contexts,
+        "resolved_doc_id": result.get("resolved_doc_id"),
         "total_latency_ms": total_latency_ms,
+        **retrieval_and_answer,
+        **{k: v for k, v in generation.items() if k not in retrieval_and_answer},
     }
-    if judge_err:
-        merged["judge_error"] = judge_err
-    elif judge_payload.get("judge_error"):
-        merged["judge_error"] = judge_payload["judge_error"]
+    if generation.get("judge_error"):
+        merged["judge_error"] = generation["judge_error"]
 
-    _feedback_scores_safe(
-        langsmith_client,
-        {
-            **({"retrieval_keyword_hit": retrieval_hit} if retrieval_hit is not None else {}),
-            **({"context_precision": context_precision} if context_precision is not None else {}),
-            "total_latency_ms": total_latency_ms,
-            **(
-                {
-                    "faithfulness_0_1": f_score / 5.0,
-                    "relevance_0_1": r_score / 5.0,
-                    "synthesis_0_1": s_score / 5.0,
-                }
-                if run_llm_judge
-                else {}
-            ),
-        },
-    )
+    feedback: dict[str, float] = {"total_latency_ms": total_latency_ms}
+    if merged.get("doc_hit") is not None:
+        feedback["doc_hit"] = float(merged["doc_hit"])
+    if merged.get("retrieval_keyword_hit") is not None:
+        feedback["retrieval_keyword_hit"] = float(merged["retrieval_keyword_hit"])
+    if merged.get("context_precision") is not None:
+        feedback["context_precision"] = float(merged["context_precision"])
+    if merged.get("task_success") is not None:
+        feedback["task_success"] = 1.0 if merged.get("task_success") else 0.0
+    if run_llm_judge and isinstance(merged.get("f_score"), int):
+        feedback["faithfulness_0_1"] = int(merged["f_score"]) / 5.0
+        feedback["relevance_0_1"] = int(merged["r_score"]) / 5.0
+        feedback["synthesis_0_1"] = int(merged["s_score"]) / 5.0
+    if isinstance(merged.get("correctness_score"), int):
+        feedback["correctness_0_1"] = int(merged["correctness_score"]) / 5.0
+    _feedback_scores_safe(langsmith_client, feedback)
     return merged
 
 
@@ -136,6 +135,7 @@ def _eval_batch_traced(
     *,
     judge_model: str,
     run_llm_judge: bool,
+    run_correctness_judge: bool,
     langsmith_client: Client | None,
 ) -> list[dict[str, Any]]:
     from tqdm.auto import tqdm
@@ -152,6 +152,7 @@ def _eval_batch_traced(
                 row,
                 judge_model=judge_model,
                 run_llm_judge=run_llm_judge,
+                run_correctness_judge=run_correctness_judge,
                 langsmith_client=langsmith_client,
                 langsmith_extra={"metadata": {"row_index": i}},
             )
@@ -166,6 +167,7 @@ def run_eval_harness(
     output_path: Path | None = None,
     judge_model: str = "gpt-5-mini",
     run_llm_judge: bool = True,
+    run_correctness_judge: bool = True,
     langsmith_feedback: bool = True,
 ) -> tuple[Path, dict[str, Any]]:
     config = load_config(config_path)
@@ -193,6 +195,7 @@ def run_eval_harness(
         rows,
         judge_model=judge_model,
         run_llm_judge=run_llm_judge,
+        run_correctness_judge=run_correctness_judge,
         langsmith_client=ls_client,
         langsmith_extra={"metadata": {"evaluation_set": str(eval_path)}},
     )
