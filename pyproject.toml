@@ -22,9 +22,6 @@ dev = [
     "pytest>=8.2.0",
     "ruff>=0.5.0",
 ]
-mlflow = [
-    "mlflow>=2.14.0",
-]
 hwp = [
     "pyhwp>=0.1b15",
     "rhwp-python>=0.5.1",

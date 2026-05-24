@@ -93,47 +93,6 @@ def evaluate(config_path: str) -> None:
     print(f"Wrote evaluation results -> {config.paths.evaluation_output}")
 
 
-def evaluate_mlflow(
-    config_path: str,
-    *,
-    output_path: str | None,
-    judge_model: str,
-    no_llm_judge: bool,
-    no_correctness_judge: bool,
-    tracking_uri: str | None,
-    experiment_name: str,
-    run_name: str | None,
-    evaluation_set: str | None,
-) -> None:
-    from dotenv import load_dotenv
-
-    from pathlib import Path
-
-    try:
-        from src.evaluation.mlflow_harness import run_eval_harness_mlflow
-    except ImportError as exc:
-        raise SystemExit(
-            "evaluate-mlflow requires MLflow. Install with: pip install -e \".[mlflow]\""
-        ) from exc
-
-    load_dotenv()
-    out, summary, run_id = run_eval_harness_mlflow(
-        config_path,
-        evaluation_set=Path(evaluation_set) if evaluation_set else None,
-        output_path=Path(output_path) if output_path else None,
-        judge_model=judge_model,
-        run_llm_judge=not no_llm_judge,
-        run_correctness_judge=not no_correctness_judge,
-        tracking_uri=tracking_uri,
-        experiment_name=experiment_name,
-        run_name=run_name,
-    )
-    print(f"Wrote harness evaluation -> {out}")
-    print(f"Summary: {summary}")
-    if run_id:
-        print(f"MLflow run_id: {run_id}")
-
-
 def evaluate_harness(
     config_path: str,
     *,
@@ -811,51 +770,6 @@ def main() -> None:
         help="Skip expected_answer correctness judge (retrieval + f/r/s only)",
     )
 
-    mlflow_parser = subparsers.add_parser(
-        "evaluate-mlflow",
-        help="Same as evaluate-harness but logs to MLflow (requires pip install -e '.[mlflow]')",
-    )
-    mlflow_parser.add_argument(
-        "--output",
-        default=None,
-        help="Output JSONL path (default: outputs/eval_harness_results.jsonl)",
-    )
-    mlflow_parser.add_argument(
-        "--evaluation-set",
-        default=None,
-        help="Evaluation questions JSONL (default: config paths.evaluation_set)",
-    )
-    mlflow_parser.add_argument(
-        "--judge-model",
-        default="gpt-5-mini",
-        help="OpenAI chat model for faithfulness/relevance scoring",
-    )
-    mlflow_parser.add_argument(
-        "--no-llm-judge",
-        action="store_true",
-        help="Skip GPT judge (retrieval keyword metrics only if keywords are present)",
-    )
-    mlflow_parser.add_argument(
-        "--no-correctness-judge",
-        action="store_true",
-        help="Skip expected_answer correctness judge",
-    )
-    mlflow_parser.add_argument(
-        "--tracking-uri",
-        default=None,
-        help="MLflow tracking URI (overrides MLFLOW_TRACKING_URI env; default: local ./mlruns)",
-    )
-    mlflow_parser.add_argument(
-        "--experiment-name",
-        default="bidmate-rag-eval",
-        help="MLflow experiment name",
-    )
-    mlflow_parser.add_argument(
-        "--run-name",
-        default=None,
-        help="MLflow run name (default: eval_YYYYMMDD_HHMMSS UTC)",
-    )
-
     check_parser = subparsers.add_parser(
         "check-setup",
         help="Validate local settings, dependencies, paths, and optional OpenAI connectivity",
@@ -1132,18 +1046,6 @@ def main() -> None:
             no_llm_judge=args.no_llm_judge,
             no_correctness_judge=args.no_correctness_judge,
             no_langsmith_feedback=args.no_langsmith_feedback,
-        )
-    elif args.command == "evaluate-mlflow":
-        evaluate_mlflow(
-            args.config,
-            output_path=args.output,
-            judge_model=args.judge_model,
-            no_llm_judge=args.no_llm_judge,
-            no_correctness_judge=args.no_correctness_judge,
-            tracking_uri=args.tracking_uri,
-            experiment_name=args.experiment_name,
-            run_name=args.run_name,
-            evaluation_set=args.evaluation_set,
         )
     elif args.command == "check-setup":
         from src.utils.setup_check import run_setup_check

@@ -3,12 +3,12 @@ from __future__ import annotations
 import argparse
 import csv
 import html
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+from src.evaluation.answer import is_answerable_question_type, is_refusal_answer
 from src.utils.jsonl import read_jsonl
-
 
 QUESTION_TYPE_LABELS = {
     "fact": "사실 확인",
@@ -18,6 +18,170 @@ QUESTION_TYPE_LABELS = {
     "requirement_detail": "요구사항 상세",
     "unanswerable": "문서 외 질문",
 }
+
+QUESTION_TYPE_ORDER = list(QUESTION_TYPE_LABELS.values()) + ["미분류"]
+
+FAILURE_REASON_LABELS = {
+    "wrong_doc": "잘못된 문서 검색 (Wrong Doc)",
+    "wrong_refusal": "무단 거절 (Wrong Refusal)",
+    "wrong_answer": "오답 (Wrong Answer)",
+    "low_retrieval": "검색 부족 (Low Retrieval)",
+    "should_refuse": "거절 필요·답변함 (Should Refuse)",
+}
+
+STAGE_SUMMARY_TITLES = {
+    "retrieval": "1. 검색 엔진 성능 (Retrieval Stage)",
+    "generation": "2. 생성 모델 검증 (LLM Judge Stage)",
+    "answer": "3. 최종 답변 및 태스크 달성도 (Task Success Stage)",
+}
+
+CHART_SECTION_TITLES = {
+    "retrieval": "📈 지표별 시각화 분석 — 1. 검색 엔진 평가",
+    "generation": "📈 지표별 시각화 분석 — 2. 생성 모델 검증",
+    "answer": "📈 지표별 시각화 분석 — 3. 최종 답변 및 태스크 달성도",
+}
+
+FAILURE_PRIORITY = {
+    "wrong_doc": 0,
+    "wrong_refusal": 1,
+    "hallucination": 2,
+    "wrong_answer": 3,
+    "low_retrieval": 4,
+    "should_refuse": 5,
+    "legacy": 6,
+}
+
+LOW_SCORE_THRESHOLD = 4
+HALLUCINATION_CORRECTNESS_MAX = 2
+
+# 화면·CSV 표기용: 한글 설명 + JSONL 필드명 (예시 리포트 기준)
+METRIC_TITLES: dict[str, str] = {
+    "doc_hit": "대상 문서 적중률",
+    "retrieval_keyword_hit": "키워드 매칭률",
+    "context_precision": "검색 문맥 정밀도",
+    "f_score": "답변 충실도",
+    "r_score": "질문 적합성",
+    "s_score": "정보 종합력",
+    "correctness_score": "기대 답변 유사도",
+    "task_success": "태스크 최종 성공률",
+    "wrong_refusal": "무단 거절 오류율",
+    "total_latency_ms": "평균 추론 시간",
+}
+
+FAILURE_METRIC_TITLES: dict[str, str] = {
+    **METRIC_TITLES,
+    "task_success": "태스크 최종 성공 여부",
+    "wrong_refusal": "무단 거절 여부",
+}
+
+RETRIEVAL_SUMMARY_KEYS = ("doc_hit", "retrieval_keyword_hit", "context_precision")
+GENERATION_SUMMARY_KEYS = ("f_score", "r_score", "s_score")
+ANSWER_SUMMARY_KEYS = ("correctness_score", "task_success", "wrong_refusal")
+
+REPORT_STYLES = """
+body { font-family: 'Malgun Gothic', Arial, sans-serif; margin: 0; background: #f4f7f9; color: #222; line-height: 1.45; }
+.report-wrap { max-width: 1200px; margin: 0 auto; padding: 28px 20px 48px; }
+h1 { text-align: center; color: #333; font-weight: 700; margin: 0 0 12px; font-size: 1.65rem; }
+h2 { border-left: 5px solid #4f7cff; padding-left: 12px; margin: 0; font-size: 1.05rem; color: #111; font-weight: 700; }
+h3 { margin: 0 0 10px; font-size: 0.95rem; color: #444; }
+.report-meta { text-align: center; color: #666; font-size: 13px; margin-bottom: 20px; }
+.report-nav { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 0 0 28px; padding: 0; list-style: none; }
+.report-nav a { display: inline-block; padding: 6px 14px; border-radius: 999px; background: #fff; border: 1px solid #d8e0ea; color: #335; font-size: 13px; text-decoration: none; }
+.report-nav a:hover { border-color: #4f7cff; color: #4f7cff; }
+.report-section { margin-bottom: 36px; scroll-margin-top: 16px; }
+.stage-title { font-size: 13px; color: #4f7cff; margin: 20px 0 8px; font-weight: 700; letter-spacing: 0.02em; }
+.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 8px; }
+.card { border-radius: 10px; padding: 14px 12px; background: #fff; box-shadow: 0 1px 6px rgba(0,0,0,0.05); text-align: center; border: 1px solid #eef2f5; font-size: 12px; color: #555; }
+.card-latency { max-width: 260px; }
+.metric { font-size: 1.45rem; font-weight: 700; color: #4f7cff; margin-top: 4px; }
+.chart-container { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-top: 12px; }
+.chart-box { background: #fff; padding: 14px; border-radius: 10px; box-shadow: 0 1px 6px rgba(0,0,0,0.05); border: 1px solid #eef2f5; }
+.chart-box h3 { font-size: 13px; margin-bottom: 8px; }
+.note, .muted { color: #666; font-size: 13px; }
+.muted { color: #888; }
+.table-scroll { overflow-x: auto; margin-top: 12px; border-radius: 8px; box-shadow: 0 1px 6px rgba(0,0,0,0.04); -webkit-overflow-scrolling: touch; }
+table { border-collapse: collapse; width: 100%; background: #fff; font-size: 13px; }
+table.summary-table th, table.summary-table td { border: 1px solid #eee; padding: 10px 8px; text-align: center; }
+table.summary-table th { background: #f8f9fa; color: #444; font-weight: 600; white-space: nowrap; }
+table.summary-table tbody tr:nth-child(even) { background: #fafbfc; }
+table.failure-detail { font-size: 12px; min-width: 1100px; }
+table.failure-detail th, table.failure-detail td { border: 1px solid #eee; padding: 8px; vertical-align: top; }
+table.failure-detail thead th { background: #f8f9fa; text-align: center; font-weight: 600; color: #444; }
+table.failure-detail tr.group-head th { font-size: 11px; padding: 6px 4px; color: #fff; border-color: transparent; }
+table.failure-detail th.group-retrieval { background: #5b7fd6; }
+table.failure-detail th.group-generation { background: #6a9b6e; }
+table.failure-detail th.group-answer { background: #c9873a; }
+table.failure-detail th.group-text { background: #6c757d; }
+table.failure-detail .sticky-col { position: sticky; left: 0; z-index: 2; background: #fff; min-width: 100px; box-shadow: 2px 0 4px rgba(0,0,0,0.04); }
+table.failure-detail thead .sticky-col { background: #f8f9fa; z-index: 3; }
+table.failure-detail .metric-col { text-align: center; white-space: nowrap; font-weight: 600; min-width: 52px; }
+table.failure-detail .text-col { min-width: 180px; max-width: 280px; text-align: left; }
+table.failure-detail .failure-text { max-height: 10rem; overflow: auto; line-height: 1.5; font-size: 12px; word-break: break-word; }
+table.failure-detail .refusal-answer { background: #fff8e6; border-left: 3px solid #e6a700; padding-left: 8px; }
+table.failure-detail .hallucination-answer { background: #fff0f0; border-left: 3px solid #d9534f; padding-left: 8px; }
+table.failure-detail tbody tr.data-row:nth-child(4n+1) { background: #fcfdff; }
+.tag { display: inline-block; margin: 2px 4px 2px 0; padding: 2px 6px; border-radius: 4px; font-size: 11px; background: #eef2ff; color: #334; }
+.tag-refusal { background: #fff3cd; color: #856404; font-weight: 600; }
+.tag-hallucination { background: #f8d7da; color: #721c24; font-weight: 600; }
+table.failure-detail tr.failure-evidence-row td { border-top: 1px dashed #dde3ea; background: #fafbfd; font-size: 12px; }
+.evidence-section-title { font-size: 11px; font-weight: 700; color: #4f7cff; margin: 8px 0 4px; }
+details.fold-section { background: #fff; border: 1px solid #e8edf2; border-radius: 10px; margin-top: 16px; box-shadow: 0 1px 6px rgba(0,0,0,0.04); }
+details.fold-section > summary { cursor: pointer; padding: 14px 16px; list-style: none; user-select: none; }
+details.fold-section > summary::-webkit-details-marker { display: none; }
+details.fold-section > summary::before { content: "▸ "; color: #4f7cff; font-weight: 700; }
+details.fold-section[open] > summary::before { content: "▾ "; }
+details.fold-section > summary h2 { display: inline; border: none; padding: 0; font-size: 1.05rem; }
+details.fold-section .fold-body { padding: 0 16px 16px; }
+details.fold-legend { margin-top: 32px; }
+details.fold-legend .metrics-legend { border: none; box-shadow: none; margin: 0; padding: 0 4px 8px; }
+.metrics-legend h2 { margin-top: 0; border-left: 5px solid #4f7cff; padding-left: 12px; font-size: 1.05rem; }
+.legend-stage { margin: 16px 0 6px; font-size: 13px; color: #4f7cff; font-weight: 700; border-bottom: 1px dashed #eef2f5; padding-bottom: 4px; }
+.metrics-legend dt { font-weight: 700; margin-top: 10px; font-size: 13px; color: #333; }
+.metrics-legend dd { margin: 4px 0 0; color: #555; font-size: 13px; line-height: 1.55; text-align: left; }
+.legend-footnote { margin-top: 14px; color: #666; font-size: 13px; border-top: 1px solid #eee; padding-top: 10px; }
+.metrics-legend code { background: #f0f2f5; padding: 1px 5px; border-radius: 3px; font-size: 12px; color: #d93737; font-family: Consolas, Monaco, monospace; }
+table.failure-detail th .metric-field { display: block; font-size: 10px; color: #888; font-weight: normal; margin-top: 2px; }
+@media (max-width: 900px) { .cards { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 560px) { .cards { grid-template-columns: 1fr; } .report-wrap { padding: 16px 12px 32px; } }
+"""
+
+
+def metric_label(field: str) -> str:
+    title = METRIC_TITLES.get(field, field)
+    return f"{title} ({field})"
+
+
+def row_question_type_key(row: dict[str, Any]) -> str:
+    return str(row.get("question_type") or "").strip().lower()
+
+
+def row_is_answerable(row: dict[str, Any]) -> bool:
+    return is_answerable_question_type(row_question_type_key(row))
+
+
+def row_wrong_refusal(row: dict[str, Any]) -> bool | None:
+    """JSONL에 wrong_refusal이 없으면 답변 가능 + 거절 패턴으로 추정."""
+    if row.get("wrong_refusal") is not None:
+        return bool(row.get("wrong_refusal"))
+    if not row_is_answerable(row):
+        return None
+    return row_is_refusal(row)
+
+
+def fmt_wrong_refusal_flag(row: dict[str, Any]) -> str:
+    value = row_wrong_refusal(row)
+    if value is None:
+        return "해당 없음"
+    return "1" if value else "0"
+
+
+def metric_th(field: str, *, failure_table: bool = False) -> str:
+    titles = FAILURE_METRIC_TITLES if failure_table else METRIC_TITLES
+    title = titles.get(field, field)
+    return (
+        f"<th>{html.escape(title)}"
+        f'<span class="metric-field">({html.escape(field)})</span></th>'
+    )
 
 
 def as_number(value: Any) -> float | None:
@@ -45,42 +209,24 @@ def fmt_seconds(ms_value: float | None) -> str:
     return f"{ms_value / 1000:.2f}초" if ms_value is not None else "-"
 
 
-def metrics_legend_html() -> str:
-    """
-    리포트 상단에 표시할 지표 정의(코드: llm_judge, retrieval, harness와 동일한 의미).
-    
-    Parameters:
-    - 없음: 매개변수 없이 고정된 HTML 문자열 템플릿을 반환합니다.
-    """
-    return """<div class="metrics-legend">
-    <h2>📘 지표 설명</h2>
-    <p class="legend-intro">아래 수치들은 <strong>src/evaluation</strong>의 RAG 평가 하네스(Harness)에서 계산됩니다. LLM 판정 점수(f/r/s)는 절대적인 정답률을 의미하기보다, 동일한 기준 아래 여러 실험(실행 간) 성능을 <strong>상대 비교할 때 유용합니다.</strong></p>
+def fmt_task_success(value: Any) -> str:
+    if value is None:
+        return "-"
+    return "✓" if value else "✗"
 
-    <dl>
-    <dt>전체 질문 수</dt>
-    <dd>이번 성능 평가에 포함된 총 질문(데이터셋의 행)의 개수입니다.</dd>
 
-    <dt>응답 시간 (total_latency_ms)</dt>
-    <dd>해당 질문 한 건에 대해 문서 검색, 답변 생성, LLM 판정 등이 끝날 때까지 걸린 총 시간(밀리초, ms)입니다. 리포트 상단 카드에는 직관성을 위해 초 단위로 환산하여 표시합니다.</dd>
-
-    <dt>답변 정확도 (f_score, Faithfulness)</dt>
-    <dd>판정 모델이 바라본 답변의 <strong>충실도(환각 여부)</strong>입니다. 검색으로 가져온 근거 텍스트에 기반하여, 거짓 정보(환각) 없이 답변이 올바르게 작성되었는지를 0~5점 사이의 정수로 채점합니다.</dd>
-
-    <dt>질문 이해도 (r_score, Relevance)</dt>
-    <dd>생성된 답변이 사용자의 질문 의도에 얼마나 직접적이고 적절하게 대응하는지(<strong>적합성</strong>)를 따져 0~5점 사이의 정수로 채점합니다.</dd>
-
-    <dt>종합 능력 (s_score, Synthesis)</dt>
-    <dd>분산된 여러 근거 데이터를 하나로 묶어, 사용자의 질문 의도에 맞게 논리적으로 잘 <strong>구조화(종합)</strong>했는지를 0~5점 사이의 정수로 채점합니다.</dd>
-
-    <dt>검색 성공률 (Hit Rate, retrieval_keyword_hit)</dt>
-    <dd>질문셋에 정의된 정답 키워드(<code>ground_truth_keywords</code>) 중 <strong>단 하나라도</strong> 이번에 검색된 모든 청크 텍스트를 이어 붙인 문자열 안에 부분 문자열로 포함되어 있으면 1, 없으면 0으로 판정합니다. 질문별 결과는 0 또는 1이며, 리포트 상단 카드 및 표에 표기되는 퍼센트(%)는 이 결과들의 <strong>평균값</strong>입니다. 정답 키워드가 비어 있는 경우는 의미 있는 히트(Hit)로 보기 어렵습니다.</dd>
-
-    <dt>문맥 정밀도 (context_precision)</dt>
-    <dd>모델이 가져온 총 <em>k</em>개의 청크 중, 정답 키워드가 실제 포함된 청크의 비율을 뜻합니다. 즉, <strong>(키워드가 포함된 청크 수 &divide; <em>k</em>)</strong> 값으로 0~1 사이의 범위를 가집니다. 검색 결과 안에서 &ldquo;관련 있어 보이는&rdquo; 알짜배기 청크의 비율에 가깝지만, 단어의 표현이 다르면 같은 의미를 지니고 있더라도 0으로 계산될 수 있어 기준이 다소 엄격합니다.</dd>
-    </dl>
-
-    <p class="legend-footnote"><strong>질문 유형</strong>은 평가 JSONL의 <code>category</code>(예: 기능 요구사항, 예산)이고, <strong>질문 성격</strong>은 <code>question_type</code>을 한글 라벨로 바꾼 값입니다.</p>
-    </div>"""
+def fmt_metric_value(value: Any) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    num = as_number(value)
+    if num is not None:
+        return str(int(num)) if num == int(num) else fmt(num)
+    text = str(value).strip()
+    if not text or text.lower() == "none":
+        return "-"
+    return text
 
 
 def row_category(row: dict[str, Any]) -> str:
@@ -95,9 +241,14 @@ def row_question_type(row: dict[str, Any]) -> str:
     return QUESTION_TYPE_LABELS.get(question_type, question_type)
 
 
+def row_is_refusal(row: dict[str, Any]) -> bool:
+    if row.get("is_refusal") is not None:
+        return bool(row.get("is_refusal"))
+    return is_refusal_answer(str(row.get("answer") or ""))
+
+
 def score_values(rows: list[dict[str, Any]], key: str) -> list[float]:
-    values = [as_number(row.get(key)) for row in rows]
-    return [value for value in values if value is not None]
+    return [v for v in (as_number(row.get(key)) for row in rows) if v is not None]
 
 
 def bool_rate(rows: list[dict[str, Any]], key: str) -> float | None:
@@ -105,47 +256,169 @@ def bool_rate(rows: list[dict[str, Any]], key: str) -> float | None:
     return mean(values)
 
 
-def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _aggregate_metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
+    answerable = [row for row in items if row_is_answerable(row)]
+    wrong_refusal_values = [
+        1.0 if row_wrong_refusal(row) else 0.0
+        for row in answerable
+        if row_wrong_refusal(row) is not None
+    ]
     return {
-        "n": len(rows),
-        "mean_doc_hit": mean(score_values(rows, "doc_hit")),
-        "mean_f_score": mean(score_values(rows, "f_score")),
-        "mean_r_score": mean(score_values(rows, "r_score")),
-        "mean_s_score": mean(score_values(rows, "s_score")),
-        "mean_correctness_score": mean(score_values(rows, "correctness_score")),
-        "mean_retrieval_keyword_hit": mean(score_values(rows, "retrieval_keyword_hit")),
-        "mean_context_precision": mean(score_values(rows, "context_precision")),
-        "mean_task_success": bool_rate(rows, "task_success"),
-        "mean_wrong_refusal": bool_rate(rows, "wrong_refusal"),
-        "mean_total_latency_ms": mean(score_values(rows, "total_latency_ms")),
+        "mean_doc_hit": mean(score_values(items, "doc_hit")),
+        "mean_retrieval_keyword_hit": mean(score_values(items, "retrieval_keyword_hit")),
+        "mean_context_precision": mean(score_values(items, "context_precision")),
+        "mean_f_score": mean(score_values(items, "f_score")),
+        "mean_r_score": mean(score_values(items, "r_score")),
+        "mean_s_score": mean(score_values(items, "s_score")),
+        "mean_correctness_score": mean(score_values(items, "correctness_score")),
+        "mean_task_success": bool_rate(items, "task_success"),
+        "mean_wrong_refusal_answerable": mean(wrong_refusal_values) if wrong_refusal_values else None,
+        "n_answerable": len(answerable),
+        "mean_total_latency_ms": mean(score_values(items, "total_latency_ms")),
     }
 
 
-def summarize_by_field(rows: list[dict[str, Any]], field_name: str) -> list[dict[str, Any]]:
+def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"n": len(rows), **_aggregate_metrics(rows)}
+
+
+def _question_type_sort_key(label: str) -> tuple[int, str]:
+    if label in QUESTION_TYPE_ORDER:
+        return (QUESTION_TYPE_ORDER.index(label), label)
+    return (len(QUESTION_TYPE_ORDER), label)
+
+
+def summarize_by_question_type(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        label = row_question_type(row) if field_name == "question_type" else row_category(row)
-        grouped[label].append(row)
-
+        grouped[row_question_type(row)].append(row)
     summary_rows: list[dict[str, Any]] = []
-    for label, items in sorted(grouped.items()):
+    for label, items in sorted(grouped.items(), key=lambda kv: _question_type_sort_key(kv[0])):
+        qt_key = row_question_type_key(items[0]) if items else ""
         summary_rows.append(
             {
                 "label": label,
+                "question_type_key": qt_key,
                 "n": len(items),
-                "mean_f_score": mean(score_values(items, "f_score")),
-                "mean_r_score": mean(score_values(items, "r_score")),
-                "mean_s_score": mean(score_values(items, "s_score")),
-                "mean_retrieval_keyword_hit": mean(score_values(items, "retrieval_keyword_hit")),
-                "mean_context_precision": mean(score_values(items, "context_precision")),
-                "mean_total_latency_ms": mean(score_values(items, "total_latency_ms")),
+                **_aggregate_metrics(items),
             }
         )
     return summary_rows
 
 
+def fmt_wrong_refusal_for_type_row(row: dict[str, Any]) -> str:
+    if row.get("question_type_key") == "unanswerable":
+        return "해당 없음"
+    return fmt_percent(row.get("mean_wrong_refusal_answerable"))
+
+
+def _score_below(row: dict[str, Any], key: str) -> bool:
+    value = as_number(row.get(key))
+    return value is not None and value < LOW_SCORE_THRESHOLD
+
+
+def _binary_metric_is_zero(row: dict[str, Any], key: str) -> bool:
+    return as_number(row.get(key)) == 0.0
+
+
+def is_hallucination_candidate(row: dict[str, Any]) -> bool:
+    if row_is_refusal(row):
+        return False
+    if _score_below(row, "f_score"):
+        return True
+    correctness = as_number(row.get("correctness_score"))
+    return correctness is not None and correctness <= HALLUCINATION_CORRECTNESS_MAX
+
+
+def failure_tags(row: dict[str, Any]) -> list[str]:
+    tags: list[str] = []
+    reason = str(row.get("failure_reason") or "").strip()
+    if reason:
+        tags.append(FAILURE_REASON_LABELS.get(reason, reason))
+    if row_is_refusal(row) and not any("거절" in tag for tag in tags):
+        if row_wrong_refusal(row) or reason == "wrong_refusal":
+            tags.append("무단 거절")
+        elif reason != "should_refuse":
+            tags.append("거절 응답")
+    if is_hallucination_candidate(row):
+        tags.append("환각 의심")
+    return tags or ["기타 저점수"]
+
+
+def failure_primary_kind(row: dict[str, Any]) -> str:
+    reason = str(row.get("failure_reason") or "").strip()
+    if reason:
+        return reason
+    if is_hallucination_candidate(row):
+        return "hallucination"
+    if row_wrong_refusal(row):
+        return "wrong_refusal"
+    return "legacy"
+
+
+def should_include_in_failures(row: dict[str, Any]) -> bool:
+    if row.get("failure_reason") or row.get("wrong_refusal"):
+        return True
+    if is_hallucination_candidate(row):
+        return True
+    if row.get("task_success") is False:
+        return True
+    if row_is_refusal(row) and row.get("task_success") is not True:
+        return True
+    if any(_score_below(row, key) for key in ("f_score", "r_score", "s_score", "correctness_score")):
+        return True
+    return any(
+        _binary_metric_is_zero(row, key)
+        for key in ("doc_hit", "retrieval_keyword_hit", "context_precision")
+    )
+
+
+def failure_sort_key(row: dict[str, Any]) -> tuple[int, float, float, float]:
+    doc_hit = as_number(row.get("doc_hit"))
+    f_score = as_number(row.get("f_score"))
+    correctness = as_number(row.get("correctness_score"))
+    return (
+        FAILURE_PRIORITY.get(failure_primary_kind(row), 99),
+        doc_hit if doc_hit is not None else 1.0,
+        f_score if f_score is not None else 5.0,
+        correctness if correctness is not None else 5.0,
+    )
+
+
+def count_failure_candidates(rows: list[dict[str, Any]]) -> int:
+    return sum(1 for row in rows if should_include_in_failures(row))
+
+
+def failure_rows(rows: list[dict[str, Any]], top_n: int) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str]] = set()
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        if not should_include_in_failures(row):
+            continue
+        key = (str(row.get("question") or ""), str(row.get("doc_id") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        enriched = dict(row)
+        enriched["_failure_tags"] = failure_tags(row)
+        candidates.append(enriched)
+    return sorted(candidates, key=failure_sort_key)[:top_n]
+
+
+def failure_reason_counts(rows: list[dict[str, Any]]) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for row in rows:
+        reason = str(row.get("failure_reason") or "").strip()
+        if reason:
+            counts[FAILURE_REASON_LABELS.get(reason, reason)] += 1
+        elif row_wrong_refusal(row):
+            counts[FAILURE_REASON_LABELS["wrong_refusal"]] += 1
+        elif is_hallucination_candidate(row):
+            counts["환각 의심(라벨 없음)"] += 1
+    return counts
+
+
 def source_chunk_id_list(row: dict[str, Any]) -> list[str]:
-    """검색 sources에 포함된 chunk_id를 순서대로(중복 제거)."""
     sources = row.get("sources")
     if not isinstance(sources, list):
         return []
@@ -160,21 +433,18 @@ def source_chunk_id_list(row: dict[str, Any]) -> list[str]:
 
 
 def source_chunk_ids_csv_field(row: dict[str, Any]) -> str:
-    """CSV·엑셀용: 전체 ID를 한 줄로."""
     return ", ".join(source_chunk_id_list(row))
 
 
 def source_chunk_ids_html(row: dict[str, Any]) -> str:
-    """오답 노트 HTML: ID가 잘리지 않도록 목록으로 표시."""
     ids = source_chunk_id_list(row)
     if not ids:
-        return '<span class="muted">(검색 근거 없음)</span>'
+        return '<span class="muted">(매칭된 검색 근거 문맥 데이터 없음)</span>'
     items = "".join(f"<li><code>{html.escape(cid)}</code></li>" for cid in ids)
     return f'<ul class="chunk-id-list">{items}</ul>'
 
 
 def source_file_names_short(row: dict[str, Any], *, max_chars: int = 120) -> str:
-    """검색 근거에 붙은 metadata.file_name 등(어느 HWP/문서인지)."""
     sources = row.get("sources")
     if not isinstance(sources, list):
         return ""
@@ -189,127 +459,138 @@ def source_file_names_short(row: dict[str, Any], *, max_chars: int = 120) -> str
         if name and name not in seen:
             seen.append(name)
     joined = " | ".join(seen)
-    if len(joined) <= max_chars:
-        return joined
-    return joined[: max_chars - 1] + "…"
+    return joined if len(joined) <= max_chars else joined[: max_chars - 1] + "…"
 
 
 def cell_text_html(text: Any, *, max_chars: int = 1200) -> str:
-    """테이블 셀용: 이스케이프 후 줄바꿈을 <br>로 (스크롤은 CSS로)."""
     raw = "" if text is None else str(text)
     if len(raw) > max_chars:
         raw = raw[: max_chars - 1] + "…"
     return html.escape(raw).replace("\n", "<br/>")
 
 
+def answer_cell_html(row: dict[str, Any]) -> str:
+    css_classes = ["failure-text"]
+    if row_is_refusal(row):
+        css_classes.append("refusal-answer")
+    if is_hallucination_candidate(row):
+        css_classes.append("hallucination-answer")
+    return f'<div class="{" ".join(css_classes)}">{cell_text_html(row.get("answer"), max_chars=1200)}</div>'
+
+
+def failure_tags_html(row: dict[str, Any]) -> str:
+    tags = row.get("_failure_tags") or failure_tags(row)
+    parts: list[str] = []
+    for tag in tags:
+        cls = "tag"
+        if tag == "환각 의심":
+            cls += " tag-hallucination"
+        elif "거절" in tag:
+            cls += " tag-refusal"
+        parts.append(f'<span class="{cls}">{html.escape(tag)}</span>')
+    return " ".join(parts)
+
+
 def failure_table_html(failures: list[dict[str, Any]]) -> str:
-    """모델 답변은 본문 행만 두고, 근거 문서·청크는 바로 아래 행에 블록으로 분리한다."""
-    headers = [
-        "질문 유형",
-        "질문 성격",
-        "f",
-        "r",
-        "s",
-        "검색",
-        "문맥",
-        "질문",
-        "기대 답변",
-        "모델 답변",
-    ]
-    ncols = len(headers)
-    head = "".join(f'<th class="col-h-{index}">{html.escape(h)}</th>' for index, h in enumerate(headers))
+    if not failures:
+        return '<p class="muted">표시할 오답 후보가 없습니다.</p>'
+
+    metric_fields = (
+        "doc_hit",
+        "retrieval_keyword_hit",
+        "context_precision",
+        "f_score",
+        "r_score",
+        "s_score",
+        "correctness_score",
+        "task_success",
+        "wrong_refusal",
+    )
+    ncols = 3 + len(metric_fields) + 3
+    group_head = (
+        "<tr class=\"group-head\">"
+        '<th rowspan="2" class="sticky-col">유형</th>'
+        '<th rowspan="2">질문 성격</th>'
+        '<th colspan="3" class="group-retrieval">① 검색</th>'
+        '<th colspan="3" class="group-generation">② 생성</th>'
+        '<th colspan="3" class="group-answer">③ 답</th>'
+        '<th colspan="3" class="group-text">본문</th>'
+        "</tr>"
+    )
+    metric_head = (
+        "<tr>"
+        + "".join(metric_th(f, failure_table=True) for f in metric_fields)
+        + "<th>질문</th><th>기대 답변</th><th>모델 출력</th>"
+        "</tr>"
+    )
     body_rows: list[str] = []
+
     for row in failures:
-        main_cells = [
-            html.escape(row_category(row)),
-            html.escape(row_question_type(row)),
-            html.escape(str(row.get("f_score", "-"))),
-            html.escape(str(row.get("r_score", "-"))),
-            html.escape(str(row.get("s_score", "-"))),
-            html.escape(str(row.get("retrieval_keyword_hit", "-"))),
-            html.escape(str(row.get("context_precision", "-"))),
-            f'<div class="failure-text">{cell_text_html(row.get("question"), max_chars=600)}</div>',
-            f'<div class="failure-text">{cell_text_html(row.get("expected_answer"), max_chars=1200)}</div>',
-            f'<div class="failure-text">{cell_text_html(row.get("answer"), max_chars=1200)}</div>',
+        cells = [
+            f'<td class="sticky-col">{failure_tags_html(row)}</td>',
+            f"<td>{html.escape(row_question_type(row))}</td>",
+            f'<td class="metric-col">{html.escape(fmt_metric_value(row.get("doc_hit")))}</td>',
+            f'<td class="metric-col">{html.escape(fmt_metric_value(row.get("retrieval_keyword_hit")))}</td>',
+            f'<td class="metric-col">{html.escape(fmt_metric_value(row.get("context_precision")))}</td>',
+            f'<td class="metric-col">{html.escape(fmt_metric_value(row.get("f_score")))}</td>',
+            f'<td class="metric-col">{html.escape(fmt_metric_value(row.get("r_score")))}</td>',
+            f'<td class="metric-col">{html.escape(fmt_metric_value(row.get("s_score")))}</td>',
+            f'<td class="metric-col">{html.escape(fmt_metric_value(row.get("correctness_score")))}</td>',
+            f'<td class="metric-col">{html.escape(fmt_task_success(row.get("task_success")))}</td>',
+            f'<td class="metric-col">{html.escape(fmt_wrong_refusal_flag(row))}</td>',
+            f'<td class="text-col"><div class="failure-text">{cell_text_html(row.get("question"), max_chars=600)}</div></td>',
+            f'<td class="text-col"><div class="failure-text">{cell_text_html(row.get("expected_answer"), max_chars=1200)}</div></td>',
+            f'<td class="text-col">{answer_cell_html(row)}</td>',
         ]
-        body_rows.append("<tr>" + "".join(f"<td>{c}</td>" for c in main_cells) + "</tr>")
-        evidence_inner = (
+        body_rows.append('<tr class="data-row">' + "".join(cells) + "</tr>")
+        evidence = (
             '<div class="failure-evidence-wrap">'
-            '<div class="evidence-section-title">근거 문서</div>'
-            f'<div class="failure-sources failure-sources-doc">{html.escape(source_file_names_short(row, max_chars=500))}</div>'
-            '<div class="evidence-section-title">근거 청크 ID</div>'
-            '<div class="failure-sources failure-sources-ids">'
+            '<div class="evidence-section-title">조회된 참조 근거 문서</div>'
+            f'<div>{html.escape(source_file_names_short(row, max_chars=500))}</div>'
+            '<div class="evidence-section-title">조회된 참조 청크 단락 ID</div>'
             f"{source_chunk_ids_html(row)}"
-            "</div>"
             "</div>"
         )
         body_rows.append(
-            f'<tr class="failure-evidence-row"><td colspan="{ncols}">{evidence_inner}</td></tr>'
+            f'<tr class="failure-evidence-row"><td colspan="{ncols}">{evidence}</td></tr>'
         )
+
     return (
-        '<table class="failure-detail"><thead><tr>'
-        + head
-        + "</tr></thead><tbody>"
+        '<div class="table-scroll">'
+        '<table class="failure-detail"><thead>'
+        + group_head
+        + metric_head
+        + "</thead><tbody>"
         + "".join(body_rows)
-        + "</tbody></table>"
+        + "</tbody></table></div>"
     )
 
 
-FAILURE_PRIORITY = {
-    "wrong_doc": 0,
-    "wrong_refusal": 1,
-    "wrong_answer": 2,
-    "low_retrieval": 3,
-    "should_refuse": 4,
-}
-
-
-def failure_sort_key(row: dict[str, Any]) -> tuple[int, float, float]:
-    reason = str(row.get("failure_reason") or "")
-    priority = FAILURE_PRIORITY.get(reason, 99)
-    doc_hit = as_number(row.get("doc_hit"))
-    correctness = as_number(row.get("correctness_score"))
-    return (
-        priority,
-        doc_hit if doc_hit is not None else 1.0,
-        correctness if correctness is not None else 5.0,
-    )
-
-
-def failure_rows(rows: list[dict[str, Any]], top_n: int) -> list[dict[str, Any]]:
-    candidates = [row for row in rows if row.get("failure_reason")]
-    legacy: list[dict[str, Any]] = []
-    for row in rows:
-        if row.get("failure_reason"):
-            continue
-        f_score = as_number(row.get("f_score"))
-        r_score = as_number(row.get("r_score"))
-        s_score = as_number(row.get("s_score"))
-        hit = as_number(row.get("retrieval_keyword_hit"))
-        precision = as_number(row.get("context_precision"))
-        if (
-            (f_score is not None and f_score < 4)
-            or (r_score is not None and r_score < 4)
-            or (s_score is not None and s_score < 4)
-            or hit == 0.0
-            or precision == 0.0
-        ):
-            legacy.append(row)
-    merged = candidates + legacy
-    return sorted(merged, key=failure_sort_key)[:top_n]
+def failure_reason_table_html(counts: Counter[str]) -> str:
+    if not counts:
+        return '<p class="muted">failure_reason 집계 없음 (구버전 JSONL일 수 있음)</p>'
+    rows = [[label, f"{count}건"] for label, count in counts.most_common()]
+    return table_html(["실패 유형 정의", "발생 건수"], rows)
 
 
 def write_failures_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
-        "질문 유형",
+        "실패 유형",
         "질문 성격",
-        "답변 정확도",
-        "질문 이해도",
-        "종합 능력",
-        "검색 성공",
-        "문맥 정밀도",
-        "응답 시간",
+        "RFP 항목(category)",
+        metric_label("doc_hit"),
+        metric_label("retrieval_keyword_hit"),
+        metric_label("context_precision"),
+        metric_label("f_score"),
+        metric_label("r_score"),
+        metric_label("s_score"),
+        metric_label("correctness_score"),
+        metric_label("task_success"),
+        FAILURE_METRIC_TITLES["wrong_refusal"] + " (wrong_refusal)",
+        "거절 응답 (is_refusal)",
+        "환각 의심",
+        metric_label("total_latency_ms"),
         "질문",
         "기대 답변",
         "모델 답변",
@@ -322,14 +603,24 @@ def write_failures_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         for row in rows:
             writer.writerow(
                 {
-                    "질문 유형": row_category(row),
+                    "실패 유형": " | ".join(row.get("_failure_tags") or failure_tags(row)),
                     "질문 성격": row_question_type(row),
-                    "답변 정확도": row.get("f_score"),
-                    "질문 이해도": row.get("r_score"),
-                    "종합 능력": row.get("s_score"),
-                    "검색 성공": row.get("retrieval_keyword_hit"),
-                    "문맥 정밀도": row.get("context_precision"),
-                    "응답 시간": fmt_seconds(as_number(row.get("total_latency_ms"))),
+                    "RFP 항목(category)": row_category(row),
+                    metric_label("doc_hit"): row.get("doc_hit"),
+                    metric_label("retrieval_keyword_hit"): row.get("retrieval_keyword_hit"),
+                    metric_label("context_precision"): row.get("context_precision"),
+                    metric_label("f_score"): row.get("f_score"),
+                    metric_label("r_score"): row.get("r_score"),
+                    metric_label("s_score"): row.get("s_score"),
+                    metric_label("correctness_score"): row.get("correctness_score"),
+                    metric_label("task_success"): row.get("task_success"),
+                    FAILURE_METRIC_TITLES["wrong_refusal"]
+                    + " (wrong_refusal)": fmt_wrong_refusal_flag(row),
+                    "거절 응답 (is_refusal)": row_is_refusal(row),
+                    "환각 의심": is_hallucination_candidate(row),
+                    metric_label("total_latency_ms"): fmt_seconds(
+                        as_number(row.get("total_latency_ms"))
+                    ),
                     "질문": row.get("question", ""),
                     "기대 답변": row.get("expected_answer", ""),
                     "모델 답변": row.get("answer", ""),
@@ -339,242 +630,328 @@ def write_failures_csv(path: Path, rows: list[dict[str, Any]]) -> None:
             )
 
 
-def bar_svg(items: list[tuple[str, float | None]], *, max_value: float, width: int = 760) -> str:
-    bar_height, gap, label_width, value_width = 26, 10, 210, 60
+def bar_svg(items: list[tuple[str, float | None]], *, max_value: float) -> str:
+    bar_height, gap, label_width, value_width, width = 26, 10, 210, 60, 760
     height = max(40, len(items) * (bar_height + gap) + 10)
     bar_width = width - label_width - value_width - 30
+    use_percent = max_value <= 1.0
     parts = [f'<svg viewBox="0 0 {width} {height}" width="100%" role="img">']
-
     for index, (label, value) in enumerate(items):
         y = 8 + index * (bar_height + gap)
         ratio = 0.0 if value is None else max(0.0, min(1.0, value / max_value))
         current_width = round(bar_width * ratio, 1)
-        display = fmt(value)
+        if value is None:
+            display = "-"
+        elif use_percent:
+            display = fmt_percent(value)
+        else:
+            display = fmt(value)
         parts.append(
-            f'<text x="0" y="{y + 18}" class="svg-label" style="font-size:12px;">'
-            f"{html.escape(label[:40])}</text>"
+            f'<text x="0" y="{y + 18}" style="font-size:12px;">{html.escape(label[:40])}</text>'
         )
         parts.append(
             f'<rect x="{label_width}" y="{y}" width="{bar_width}" height="{bar_height}" '
-            'rx="5" style="fill:#f0f2f5;"/>'
+            f'rx="5" fill="#f0f2f5"/>'
         )
         parts.append(
             f'<rect x="{label_width}" y="{y}" width="{current_width}" height="{bar_height}" '
-            'rx="5" style="fill:#4f7cff;"/>'
+            f'rx="5" fill="#4f7cff"/>'
         )
         parts.append(
             f'<text x="{label_width + bar_width + 12}" y="{y + 18}" '
-            f'class="svg-value" style="font-size:12px;">{display}</text>'
+            f'style="font-size:12px;">{display}</text>'
         )
-
     parts.append("</svg>")
     return "\n".join(parts)
 
 
+def chart_for_metric(by_type: list[dict[str, Any]], metric_key: str, *, max_value: float) -> str:
+    return bar_svg([(row["label"], row.get(metric_key)) for row in by_type], max_value=max_value)
+
+
 def table_html(headers: list[str], rows: list[list[Any]]) -> str:
     head = "".join(f"<th>{html.escape(header)}</th>" for header in headers)
-    body_rows = []
-    for row in rows:
-        cells = "".join(f"<td>{html.escape(str(value))}</td>" for value in row)
-        body_rows.append(f"<tr>{cells}</tr>")
-    return f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(body_rows)}</tbody></table>"
-
-
-def render_html(rows: list[dict[str, Any]], failures: list[dict[str, Any]]) -> str:
-    summary = summarize(rows)
-    by_category = summarize_by_field(rows, "category")
-    by_question_type = summarize_by_field(rows, "question_type")
-
-    category_chart = bar_svg(
-        [(row["label"], row["mean_f_score"]) for row in by_category],
-        max_value=5.0,
+    body = "".join(
+        "<tr>" + "".join(f"<td>{html.escape(str(value))}</td>" for value in row) + "</tr>"
+        for row in rows
     )
-    relevance_chart = bar_svg(
-        [(row["label"], row["mean_r_score"]) for row in by_category],
-        max_value=5.0,
-    )
-    synthesis_chart = bar_svg(
-        [(row["label"], row["mean_s_score"]) for row in by_category],
-        max_value=5.0,
-    )
-    hit_chart = bar_svg(
-        [(row["label"], row["mean_retrieval_keyword_hit"]) for row in by_category],
-        max_value=1.0,
-    )
-    precision_chart = bar_svg(
-        [(row["label"], row["mean_context_precision"]) for row in by_category],
-        max_value=1.0,
-    )
-    type_f_chart = bar_svg(
-        [(row["label"], row["mean_f_score"]) for row in by_question_type],
-        max_value=5.0,
-    )
-    type_relevance_chart = bar_svg(
-        [(row["label"], row["mean_r_score"]) for row in by_question_type],
-        max_value=5.0,
-    )
-    type_synthesis_chart = bar_svg(
-        [(row["label"], row["mean_s_score"]) for row in by_question_type],
-        max_value=5.0,
-    )
-    type_hit_chart = bar_svg(
-        [(row["label"], row["mean_retrieval_keyword_hit"]) for row in by_question_type],
-        max_value=1.0,
-    )
-    type_precision_chart = bar_svg(
-        [(row["label"], row["mean_context_precision"]) for row in by_question_type],
-        max_value=1.0,
+    return (
+        '<div class="table-scroll">'
+        f'<table class="summary-table"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
+        "</div>"
     )
 
-    category_table = table_html(
-        [
-            "질문 유형",
-            "질문 수",
-            "답변 정확도(f_score)",
-            "질문 이해도(r_score)",
-            "종합 능력(s_score)",
-            "검색 성공률(Hit Rate)",
-            "문맥 정밀도(context_precision)",
-            "평균 응답 시간(total_latency_ms)",
-        ],
-        [
-            [
-                row["label"],
-                f"{row['n']}개",
-                fmt(row["mean_f_score"]),
-                fmt(row["mean_r_score"]),
-                fmt(row["mean_s_score"]),
-                fmt_percent(row["mean_retrieval_keyword_hit"]),
-                fmt_percent(row["mean_context_precision"]),
-                fmt_seconds(row["mean_total_latency_ms"]),
-            ]
-            for row in by_category
-        ],
+
+def report_nav_html() -> str:
+    links = (
+        ("#summary", "요약"),
+        ("#legend", "지표 정의"),
+        ("#by-type", "유형별 통계"),
+        ("#charts", "시각화"),
+        ("#failures", "오답 노트"),
     )
-    question_type_table = table_html(
+    items = "".join(
+        f'<li><a href="{html.escape(href)}">{html.escape(label)}</a></li>'
+        for href, label in links
+    )
+    return f'<nav aria-label="리포트 목차"><ul class="report-nav">{items}</ul></nav>'
+
+
+def question_type_table_html(by_type: list[dict[str, Any]]) -> str:
+    return table_html(
         [
             "질문 성격",
-            "질문 수",
-            "답변 정확도(f_score)",
-            "질문 이해도(r_score)",
-            "종합 능력(s_score)",
-            "검색 성공률(Hit Rate)",
-            "문맥 정밀도(context_precision)",
-            "평균 응답 시간(total_latency_ms)",
+            "샘플 수 (n)",
+            metric_label("doc_hit"),
+            metric_label("retrieval_keyword_hit"),
+            metric_label("context_precision"),
+            metric_label("f_score"),
+            metric_label("r_score"),
+            metric_label("s_score"),
+            metric_label("correctness_score"),
+            metric_label("task_success"),
+            metric_label("wrong_refusal"),
+            metric_label("total_latency_ms"),
         ],
         [
             [
                 row["label"],
                 f"{row['n']}개",
+                fmt_percent(row["mean_doc_hit"]),
+                fmt_percent(row["mean_retrieval_keyword_hit"]),
+                fmt_percent(row["mean_context_precision"]),
                 fmt(row["mean_f_score"]),
                 fmt(row["mean_r_score"]),
                 fmt(row["mean_s_score"]),
-                fmt_percent(row["mean_retrieval_keyword_hit"]),
-                fmt_percent(row["mean_context_precision"]),
+                fmt(row["mean_correctness_score"]),
+                fmt_percent(row["mean_task_success"]),
+                fmt_wrong_refusal_for_type_row(row),
                 fmt_seconds(row["mean_total_latency_ms"]),
             ]
-            for row in by_question_type
+            for row in by_type
         ],
     )
-    failure_table = failure_table_html(failures)
+
+
+def summary_cards_html(summary: dict[str, Any]) -> str:
+    def card(field: str, value: str) -> str:
+        label = html.escape(metric_label(field))
+        return f'<div class="card"><div>{label}</div><div class="metric">{value}</div></div>'
+
+    retrieval = "".join(
+        card(
+            key,
+            fmt_percent(summary[f"mean_{key}"])
+            if key != "total_latency_ms"
+            else fmt_seconds(summary["mean_total_latency_ms"]),
+        )
+        for key in RETRIEVAL_SUMMARY_KEYS
+    )
+    generation = "".join(card(key, fmt(summary[f"mean_{key}"])) for key in GENERATION_SUMMARY_KEYS)
+    answer_cards: list[str] = []
+    for key in ANSWER_SUMMARY_KEYS:
+        if key == "wrong_refusal":
+            value = fmt_percent(summary.get("mean_wrong_refusal_answerable"))
+        elif key == "task_success":
+            value = fmt_percent(summary.get("mean_task_success"))
+        else:
+            value = fmt(summary.get(f"mean_{key}"))
+        answer_cards.append(card(key, value))
+    answer = "".join(answer_cards)
+    n_answerable = int(summary.get("n_answerable") or 0)
+    answer_stage_note = (
+        f'<p class="note">'
+        f"<strong>태스크 최종 성공률</strong>: 전체 {summary['n']}문항 중 질문 유형별 pass 비율. "
+        f"<strong>무단 거절 오류율</strong>: 답변 가능 {n_answerable}문항만 집계(문서 외는 표에서 「해당 없음」). "
+        f"두 %는 서로 반대가 아니며, 성공률이 낮아도 거절 오류율이 0%일 수 있습니다."
+        f"</p>"
+    )
+
+    return f"""
+    <section id="summary" class="report-section">
+    <div class="stage-title">{STAGE_SUMMARY_TITLES["retrieval"]}</div>
+    <div class="cards">{retrieval}</div>
+    <div class="stage-title">{STAGE_SUMMARY_TITLES["generation"]}</div>
+    <div class="cards">{generation}</div>
+    <div class="stage-title">{STAGE_SUMMARY_TITLES["answer"]}</div>
+    {answer_stage_note}
+    <div class="cards">{answer}</div>
+    <div class="cards" style="margin-top: 12px;">
+        <div class="card card-latency"><div>{html.escape(metric_label("total_latency_ms"))}</div>
+        <div class="metric">{fmt_seconds(summary["mean_total_latency_ms"])}</div></div>
+    </div>
+    </section>
+    """
+
+
+def stage_charts_html(
+    by_type: list[dict[str, Any]],
+    section_title: str,
+    specs: list[tuple[str, str, float]],
+    *,
+    open_by_default: bool = False,
+) -> str:
+    boxes = "".join(
+        f'<div class="chart-box"><h3>{html.escape(title)}</h3>'
+        f"{chart_for_metric(by_type, key, max_value=max_val)}</div>"
+        for title, key, max_val in specs
+    )
+    open_attr = " open" if open_by_default else ""
+    return (
+        f'<details class="fold-section chart-stage"{open_attr}>'
+        f"<summary><h2>{html.escape(section_title)}</h2></summary>"
+        f'<div class="fold-body"><div class="chart-container">{boxes}</div></div>'
+        "</details>"
+    )
+
+
+def metrics_legend_fold_html() -> str:
+    return (
+        '<details id="legend" class="fold-section fold-legend" open>'
+        "<summary><h2>📘 RAG 파이프라인 지표 정의서</h2></summary>"
+        f'<div class="fold-body">{metrics_legend_body_html()}</div>'
+        "</details>"
+    )
+
+
+def metrics_legend_body_html() -> str:
+    return """<div class="metrics-legend">
+    <p class="note">본 수치는 <code>src/evaluation</code>의 RAG 평가 하네스 시스템을 통해 산출됩니다.
+    LLM 판정 점수(f/r/s)는 절대적 정답률이 아닌, 동일 스케일 환경 하의
+    <strong>상대적 성능 비교 지표</strong>로 활용할 때 유용합니다.</p>
+
+    <h3 class="legend-stage">1. 검색 엔진 평가 (Retrieval Stage)</h3>
+    <dl>
+    <dt>doc_hit · 대상 문서 적중률</dt>
+    <dd>사용자가 던진 질문에 매핑된 실제 정답 문서 ID(<code>doc_id</code>)가 검색 엔진을 거쳐
+    최상위 top-k 청크 결과에 포함되었는지를 판정합니다. (포함 1, 미포함 0)</dd>
+    <dt>retrieval_keyword_hit · 키워드 매칭률</dt>
+    <dd>평가 가이드라인에 지정된 정답 필수 핵심어(<code>ground_truth_keywords</code>)가
+    검색되어 올라온 전체 청크 텍스트 내에 단 하나라도 매칭되어 포함되었는지를 검증합니다.
+    (포함 1, 미포함 0)</dd>
+    <dt>context_precision · 검색 문맥 정밀도</dt>
+    <dd>불러온 top-k 청크 중에서 정답 핵심 키워드를 실제로 포함하고 있는 '유효 청크'의 밀도와 비율을
+    계산합니다. (키워드가 포함된 청크 수 ÷ k, 범위: 0~1)</dd>
+    </dl>
+
+    <h3 class="legend-stage">2. 생성 모델 평가 (LLM Judge Stage · 0~5점 척도)</h3>
+    <dl>
+    <dt>f_score · 답변 충실도 (Faithfulness)</dt>
+    <dd>생성된 답변이 모델의 자체 지식이나 환각 없이, 오직 <strong>'검색 엔진이 찾아다 준 근거 문맥'</strong>에만
+    철저히 기반하여 작성되었는지 검증합니다. 4점 미만일 경우 오답 노트에 <strong>환각 의심</strong> 라벨이 부여됩니다.</dd>
+    <dt>r_score · 질문 적합성 (Relevance)</dt>
+    <dd>모델이 딴소리를 하거나 우회하지 않고, 사용자가 원래 물어본 질문의 핵심 의도에 얼마나 정면으로
+    알맞은 답변을 생성했는지를 LLM 판정관이 평가합니다.</dd>
+    <dt>s_score · 정보 종합력 (Synthesis)</dt>
+    <dd>여러 군데로 흩어져서 검색된 다수의 근거 문서 청크들을 하나의 유기적인 논리로 엮어,
+    사용자가 읽기 쉽게 종합 가공했는지를 평가합니다.</dd>
+    </dl>
+
+    <h3 class="legend-stage">3. 최종 답변 및 태스크 달성도 (Task Success Stage)</h3>
+    <dl>
+    <dt>correctness_score · 기대 답변 유사도</dt>
+    <dd>평가 데이터셋의 정답(<code>expected_answer</code>)과 비교하여, 모델이 생성한 답변의 핵심 정보가
+    얼마나 정확히 일치하는지 판정합니다. (0~5점 척도)</dd>
+    <dt>task_success · 태스크 최종 성공률</dt>
+    <dd>RAG 시스템이 사용자의 요청을 올바르게 처리하여 <strong>'합격(Pass)'한 비율</strong>입니다.
+    질문 유형에 따라 판정 기준이 다릅니다.<br>
+    • <strong>답변 가능 질문</strong>: 답변을 회피/거절하지 않고, 기대 답변 유사도가 4점 이상(≥4)인 경우 합격<br>
+    • <strong>답변 불가능 질문</strong> (<code>unanswerable</code>): 억지로 오답을 지어내지 않고,
+    가이드라인대로 올바르게 답변을 거절한 경우 합격</dd>
+    <dt>wrong_refusal · 무단 거절 오류율</dt>
+    <dd>근거 문서에 정답이 존재하여 <strong>'답변이 가능한 질문'들 중에서, 모델이 내용을 찾을 수 없다며
+    무단으로 답변을 거부한 비율</strong>입니다.<br>
+    • <strong>주의</strong>: 답변 불가능한 질문은 계산에서 제외(해당 없음)됩니다.<br>
+    • <strong>지표 해석</strong>: 시스템의 실패 유형에는 무단 거절 외에도 '검색 실패', '오답(환각)' 등이 따로 존재하므로,
+    <u>[성공률 + 무단 거절률]의 합이 반드시 100%가 되지는 않습니다.</u></dd>
+    </dl>
+
+    <p class="legend-footnote">💡 <strong>오답 노트 시각화 가이드:</strong> 시스템 오동작 유형 중
+    <strong>무단 거절</strong> 케이스는 <span class="tag tag-refusal">노란색 배경</span>,
+    <strong>환각 의심</strong> 케이스는 <span class="tag tag-hallucination">붉은색 배경</span>으로 표기됩니다.
+    상세 목록 건수는 <code>--top-n</code>으로 조절합니다.</p>
+    </div>"""
+
+
+def render_html(
+    rows: list[dict[str, Any]],
+    failures: list[dict[str, Any]],
+    *,
+    failure_pool_count: int,
+) -> str:
+    summary = summarize(rows)
+    by_type = summarize_by_question_type(rows)
+
+    def chart_max_value(field: str) -> float:
+        if field in ("f_score", "r_score", "s_score", "correctness_score"):
+            return 5.0
+        return 1.0
+
+    def chart_specs(fields: tuple[str, ...]) -> list[tuple[str, str, float]]:
+        specs: list[tuple[str, str, float]] = []
+        for field in fields:
+            agg_key = (
+                "mean_wrong_refusal_answerable"
+                if field == "wrong_refusal"
+                else f"mean_{field}"
+            )
+            specs.append((metric_label(field), agg_key, chart_max_value(field)))
+        return specs
+
+    retrieval_charts = stage_charts_html(
+        by_type,
+        CHART_SECTION_TITLES["retrieval"],
+        chart_specs(RETRIEVAL_SUMMARY_KEYS),
+        open_by_default=True,
+    )
+    generation_charts = stage_charts_html(
+        by_type, CHART_SECTION_TITLES["generation"], chart_specs(GENERATION_SUMMARY_KEYS)
+    )
+    answer_charts = stage_charts_html(
+        by_type,
+        CHART_SECTION_TITLES["answer"],
+        chart_specs(("correctness_score", "task_success", "wrong_refusal")),
+    )
 
     return f"""<!doctype html>
-    <html lang="ko">
-    <head>
-    <meta charset="utf-8">
-    <title>RAG 성능 평가 리포트</title>
-    <style>
-    body {{ font-family: 'Malgun Gothic', Arial, sans-serif; margin: 32px; background-color: #f4f7f9; color: #222; }}
-    h1 {{ text-align: center; color: #333; }}
-    h2 {{ border-left: 5px solid #4f7cff; padding-left: 12px; margin-top: 40px; font-size: 18px; }}
-    h3 {{ margin-top: 0; font-size: 15px; }}
-    .cards {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-top: 20px; }}
-    .card {{ border-radius: 12px; padding: 20px; background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.05); text-align: center; }}
-    .metric {{ font-size: 26px; font-weight: 700; color: #4f7cff; margin-top: 8px; }}
-    .chart-container {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px; }}
-    .chart-box {{ background: #fff; padding: 15px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }}
-    .note {{ margin-top: 10px; color: #666; font-size: 13px; }}
-    table {{ border-collapse: collapse; width: 100%; margin-top: 15px; background: #fff; border-radius: 8px; overflow: hidden; }}
-    th, td {{ border: 1px solid #eee; padding: 12px; text-align: center; }}
-    th {{ background: #f8f9fa; }}
-    table.failure-detail {{ font-size: 13px; width: 100%; table-layout: fixed; }}
-    table.failure-detail th, table.failure-detail td {{ text-align: left; vertical-align: top; padding: 8px 10px; }}
-    table.failure-detail th:nth-child(-n+7),
-    table.failure-detail td:nth-child(-n+7) {{ text-align: center; white-space: nowrap; width: 3.2rem; }}
-    table.failure-detail td:nth-child(1), table.failure-detail th:nth-child(1) {{ width: 6.5rem; }}
-    table.failure-detail td:nth-child(2), table.failure-detail th:nth-child(2) {{ width: 6.5rem; }}
-    table.failure-detail .failure-text {{
-        max-width: 100%; max-height: 12rem; overflow: auto; line-height: 1.45; font-size: 12px; text-align: left;
-        word-break: break-word; hyphens: auto;
-    }}
-    table.failure-detail .failure-sources {{
-        font-size: 11px; color: #555; line-height: 1.3; word-break: break-word; overflow: auto;
-    }}
-    table.failure-detail .failure-sources-doc {{ max-height: 5rem; }}
-    table.failure-detail .failure-sources-ids {{ max-height: none; }}
-    table.failure-detail ul.chunk-id-list {{
-        margin: 4px 0 0 1.1rem; padding: 0 0 0 0.4rem; font-size: 12px; line-height: 1.55;
-    }}
-    table.failure-detail ul.chunk-id-list code {{ font-size: 11px; }}
-    table.failure-detail .muted {{ color: #888; font-size: 12px; }}
-    table.failure-detail tr.failure-evidence-row td {{
-        border-top: 1px dashed #dde3ea;
-        background: #fafbfd;
-        padding: 6px 10px 12px 10px;
-    }}
-    table.failure-detail .failure-evidence-wrap {{ text-align: left; }}
-    table.failure-detail .evidence-section-title {{
-        font-size: 11px; font-weight: 700; color: #4f7cff; margin: 10px 0 4px 0; letter-spacing: 0.02em;
-    }}
-    table.failure-detail .failure-evidence-wrap .evidence-section-title:first-child {{ margin-top: 2px; }}
-    .metrics-legend {{ background: #fff; padding: 22px 26px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); margin-top: 28px; max-width: 960px; margin-left: auto; margin-right: auto; }}
-    .metrics-legend h2 {{ margin-top: 0; border-left: 5px solid #4f7cff; padding-left: 12px; font-size: 18px; }}
-    .legend-intro {{ color: #444; font-size: 14px; line-height: 1.6; margin: 12px 0 8px 0; }}
-    .metrics-legend dl {{ margin: 16px 0 0 0; }}
-    .metrics-legend dt {{ font-weight: 700; color: #2c3e50; margin-top: 16px; font-size: 14px; }}
-    .metrics-legend dt:first-of-type {{ margin-top: 0; }}
-    .metrics-legend dd {{ margin: 6px 0 0 0; color: #444; font-size: 14px; line-height: 1.55; padding-left: 0; text-align: left; }}
-    .legend-footnote {{ margin: 18px 0 0 0; color: #666; font-size: 13px; line-height: 1.5; }}
-    .metrics-legend code {{ background: #f0f2f5; padding: 1px 6px; border-radius: 4px; font-size: 12px; }}
-    </style>
-    </head>
-    <body>
-    <h1>📊 RAG 성능 평가 리포트</h1>
-    <div class="cards">
-        <div class="card"><div>전체 질문 수</div><div class="metric">{summary["n"]}개</div></div>
-        <div class="card"><div>평균 답변 정확도(f_score)</div><div class="metric">{fmt(summary["mean_f_score"])}</div></div>
-        <div class="card"><div>평균 질문 이해도(r_score)</div><div class="metric">{fmt(summary["mean_r_score"])}</div></div>
-        <div class="card"><div>평균 종합 능력(s_score)</div><div class="metric">{fmt(summary["mean_s_score"])}</div></div>
-        <div class="card"><div>평균 검색 성공률(Hit Rate)</div><div class="metric">{fmt_percent(summary["mean_retrieval_keyword_hit"])}</div></div>
-        <div class="card"><div>평균 응답 시간(total_latency_ms)</div><div class="metric">{fmt_seconds(summary["mean_total_latency_ms"])}</div></div>
-    </div>
-    {metrics_legend_html()}
-    <h2>📈 유형별 지표 상세 분석</h2>
-    <div class="chart-container">
-        <div class="chart-box"><h3>🎯 답변의 정확도(f_score)</h3>{category_chart}</div>
-        <div class="chart-box"><h3>💡 질문 이해도(r_score)</h3>{relevance_chart}</div>
-        <div class="chart-box"><h3>🚀 종합 처리 능력(s_score)</h3>{synthesis_chart}</div>
-        <div class="chart-box"><h3>🔍 정보 검색 성능(Hit Rate / retrieval_keyword_hit)</h3>{hit_chart}</div>
-        <div class="chart-box"><h3>📌 문맥 정밀도(context_precision)</h3>{precision_chart}</div>
-    </div>
-    <h2>📋 질문 유형별 데이터 요약</h2>
-    {category_table}
-    <h2>📈 질문 성격별 지표 상세 분석</h2>
-    <div class="chart-container">
-        <div class="chart-box"><h3>🎯 답변의 정확도(f_score)</h3>{type_f_chart}</div>
-        <div class="chart-box"><h3>💡 질문 이해도(r_score)</h3>{type_relevance_chart}</div>
-        <div class="chart-box"><h3>🚀 종합 처리 능력(s_score)</h3>{type_synthesis_chart}</div>
-        <div class="chart-box"><h3>🔍 정보 검색 성능(Hit Rate / retrieval_keyword_hit)</h3>{type_hit_chart}</div>
-        <div class="chart-box"><h3>📌 문맥 정밀도(context_precision)</h3>{type_precision_chart}</div>
-    </div>
-    <h2>📋 질문 성격별 데이터 요약</h2>
-    {question_type_table}
-    <h2>📝 오답 노트 / 실패 사례</h2>
-    <div class="note">답변 품질 점수가 낮거나 검색 성공률·문맥 정밀도가 0인 케이스를 우선 표시합니다.</div>
-    <div class="note"><strong>모델 답변</strong>은 입력 JSONL의 <code>answer</code> 필드를 그대로 보여 줍니다. 과거 프롬프트가 답변 끝에 <code>source_id</code> 목록을 붙이도록 했다면 그 형태가 남아 있을 수 있습니다. 프롬프트를 바꾼 뒤에도 <strong>같은 JSONL로 리포트만 다시 만들면</strong> <code>answer</code>는 변하지 않습니다. <strong>평가 하네스를 다시 실행</strong>해 새 결과 파일을 생성해야 수정된 프롬프트가 반영됩니다. 오답 노트 아래에는 <strong>근거 문서</strong>·<strong>근거 청크 ID</strong>(<code>sources</code>)만 둡니다.</div>
-    {failure_table}
-    </body>
-    </html>"""
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAG 시스템 성능 평가 리포트</title>
+<style>{REPORT_STYLES}</style>
+</head>
+<body>
+<div class="report-wrap">
+<h1>📊 RAG 시스템 성능 평가 리포트</h1>
+<p class="report-meta">
+  전체 <strong>{summary["n"]}</strong>문항 · 오답 노트 <strong>{len(failures)}</strong>건
+  (후보 {failure_pool_count}건) · 상단 목차로 이동
+</p>
+{report_nav_html()}
+{summary_cards_html(summary)}
+{metrics_legend_fold_html()}
+<section id="by-type" class="report-section">
+<h2>📋 질문 성격별 세부 지표 통계</h2>
+<p class="note">질문 유형별 평균 지표입니다. 무단 거절 오류율은 답변 가능 유형만 집계합니다.</p>
+{question_type_table_html(by_type)}
+</section>
+<section id="charts" class="report-section">
+<p class="note">유형별 막대 차트입니다. 섹션 제목을 클릭하면 접거나 펼칠 수 있습니다.</p>
+{retrieval_charts}
+{generation_charts}
+{answer_charts}
+</section>
+<section id="failures" class="report-section">
+<h2>📝 디버깅 오답 노트 (Error Analysis)</h2>
+<p class="note">무단 거절·환각 의심 등 실패 케이스입니다. 표는 가로 스크롤이 가능합니다.</p>
+<h3>실패 유형 분포</h3>
+{failure_reason_table_html(failure_reason_counts(rows))}
+{failure_table_html(failures)}
+</section>
+</div>
+</body>
+</html>"""
 
 
 def build_report(input_path: Path, html_output: Path, failures_output: Path, top_n: int) -> None:
@@ -583,11 +960,16 @@ def build_report(input_path: Path, html_output: Path, failures_output: Path, top
         print("데이터가 없습니다.")
         return
 
+    pool_count = count_failure_candidates(rows)
     failures = failure_rows(rows, top_n)
     html_output.parent.mkdir(parents=True, exist_ok=True)
-    html_output.write_text(render_html(rows, failures), encoding="utf-8")
+    html_output.write_text(
+        render_html(rows, failures, failure_pool_count=pool_count),
+        encoding="utf-8",
+    )
     write_failures_csv(failures_output, failures)
     print(f"리포트 생성 완료: {html_output}")
+    print(f"오답 CSV: {failures_output} ({len(failures)}건 / 후보 {pool_count}건)")
 
 
 def main() -> None:
@@ -595,7 +977,7 @@ def main() -> None:
     parser.add_argument("--input", default="outputs/eval_harness_results.jsonl")
     parser.add_argument("--html-output", default="outputs/eval_report.html")
     parser.add_argument("--failures-output", default="outputs/eval_failures.csv")
-    parser.add_argument("--top-n", type=int, default=20)
+    parser.add_argument("--top-n", type=int, default=20, help="오답 노트에 표시할 최대 건수")
     args = parser.parse_args()
     build_report(
         input_path=Path(args.input),

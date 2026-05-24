@@ -104,7 +104,6 @@ PYTHONPYCACHEPREFIX=.cache/pycache python3 -m src.cli evaluate-harness --config 
 ```
 
 결과 JSONL은 `outputs/eval_harness_results.jsonl`, 트레이스는 https://smith.langchain.com 프로젝트에서 확인합니다.
-MLflow 서버 없이 동작합니다. GCP/MLflow는 `pip install -e ".[mlflow]"` 후 `evaluate-mlflow`로 나중에 사용할 수 있습니다.
 
 HWP 파일을 처리해야 한다면 VM에서 선택 의존성을 추가로 설치합니다.
 
