@@ -276,11 +276,17 @@ def generate_questions_with_openai(
     if not rows:
         raise RuntimeError(f"질문 생성 입력 파일이 비어있습니다: {input_path}")
 
+    from tqdm.auto import tqdm
+
     output_rows: list[dict[str, Any]] = []
-    for row in rows:
+    progress = tqdm(rows, desc="Generating eval questions", unit="doc")
+    for row in progress:
         prompt = str(row.get("prompt", "")).strip()
         if not prompt:
             continue
+        doc_id = str(row.get("doc_id") or "").strip()
+        if doc_id:
+            progress.set_postfix_str(doc_id[:40] + ("…" if len(doc_id) > 40 else ""), refresh=False)
         questions = call_openai_for_questions(prompt, model)
         for question in questions:
             if not question.get("doc_id"):

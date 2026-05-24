@@ -145,7 +145,13 @@ def run_eval_harness_mlflow(
         mlflow.log_param("judge_model", judge_model)
         mlflow.log_param("run_llm_judge", run_llm_judge)
 
-        for row in rows:
+        from tqdm.auto import tqdm
+
+        progress = tqdm(rows, desc="Evaluating harness", unit="q")
+        for row in progress:
+            doc_id = str(row.get("doc_id") or "").strip()
+            if doc_id:
+                progress.set_postfix_str(doc_id[:40] + ("…" if len(doc_id) > 40 else ""), refresh=False)
             results.append(
                 _eval_one_row(
                     engine,

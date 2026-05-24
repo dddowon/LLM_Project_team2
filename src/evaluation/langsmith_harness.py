@@ -138,8 +138,14 @@ def _eval_batch_traced(
     run_llm_judge: bool,
     langsmith_client: Client | None,
 ) -> list[dict[str, Any]]:
+    from tqdm.auto import tqdm
+
     outputs: list[dict[str, Any]] = []
-    for i, row in enumerate(rows):
+    progress = tqdm(rows, desc="Evaluating harness", unit="q")
+    for i, row in enumerate(progress):
+        doc_id = str(row.get("doc_id") or "").strip()
+        if doc_id:
+            progress.set_postfix_str(doc_id[:40] + ("…" if len(doc_id) > 40 else ""), refresh=False)
         outputs.append(
             _eval_one_row(
                 engine,
