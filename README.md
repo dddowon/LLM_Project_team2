@@ -299,8 +299,8 @@ export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH}
 입력/출력 규칙:
 - 이미지 입력: `data/v2/ocr_images/<doc_key>/img_001.jpg`
 - GT 입력: `data/v2/ocr_eval/incoming_gt/<doc_key>.json`
-- 결과 출력: `data/v2/ocr_eval/<engine>/<doc_key>/<image_stem>/{pred_raw,pred_structured,report}.json`
-  - `<engine>`: `pp_ocrv5`, `pp_structurev3`, `table_recognition_v2`, `paddleocr_vl`
+- 결과 출력: `data/v2/ocr_eval/<engine>/<doc_key>/<image_stem>/{pred_raw,pred_structured,eval}.json`
+  - `<engine>`: `pp_ocrv5`, `pp_ocrv5_transformers`, `pp_structurev3`, `table_recognition_v2`, `paddleocr_vl`
 - `--doc-key`는 파일명이 아니라 `ocr_images` 하위 폴더명입니다.
 
 ### 이미지 1개 실행 (`ocr-run-image`)
@@ -370,9 +370,10 @@ python -m src.cli ocr-run-batch \
 ### 결과 확인 위치
 
 - OCR 이미지 추출 결과: `data/v2/ocr_images/`
-- OCR 평가 산출물(`pred_raw`, `pred_structured`, `report`): `data/v2/ocr_eval/`
-- `report.json` 주요 지표:
+- OCR 평가 산출물(`pred_raw`, `pred_structured`, `eval`): `data/v2/ocr_eval/`
+- `eval.json` 주요 지표:
   - `type`, `status`, `latency_ms`
-  - `text.char_similarity_pct`, `text.cer`, `text.wer`
+  - `engine`
+  - `text_metrics.char_similarity_pct`, `text_metrics.cer`, `text_metrics.wer`
   - `field_match.rate_pct` (매칭 개수/전체 개수)
-  - `structure.<필드>.precision/recall/f1`
+  - `macro_f1`

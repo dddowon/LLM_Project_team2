@@ -7,7 +7,13 @@ import re
 import sys
 from pathlib import Path
 
-DEFAULT_OCR_ENGINE_MATRIX = ("pp_ocrv5", "pp_structurev3", "table_recognition_v2", "paddleocr_vl")
+DEFAULT_OCR_ENGINE_MATRIX = (
+    "pp_ocrv5",
+    "pp_ocrv5_transformers",
+    "pp_structurev3",
+    "table_recognition_v2",
+    "paddleocr_vl",
+)
 
 
 def _normalize_ocr_engine(ocr_engine: str) -> str:
@@ -714,24 +720,26 @@ def _write_ocr_payload(output_path: str, payload: dict) -> None:
     print(f"output: {output}")
 
 
-def _build_pp_ocrv5_model(*, lang: str, device: str) -> object:
+def _build_pp_ocrv5_model(*, lang: str, device: str, engine: str = "paddle") -> object:
     from paddleocr import PaddleOCR
 
     candidates = [
         {
             "lang": lang,
             "device": device,
+            "engine": engine,
             "use_doc_orientation_classify": False,
             "use_doc_unwarping": False,
             "use_textline_orientation": False,
         },
         {
             "lang": lang,
+            "engine": engine,
             "use_doc_orientation_classify": False,
             "use_doc_unwarping": False,
             "use_textline_orientation": False,
         },
-        {"lang": lang},
+        {"lang": lang, "engine": engine},
         {},
     ]
     last_error: Exception | None = None
@@ -809,6 +817,7 @@ def run_paddle_ocr(
     output_path: str,
     lang: str = "korean",
     device: str = "gpu:0",
+    backend_engine: str = "paddle",
     ocr_model: object | None = None,
 ) -> None:
     import time
@@ -817,14 +826,18 @@ def run_paddle_ocr(
     if not image.exists():
         raise FileNotFoundError(f"Image not found: {image}")
 
-    model = ocr_model if ocr_model is not None else _build_pp_ocrv5_model(lang=lang, device=device)
+    model = (
+        ocr_model
+        if ocr_model is not None
+        else _build_pp_ocrv5_model(lang=lang, device=device, engine=backend_engine)
+    )
     start = time.perf_counter()
     results = model.predict(str(image))
     latency_ms = (time.perf_counter() - start) * 1000.0
     rows, raw_items = _extract_ppocr_rows_and_raw(results)
     payload = {
         "image_path": str(image),
-        "model": "pp_ocrv5",
+        "model": f"pp_ocrv5:{backend_engine}",
         "lang": lang,
         "status": "success",
         "latency_ms": round(latency_ms, 2),
@@ -945,6 +958,9 @@ def _build_shared_ocr_model(
     if engine == "pp_ocrv5":
         print(f"[PP-OCRv5] initialize once: lang={lang}, device={ocr_device}")
         return _build_pp_ocrv5_model(lang=lang, device=ocr_device)
+    if engine == "pp_ocrv5_transformers":
+        print(f"[PP-OCRv5 Transformers] initialize once: lang={lang}, device={ocr_device}")
+        return _build_pp_ocrv5_model(lang=lang, device=ocr_device, engine="transformers")
     if engine == "pp_structurev3":
         print(f"[PP-StructureV3] initialize once: lang={lang}, device={ocr_device}")
         return _build_pp_structurev3_model(lang=lang, device=ocr_device)
@@ -988,8 +1004,6 @@ def eval_pred_structured_vs_gt(
     pred_structured_path: str,
     item_id: str,
     output_path: str,
-    relaxed_output_path: str | None = None,
-    field_match_csv_path: str | None = None,
     relaxed_threshold: float = 0.65,
 ) -> None:
     from difflib import SequenceMatcher
@@ -1020,35 +1034,6 @@ def eval_pred_structured_vs_gt(
     text_wer = word_dist / max(1, len(gt_words))
 
     gt_structure = gt_item.get("gt_structure", {}) if isinstance(gt_item.get("gt_structure", {}), dict) else {}
-    pred_structure = (
-        pred_item.get("pred_structure", {}) if isinstance(pred_item.get("pred_structure", {}), dict) else {}
-    )
-
-    report = {
-        "id": item_id,
-        "type": pred_item.get("type", gt_item.get("image_type", "unknown")),
-        "status": pred_item.get("status", "success"),
-        "latency_ms": pred_item.get("latency_ms"),
-        "text": {
-            "gt_text": gt_text,
-            "pred_text": pred_text,
-            "exact_match": gt_norm == pred_norm,
-            "cer": text_cer,
-            "wer": text_wer,
-            "char_similarity_pct": round(char_similarity, 2),
-        },
-        "structure": {
-            "mode": "gt_schema_value_match",
-            "gt_structure": gt_structure,
-            "pred_structure": pred_structure,
-        },
-    }
-
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps(report, ensure_ascii=False, indent=2))
-    print(f"saved: {output}")
 
     def normalize_text_relaxed(text: str) -> str:
         text = str(text).lower()
@@ -1087,63 +1072,40 @@ def eval_pred_structured_vs_gt(
         return score, score >= threshold
 
     expected_fields = flatten_structure(gt_structure)
-    field_rows: list[dict[str, object]] = []
     matched_count = 0
     for field in expected_fields:
         score, matched = value_match_score(field["expected_value"], pred_text, relaxed_threshold)
         if matched:
             matched_count += 1
-        field_rows.append(
-            {
-                "id": item_id,
-                "type": pred_item.get("type", gt_item.get("image_type", "unknown")),
-                "field_path": field["field_path"],
-                "expected_value": field["expected_value"],
-                "match_score": round(score, 6),
-                "matched": matched,
-            }
-        )
 
-    text_similarity = SequenceMatcher(
-        None,
-        normalize_text_relaxed(gt_text),
-        normalize_text_relaxed(pred_text),
-    ).ratio()
     field_hit_rate = matched_count / len(expected_fields) if expected_fields else 0.0
-    report["field_match"] = {
-        "rate_pct": round(field_hit_rate * 100.0, 2),
-        "matched": matched_count,
-        "total": len(expected_fields),
-        "threshold": relaxed_threshold,
+
+    eval_payload = {
+        "id": item_id,
+        "type": pred_item.get("type", gt_item.get("image_type", "unknown")),
+        "status": pred_item.get("status", "success"),
+        "engine": pred_item.get("model", "unknown"),
+        "latency_ms": pred_item.get("latency_ms"),
+        "text_metrics": {
+            "exact_match": gt_norm == pred_norm,
+            "cer": text_cer,
+            "wer": text_wer,
+            "char_similarity_pct": round(char_similarity, 2),
+        },
+        "field_match": {
+            "rate_pct": round(field_hit_rate * 100.0, 2),
+            "matched": matched_count,
+            "total": len(expected_fields),
+            "threshold": relaxed_threshold,
+        },
+        "macro_f1": field_hit_rate,
     }
-    report["macro_f1"] = field_hit_rate
-    output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    # [Design Intent] Keep a single canonical report artifact (`report.json`) only.
-    relaxed_output = (
-        Path(relaxed_output_path)
-        if relaxed_output_path
-        else output.with_name("report_relaxed.json")
-    )
-    if relaxed_output.exists():
-        relaxed_output.unlink()
-        print(f"removed_legacy_relaxed: {relaxed_output}")
-
-    field_csv_output = (
-        Path(field_match_csv_path)
-        if field_match_csv_path
-        else output.with_name("field_match.csv")
-    )
-    field_csv_output.parent.mkdir(parents=True, exist_ok=True)
-    with field_csv_output.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=["id", "type", "field_path", "expected_value", "match_score", "matched"],
-        )
-        writer.writeheader()
-        writer.writerows(field_rows)
-    print(f"saved_field_match_csv: {field_csv_output}")
-
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(eval_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps(eval_payload, ensure_ascii=False, indent=2))
+    print(f"saved: {output}")
 
 def ocr_run_all(
     image_path: str,
@@ -1151,15 +1113,13 @@ def ocr_run_all(
     item_id: str,
     pred_raw_output: str,
     pred_structured_output: str,
-    report_output: str,
+    eval_output: str,
     lang: str = "korean",
     score_threshold: float = 0.0,
     ocr_engine: str = "pp_ocrv5",
     ocr_device: str = "gpu:0",
     ocr_batch_size: int = 1,
     ocr_model: object | None = None,
-    relaxed_output_path: str | None = None,
-    field_match_csv_path: str | None = None,
     relaxed_threshold: float = 0.65,
 ) -> None:
     normalized_engine = _normalize_ocr_engine(ocr_engine)
@@ -1194,6 +1154,7 @@ def ocr_run_all(
             output_path=pred_raw_output,
             lang=lang,
             device=ocr_device,
+            backend_engine="transformers" if normalized_engine == "pp_ocrv5_transformers" else "paddle",
             ocr_model=ocr_model,
         )
     print("[2/3] build-pred-structured")
@@ -1209,9 +1170,7 @@ def ocr_run_all(
         gt_path=gt_path,
         pred_structured_path=pred_structured_output,
         item_id=item_id,
-        output_path=report_output,
-        relaxed_output_path=relaxed_output_path,
-        field_match_csv_path=field_match_csv_path,
+        output_path=eval_output,
         relaxed_threshold=relaxed_threshold,
     )
     print("ocr_run_all_done")
@@ -1354,8 +1313,8 @@ def _resolve_ocr_doc_paths(
     out_dir = Path(output_root) / engine_dir_name / doc_key / image_stem
     pred_raw = out_dir / "pred_raw.json"
     pred_structured = out_dir / "pred_structured.json"
-    report = out_dir / "report.json"
-    return image_path, gt_path, pred_raw, pred_structured, report
+    eval_json = out_dir / "eval.json"
+    return image_path, gt_path, pred_raw, pred_structured, eval_json
 
 
 def _engine_dir_name(ocr_engine: str) -> str:
@@ -1424,7 +1383,7 @@ def ocr_run_image(
     ocr_batch_size: int,
     ocr_model: object | None = None,
 ) -> bool:
-    image_path, gt_path, pred_raw, pred_structured, report = _resolve_ocr_doc_paths(
+    image_path, gt_path, pred_raw, pred_structured, eval_json = _resolve_ocr_doc_paths(
         doc_key=doc_key,
         images_root=images_root,
         gt_root=gt_root,
@@ -1455,7 +1414,7 @@ def ocr_run_image(
         item_id=final_item_id,
         pred_raw_output=str(pred_raw),
         pred_structured_output=str(pred_structured),
-        report_output=str(report),
+        eval_output=str(eval_json),
         lang=lang,
         score_threshold=score_threshold,
         ocr_engine=ocr_engine,
@@ -1534,12 +1493,12 @@ def ocr_run_batch(
                 if not include_in_eval:
                     continue
 
-                report_path = (
-                    Path(output_root) / _engine_dir_name(normalized_engine) / doc_key / Path(path.name).stem / "report.json"
+                eval_path = (
+                    Path(output_root) / _engine_dir_name(normalized_engine) / doc_key / Path(path.name).stem / "eval.json"
                 )
-                if report_path.exists():
-                    result = json.loads(report_path.read_text(encoding="utf-8"))
-                    text_metrics = result.get("text", {}) if isinstance(result, dict) else {}
+                if eval_path.exists():
+                    result = json.loads(eval_path.read_text(encoding="utf-8"))
+                    text_metrics = result.get("text_metrics", {}) if isinstance(result, dict) else {}
                     field_metrics = result.get("field_match", {}) if isinstance(result, dict) else {}
                     char_similarity_pct = text_metrics.get("char_similarity_pct")
                     similarity_ratio = (
@@ -2166,7 +2125,7 @@ def main() -> None:
     eval_pred_parser.add_argument("--gt", required=True, help="GT path (.json/.jsonl)")
     eval_pred_parser.add_argument("--pred-structured", required=True, help="Pred structured JSON path")
     eval_pred_parser.add_argument("--id", required=True, help="Target item id")
-    eval_pred_parser.add_argument("--output", required=True, help="Evaluation report output path")
+    eval_pred_parser.add_argument("--output", required=True, help="Evaluation JSON output path")
 
     ocr_image_parser = subparsers.add_parser(
         "ocr-run-image",
@@ -2201,7 +2160,7 @@ def main() -> None:
     ocr_image_parser.add_argument(
         "--all-engines",
         action="store_true",
-        help="Run default OCR engine matrix (pp_ocrv5, pp_structurev3, table_recognition_v2, paddleocr_vl)",
+        help="Run default OCR engine matrix (pp_ocrv5, pp_ocrv5_transformers, pp_structurev3, table_recognition_v2, paddleocr_vl)",
     )
 
     ocr_batch_parser = subparsers.add_parser(
@@ -2242,7 +2201,7 @@ def main() -> None:
     ocr_batch_parser.add_argument(
         "--all-engines",
         action="store_true",
-        help="Run default OCR engine matrix (pp_ocrv5, pp_structurev3, table_recognition_v2, paddleocr_vl)",
+        help="Run default OCR engine matrix (pp_ocrv5, pp_ocrv5_transformers, pp_structurev3, table_recognition_v2, paddleocr_vl)",
     )
 
     pipeline_parser = subparsers.add_parser(

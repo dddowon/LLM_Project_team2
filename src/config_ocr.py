@@ -11,7 +11,7 @@ class OCRConfig(BaseModel):
     # [Design Intent] Pin config assumptions to the validated runtime stack.
     paddleocr_version: str = "3.0.3"
     paddlepaddle_gpu_version: str = "3.0.0"
-    engine: str = "paddleocr_vl"  # pp_ocrv5 | pp_structurev3 | table_recognition_v2 | paddleocr_vl
+    engine: str = "paddleocr_vl"  # pp_ocrv5 | pp_ocrv5_transformers | pp_structurev3 | table_recognition_v2 | paddleocr_vl
     device: str = "gpu:0"  # cpu | gpu:0
     lang: str = "korean"
     score_threshold: float = 0.0
