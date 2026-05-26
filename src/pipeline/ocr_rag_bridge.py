@@ -174,7 +174,7 @@ def _iter_image_dirs(engine_dir: Path, doc_key: str | None) -> list[tuple[str, P
     for one_doc in doc_dirs:
         image_dirs = sorted([path for path in one_doc.iterdir() if path.is_dir()], key=lambda p: p.name)
         for image_dir in image_dirs:
-            if (image_dir / "pred_structured.json").exists():
+            if (image_dir / "eval" / "gt_pred_structured.json").exists():
                 output.append((one_doc.name, image_dir))
     return output
 
@@ -198,11 +198,11 @@ def export_ocr_eval_to_rag_inputs(
     for engine_dir in engine_dirs:
         engine_name = engine_dir.name
         for one_doc_key, image_dir in _iter_image_dirs(engine_dir, doc_key):
-            pred_structured_path = image_dir / "pred_structured.json"
-            pred_table_rows_path = image_dir / "pred_table_rows.json"
-            pred_table_html_path = image_dir / "pred_table_raw.html"
-            pred_table_preview_path = image_dir / "pred_table_rows_human_review.html"
-            eval_summary_path = image_dir / "eval_summary.json"
+            pred_structured_path = image_dir / "eval" / "gt_pred_structured.json"
+            pred_table_rows_path = image_dir / "inference" / "pred_table_layout.json"
+            pred_table_html_path = image_dir / "inference" / "pred_table_raw.html"
+            pred_table_preview_path = image_dir / "inference" / "pred_table_layout.html"
+            eval_summary_path = image_dir / "eval" / "gt_eval_summary.json"
 
             pred_structured = _load_json(pred_structured_path)
             if not pred_structured:

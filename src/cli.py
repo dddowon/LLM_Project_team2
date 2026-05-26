@@ -827,10 +827,25 @@ def _build_table_recognition_v2_model(*, lang: str, device: str) -> object:
     return TableRecognitionPipelineV2()
 
 
-def _build_paddleocr_vl_model(*, device: str) -> object:
+def _build_paddleocr_vl_model(
+    *,
+    device: str,
+    use_doc_orientation_classify: bool = False,
+    use_doc_unwarping: bool = False,
+    use_chart_recognition: bool = False,
+) -> object:
     from paddleocr import PaddleOCRVL
 
-    candidates = [{"device": device}, {}]
+    candidates = [
+        {
+            "device": device,
+            "use_doc_orientation_classify": use_doc_orientation_classify,
+            "use_doc_unwarping": use_doc_unwarping,
+            "use_chart_recognition": use_chart_recognition,
+        },
+        {"device": device},
+        {},
+    ]
     last_error: Exception | None = None
     for kwargs in candidates:
         try:
@@ -916,6 +931,9 @@ def run_paddleocr_vl_ocr(
     output_path: str,
     device: str = "gpu:0",
     batch_size: int = 1,
+    use_doc_orientation_classify: bool = False,
+    use_doc_unwarping: bool = False,
+    use_chart_recognition: bool = False,
     ocr_model: object | None = None,
 ) -> None:
     import time
@@ -924,10 +942,25 @@ def run_paddleocr_vl_ocr(
     if not image.exists():
         raise FileNotFoundError(f"Image not found: {image}")
 
-    model = ocr_model if ocr_model is not None else _build_paddleocr_vl_model(device=device)
+    model = (
+        ocr_model
+        if ocr_model is not None
+        else _build_paddleocr_vl_model(
+            device=device,
+            use_doc_orientation_classify=use_doc_orientation_classify,
+            use_doc_unwarping=use_doc_unwarping,
+            use_chart_recognition=use_chart_recognition,
+        )
+    )
 
     start = time.perf_counter()
-    results = model.predict(input=str(image), batch_size=batch_size)
+    results = model.predict(
+        input=str(image),
+        batch_size=batch_size,
+        use_doc_orientation_classify=use_doc_orientation_classify,
+        use_doc_unwarping=use_doc_unwarping,
+        use_chart_recognition=use_chart_recognition,
+    )
     latency_ms = (time.perf_counter() - start) * 1000.0
     rows, raw_items = _extract_generic_rows_and_raw(results)
     payload = {
@@ -947,6 +980,11 @@ def run_table_recognition_v2_ocr(
     output_path: str,
     lang: str = "korean",
     device: str = "gpu:0",
+    use_doc_orientation_classify: bool = False,
+    use_doc_unwarping: bool = False,
+    use_table_orientation_classify: bool = True,
+    use_ocr_results_with_table_cells: bool = True,
+    text_det_limit_side_len: int | None = None,
     table_model: object | None = None,
 ) -> None:
     import time
@@ -957,13 +995,18 @@ def run_table_recognition_v2_ocr(
 
     model = table_model if table_model is not None else _build_table_recognition_v2_model(lang=lang, device=device)
     start = time.perf_counter()
-    results = model.predict(
-        input=str(image),
-        use_doc_orientation_classify=False,
-        use_doc_unwarping=False,
-        use_layout_detection=True,
-        use_ocr_model=True,
-    )
+    predict_kwargs = {
+        "input": str(image),
+        "use_doc_orientation_classify": use_doc_orientation_classify,
+        "use_doc_unwarping": use_doc_unwarping,
+        "use_layout_detection": True,
+        "use_ocr_model": True,
+        "use_table_orientation_classify": use_table_orientation_classify,
+        "use_ocr_results_with_table_cells": use_ocr_results_with_table_cells,
+    }
+    if text_det_limit_side_len is not None:
+        predict_kwargs["text_det_limit_side_len"] = text_det_limit_side_len
+    results = model.predict(**predict_kwargs)
     latency_ms = (time.perf_counter() - start) * 1000.0
     rows, raw_items = _extract_generic_rows_and_raw(results)
     payload = {
@@ -983,6 +1026,9 @@ def _build_shared_ocr_model(
     ocr_engine: str,
     lang: str,
     ocr_device: str,
+    use_doc_orientation_classify: bool = False,
+    use_doc_unwarping: bool = False,
+    use_chart_recognition: bool = False,
 ) -> object | None:
     engine = _normalize_ocr_engine(ocr_engine)
     if engine == "pp_ocrv5":
@@ -996,7 +1042,12 @@ def _build_shared_ocr_model(
         return _build_pp_structurev3_model(lang=lang, device=ocr_device)
     if engine == "paddleocr_vl":
         print(f"[PaddleOCR-VL] initialize once: device={ocr_device}")
-        return _build_paddleocr_vl_model(device=ocr_device)
+        return _build_paddleocr_vl_model(
+            device=ocr_device,
+            use_doc_orientation_classify=use_doc_orientation_classify,
+            use_doc_unwarping=use_doc_unwarping,
+            use_chart_recognition=use_chart_recognition,
+        )
     if engine == "table_recognition_v2":
         print(f"[table_recognition_v2] initialize once: lang={lang}, device={ocr_device}")
         return _build_table_recognition_v2_model(lang=lang, device=ocr_device)
@@ -1217,7 +1268,7 @@ def eval_pred_structured_vs_gt(
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    debug_output = output.with_name("eval_debug.json")
+    debug_output = output.with_name("gt_eval_debug.json")
     if bool(summary_payload.get("review_required", False)):
         debug_output.write_text(json.dumps(debug_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     elif debug_output.exists():
@@ -1232,16 +1283,62 @@ def eval_pred_structured_vs_gt(
 def _save_pred_table_html(
     *,
     pred_raw_path: str,
-    pred_structured_path: str,
     output_path: str,
 ) -> dict[str, object]:
     from src.Parsing.ocr.postprocess.ocr_table_normalizer import save_ocr_table_outputs
 
     return save_ocr_table_outputs(
         pred_raw_path=pred_raw_path,
-        pred_structured_path=pred_structured_path,
         output_path=output_path,
     )
+
+
+def _merge_vl_and_ppocr_raw(
+    *,
+    vl_raw_path: str,
+    ppocr_raw_path: str,
+    output_path: str,
+) -> None:
+    vl_payload = json.loads(Path(vl_raw_path).read_text(encoding="utf-8"))
+    pp_payload = json.loads(Path(ppocr_raw_path).read_text(encoding="utf-8"))
+    vl_lines = vl_payload.get("ocr_lines", []) if isinstance(vl_payload.get("ocr_lines"), list) else []
+    pp_lines = pp_payload.get("ocr_lines", []) if isinstance(pp_payload.get("ocr_lines"), list) else []
+    merged_lines = _dedupe_text_rows([*vl_lines, *pp_lines])
+
+    merged_payload = dict(vl_payload)
+    merged_payload["ocr_lines"] = merged_lines
+    merged_payload["model"] = "paddleocr_vl+pp_ocrv5"
+    merged_payload["latency_ms"] = round(
+        float(vl_payload.get("latency_ms") or 0.0) + float(pp_payload.get("latency_ms") or 0.0),
+        2,
+    )
+    merged_payload["meta"] = {
+        "dual_pass": True,
+        "first_pass_model": vl_payload.get("model", "paddleocr_vl"),
+        "second_pass_model": pp_payload.get("model", "pp_ocrv5:paddle"),
+        "first_pass_path": str(vl_raw_path),
+        "second_pass_path": str(ppocr_raw_path),
+    }
+    _write_ocr_payload(output_path, merged_payload)
+
+
+def _has_table_label_in_vl_raw(vl_raw_path: str) -> bool:
+    payload = json.loads(Path(vl_raw_path).read_text(encoding="utf-8"))
+    raw_output = payload.get("raw_pipeline_output")
+    if not isinstance(raw_output, list):
+        return False
+    for page in raw_output:
+        if not isinstance(page, dict):
+            continue
+        parsing_items = page.get("parsing_res_list")
+        if not isinstance(parsing_items, list):
+            continue
+        for item in parsing_items:
+            if not isinstance(item, str):
+                continue
+            if re.search(r"label:\s*table\b", item, flags=re.IGNORECASE):
+                return True
+    return False
 
 def ocr_run_all(
     image_path: str,
@@ -1256,8 +1353,16 @@ def ocr_run_all(
     ocr_engine: str = "pp_ocrv5",
     ocr_device: str = "gpu:0",
     ocr_batch_size: int = 1,
+    use_doc_orientation_classify: bool = False,
+    use_doc_unwarping: bool = False,
+    use_chart_recognition: bool = False,
+    use_table_orientation_classify: bool = True,
+    use_ocr_results_with_table_cells: bool = True,
+    text_det_limit_side_len: int | None = None,
     ocr_model: object | None = None,
     structure_match_threshold: float = 0.65,
+    table_dual_pass: bool = False,
+    table_second_engine: str = "pp_ocrv5",
 ) -> None:
     normalized_engine = _normalize_ocr_engine(ocr_engine)
     print("[1/4] run-ocr")
@@ -1270,19 +1375,60 @@ def ocr_run_all(
             structure_model=ocr_model,
         )
     elif normalized_engine == "paddleocr_vl":
-        run_paddleocr_vl_ocr(
-            image_path=image_path,
-            output_path=pred_raw_output,
-            device=ocr_device,
-            batch_size=ocr_batch_size,
-            ocr_model=ocr_model,
-        )
+        if table_dual_pass:
+            pred_raw_path = Path(pred_raw_output)
+            pred_raw_vl_output = str(pred_raw_path.with_name("pred_raw_vl.json"))
+            pred_raw_ppocr_output = str(pred_raw_path.with_name("pred_raw_ppocr.json"))
+            run_paddleocr_vl_ocr(
+                image_path=image_path,
+                output_path=pred_raw_vl_output,
+                device=ocr_device,
+                batch_size=ocr_batch_size,
+                use_doc_orientation_classify=use_doc_orientation_classify,
+                use_doc_unwarping=use_doc_unwarping,
+                use_chart_recognition=use_chart_recognition,
+                ocr_model=ocr_model,
+            )
+            if _has_table_label_in_vl_raw(pred_raw_vl_output):
+                second_engine = _normalize_ocr_engine(table_second_engine)
+                run_paddle_ocr(
+                    image_path=image_path,
+                    output_path=pred_raw_ppocr_output,
+                    lang=lang,
+                    device=ocr_device,
+                    backend_engine="transformers" if second_engine == "pp_ocrv5_transformers" else "paddle",
+                    ocr_model=None,
+                )
+                _merge_vl_and_ppocr_raw(
+                    vl_raw_path=pred_raw_vl_output,
+                    ppocr_raw_path=pred_raw_ppocr_output,
+                    output_path=pred_raw_output,
+                )
+            else:
+                vl_payload = json.loads(Path(pred_raw_vl_output).read_text(encoding="utf-8"))
+                _write_ocr_payload(pred_raw_output, vl_payload)
+        else:
+            run_paddleocr_vl_ocr(
+                image_path=image_path,
+                output_path=pred_raw_output,
+                device=ocr_device,
+                batch_size=ocr_batch_size,
+                use_doc_orientation_classify=use_doc_orientation_classify,
+                use_doc_unwarping=use_doc_unwarping,
+                use_chart_recognition=use_chart_recognition,
+                ocr_model=ocr_model,
+            )
     elif normalized_engine == "table_recognition_v2":
         run_table_recognition_v2_ocr(
             image_path=image_path,
             output_path=pred_raw_output,
             lang=lang,
             device=ocr_device,
+            use_doc_orientation_classify=use_doc_orientation_classify,
+            use_doc_unwarping=use_doc_unwarping,
+            use_table_orientation_classify=use_table_orientation_classify,
+            use_ocr_results_with_table_cells=use_ocr_results_with_table_cells,
+            text_det_limit_side_len=text_det_limit_side_len,
             table_model=ocr_model,
         )
     else:
@@ -1305,7 +1451,6 @@ def ocr_run_all(
     print("[3/4] extract-table-html")
     table_outputs = _save_pred_table_html(
         pred_raw_path=pred_raw_output,
-        pred_structured_path=pred_structured_output,
         output_path=pred_table_html_output,
     )
     has_table_html = bool(table_outputs.get("saved", False))
@@ -1461,11 +1606,13 @@ def _resolve_ocr_doc_paths(
     engine_dir_name = _engine_dir_name(normalized_engine)
     image_stem = Path(image_name).stem
     out_dir = Path(output_root) / engine_dir_name / doc_key / image_stem
-    pred_raw = out_dir / "pred_raw.json"
-    pred_structured = out_dir / "pred_structured.json"
-    pred_table_html = out_dir / "pred_table_raw.html"
-    pred_table_rows = out_dir / "pred_table_rows.json"
-    eval_summary_json = out_dir / "eval_summary.json"
+    inference_dir = out_dir / "inference"
+    eval_dir = out_dir / "eval"
+    pred_raw = inference_dir / "pred_raw.json"
+    pred_structured = eval_dir / "gt_pred_structured.json"
+    pred_table_html = inference_dir / "pred_table_raw.html"
+    pred_table_rows = inference_dir / "pred_table_layout.json"
+    eval_summary_json = eval_dir / "gt_eval_summary.json"
     return image_path, gt_path, pred_raw, pred_structured, pred_table_html, pred_table_rows, eval_summary_json
 
 
@@ -1534,7 +1681,15 @@ def ocr_run_image(
     ocr_engine: str,
     ocr_device: str,
     ocr_batch_size: int,
+    use_doc_orientation_classify: bool = False,
+    use_doc_unwarping: bool = False,
+    use_chart_recognition: bool = False,
+    use_table_orientation_classify: bool = True,
+    use_ocr_results_with_table_cells: bool = True,
+    text_det_limit_side_len: int | None = None,
     ocr_model: object | None = None,
+    table_dual_pass: bool = False,
+    table_second_engine: str = "pp_ocrv5",
 ) -> bool:
     (
         image_path,
@@ -1583,7 +1738,15 @@ def ocr_run_image(
         ocr_engine=ocr_engine,
         ocr_device=ocr_device,
         ocr_batch_size=ocr_batch_size,
+        use_doc_orientation_classify=use_doc_orientation_classify,
+        use_doc_unwarping=use_doc_unwarping,
+        use_chart_recognition=use_chart_recognition,
+        use_table_orientation_classify=use_table_orientation_classify,
+        use_ocr_results_with_table_cells=use_ocr_results_with_table_cells,
+        text_det_limit_side_len=text_det_limit_side_len,
         ocr_model=ocr_model,
+        table_dual_pass=table_dual_pass,
+        table_second_engine=table_second_engine,
     )
     if not use_eval:
         print(f"[SKIP_EVAL_SUMMARY] use_eval=false: {final_item_id}")
@@ -1605,12 +1768,23 @@ def ocr_run_batch(
     ocr_engine: str,
     ocr_device: str,
     ocr_batch_size: int,
+    use_doc_orientation_classify: bool = False,
+    use_doc_unwarping: bool = False,
+    use_chart_recognition: bool = False,
+    use_table_orientation_classify: bool = True,
+    use_ocr_results_with_table_cells: bool = True,
+    text_det_limit_side_len: int | None = None,
+    table_dual_pass: bool = False,
+    table_second_engine: str = "pp_ocrv5",
 ) -> None:
     normalized_engine = _normalize_ocr_engine(ocr_engine)
     shared_model = _build_shared_ocr_model(
         ocr_engine=normalized_engine,
         lang=lang,
         ocr_device=ocr_device,
+        use_doc_orientation_classify=use_doc_orientation_classify,
+        use_doc_unwarping=use_doc_unwarping,
+        use_chart_recognition=use_chart_recognition,
     )
 
     image_root_path = Path(images_root)
@@ -1653,7 +1827,15 @@ def ocr_run_batch(
                     ocr_engine=ocr_engine,
                     ocr_device=ocr_device,
                     ocr_batch_size=ocr_batch_size,
+                    use_doc_orientation_classify=use_doc_orientation_classify,
+                    use_doc_unwarping=use_doc_unwarping,
+                    use_chart_recognition=use_chart_recognition,
+                    use_table_orientation_classify=use_table_orientation_classify,
+                    use_ocr_results_with_table_cells=use_ocr_results_with_table_cells,
+                    text_det_limit_side_len=text_det_limit_side_len,
                     ocr_model=shared_model,
+                    table_dual_pass=table_dual_pass,
+                    table_second_engine=table_second_engine,
                 )
                 ok_count += 1
                 if not include_in_eval:
@@ -1664,7 +1846,8 @@ def ocr_run_batch(
                     / _engine_dir_name(normalized_engine)
                     / doc_key
                     / Path(path.name).stem
-                    / "eval_summary.json"
+                    / "eval"
+                    / "gt_eval_summary.json"
                 )
                 if eval_path.exists():
                     result = json.loads(eval_path.read_text(encoding="utf-8"))
@@ -1752,9 +1935,9 @@ def ocr_run_batch(
                                 "structure_micro_recall": structure_micro_recall,
                                 "structure_macro_f1": structure_macro_f1,
                                 "eval_path": str(eval_path),
-                                "pred_structured_path": str(eval_path.parent / "pred_structured.json"),
-                                "pred_table_html_path": str(eval_path.parent / "pred_table_raw.html"),
-                                "pred_table_rows_path": str(eval_path.parent / "pred_table_rows.json"),
+                                "pred_structured_path": str(eval_path.parent / "gt_pred_structured.json"),
+                                "pred_table_html_path": str(eval_path.parent.parent / "inference" / "pred_table_raw.html"),
+                                "pred_table_rows_path": str(eval_path.parent.parent / "inference" / "pred_table_layout.json"),
                             }
                         )
 
@@ -2387,7 +2570,7 @@ def main() -> None:
     )
     ocr_export_parser.add_argument(
         "--ocr-eval-root",
-        default="data/v2/ocr_eval",
+        default="data/v2/ocr_outputs",
         help="Root folder containing OCR eval outputs",
     )
     ocr_export_parser.add_argument(
@@ -2478,10 +2661,10 @@ def main() -> None:
     ocr_image_parser.add_argument("--images-root", default="data/v2/ocr_images", help="Root folder of OCR images")
     ocr_image_parser.add_argument(
         "--gt-root",
-        default="data/v2/ocr_eval/incoming_gt",
+        default="data/v2/ocr_outputs/incoming_gt",
         help="Root folder of GT files (.jsonl preferred, .json supported)",
     )
-    ocr_image_parser.add_argument("--output-root", default="data/v2/ocr_eval", help="Root folder of OCR outputs")
+    ocr_image_parser.add_argument("--output-root", default="data/v2/ocr_outputs", help="Root folder of OCR outputs")
     ocr_image_parser.add_argument("--image-name", default="img_001.jpg", help="Image filename inside doc folder")
     ocr_image_parser.add_argument("--lang", default="korean", help="PaddleOCR language fallback")
     ocr_image_parser.add_argument(
@@ -2506,6 +2689,23 @@ def main() -> None:
         action="store_true",
         help="Run default OCR engine matrix (pp_ocrv5, pp_ocrv5_transformers, pp_structurev3, table_recognition_v2, paddleocr_vl)",
     )
+    ocr_image_parser.add_argument("--use-doc-orientation-classify", action="store_true")
+    ocr_image_parser.add_argument("--use-doc-unwarping", action="store_true")
+    ocr_image_parser.add_argument("--use-chart-recognition", action="store_true")
+    ocr_image_parser.add_argument("--use-table-orientation-classify", action="store_true")
+    ocr_image_parser.add_argument("--use-ocr-results-with-table-cells", action="store_true")
+    ocr_image_parser.add_argument("--text-det-limit-side-len", type=int, default=None)
+    ocr_image_parser.add_argument(
+        "--table-dual-pass",
+        action="store_true",
+        help="For table images, run VL first and then PP-OCRv5 to merge non-table text.",
+    )
+    ocr_image_parser.add_argument(
+        "--table-second-engine",
+        default="pp_ocrv5",
+        choices=["pp_ocrv5", "pp_ocrv5_transformers"],
+        help="Second pass OCR engine used when --table-dual-pass is enabled.",
+    )
 
     ocr_batch_parser = subparsers.add_parser(
         "ocr-run-batch",
@@ -2514,10 +2714,10 @@ def main() -> None:
     ocr_batch_parser.add_argument("--images-root", default="data/v2/ocr_images", help="Root folder of OCR images")
     ocr_batch_parser.add_argument(
         "--gt-root",
-        default="data/v2/ocr_eval/incoming_gt",
+        default="data/v2/ocr_outputs/incoming_gt",
         help="Root folder of GT files (.jsonl preferred, .json supported)",
     )
-    ocr_batch_parser.add_argument("--output-root", default="data/v2/ocr_eval", help="Root folder of OCR outputs")
+    ocr_batch_parser.add_argument("--output-root", default="data/v2/ocr_outputs", help="Root folder of OCR outputs")
     ocr_batch_parser.add_argument(
         "--doc-key",
         default=None,
@@ -2552,6 +2752,23 @@ def main() -> None:
         "--all-engines",
         action="store_true",
         help="Run default OCR engine matrix (pp_ocrv5, pp_ocrv5_transformers, pp_structurev3, table_recognition_v2, paddleocr_vl)",
+    )
+    ocr_batch_parser.add_argument("--use-doc-orientation-classify", action="store_true")
+    ocr_batch_parser.add_argument("--use-doc-unwarping", action="store_true")
+    ocr_batch_parser.add_argument("--use-chart-recognition", action="store_true")
+    ocr_batch_parser.add_argument("--use-table-orientation-classify", action="store_true")
+    ocr_batch_parser.add_argument("--use-ocr-results-with-table-cells", action="store_true")
+    ocr_batch_parser.add_argument("--text-det-limit-side-len", type=int, default=None)
+    ocr_batch_parser.add_argument(
+        "--table-dual-pass",
+        action="store_true",
+        help="For table images, run VL first and then PP-OCRv5 to merge non-table text.",
+    )
+    ocr_batch_parser.add_argument(
+        "--table-second-engine",
+        default="pp_ocrv5",
+        choices=["pp_ocrv5", "pp_ocrv5_transformers"],
+        help="Second pass OCR engine used when --table-dual-pass is enabled.",
     )
 
     pipeline_parser = subparsers.add_parser(
@@ -2779,6 +2996,14 @@ def main() -> None:
                     ocr_engine=engine_name,
                     ocr_device=ocr_cfg.device,
                     ocr_batch_size=ocr_cfg.batch_size,
+                    use_doc_orientation_classify=args.use_doc_orientation_classify,
+                    use_doc_unwarping=args.use_doc_unwarping,
+                    use_chart_recognition=args.use_chart_recognition,
+                    use_table_orientation_classify=args.use_table_orientation_classify,
+                    use_ocr_results_with_table_cells=args.use_ocr_results_with_table_cells,
+                    text_det_limit_side_len=args.text_det_limit_side_len,
+                    table_dual_pass=args.table_dual_pass,
+                    table_second_engine=args.table_second_engine,
                 )
             except Exception as exc:
                 failed_engines.append(engine_name)
@@ -2818,6 +3043,14 @@ def main() -> None:
                     ocr_engine=engine_name,
                     ocr_device=ocr_cfg.device,
                     ocr_batch_size=ocr_cfg.batch_size,
+                    use_doc_orientation_classify=args.use_doc_orientation_classify,
+                    use_doc_unwarping=args.use_doc_unwarping,
+                    use_chart_recognition=args.use_chart_recognition,
+                    use_table_orientation_classify=args.use_table_orientation_classify,
+                    use_ocr_results_with_table_cells=args.use_ocr_results_with_table_cells,
+                    text_det_limit_side_len=args.text_det_limit_side_len,
+                    table_dual_pass=args.table_dual_pass,
+                    table_second_engine=args.table_second_engine,
                 )
             except Exception as exc:
                 failed_engines.append(engine_name)

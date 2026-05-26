@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import re
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable
 
@@ -20,6 +21,17 @@ _PERIOD_LABEL_PATTERN = re.compile(r"(사업기간|추정\s*사업기간|적정\
 
 def _normalize_space(text: str) -> str:
     return " ".join(text.split()).strip()
+
+
+def normalize_text(text: object) -> str:
+    text = str(text).lower()
+    text = text.replace("\n", " ")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def compact_text(text: object) -> str:
+    return re.sub(r"[^0-9a-z가-힣]+", "", normalize_text(text))
 
 
 def _strip_html_tags(raw: str) -> str:
@@ -82,9 +94,55 @@ def _parse_labeled_block(block_text: str) -> tuple[str, str] | None:
     return label, content
 
 
-def _extract_table_footnotes(pred_raw: dict[str, Any], pred_structured: dict[str, Any]) -> list[str]:
+def _extract_table_footnotes(pred_raw: dict[str, Any]) -> list[str]:
     notes: list[str] = []
+    fallback_notes: list[str] = []
+
+    def _append_unique(target: list[str], value: str) -> None:
+        if value and value not in target:
+            target.append(value)
+
+    def _looks_like_meta_line(text: str) -> bool:
+        lowered = text.lower()
+        if not lowered:
+            return True
+        if lowered in {"table", "text", "number", "footnote", "header", "header_image", "footer", "footer_image", "aside_text"}:
+            return True
+        if lowered.startswith(("label:", "bbox:", "content:")):
+            return True
+        if "<table" in lowered or "</table>" in lowered:
+            return True
+        return False
+
+    def _looks_like_table_duplicate_line(compact_line: str) -> bool:
+        if compact_line in table_compact_tokens:
+            return True
+        if len(compact_line) < 8:
+            return False
+        for token in table_compact_tokens:
+            if len(token) < 8:
+                continue
+            len_ratio = min(len(compact_line), len(token)) / max(len(compact_line), len(token))
+            if len_ratio < 0.8:
+                continue
+            if compact_line in token or token in compact_line:
+                return True
+            if SequenceMatcher(None, compact_line, token).ratio() >= 0.9:
+                return True
+        return False
+
     raw_output = pred_raw.get("raw_pipeline_output")
+    table_compact_tokens: set[str] = set()
+    table_html_candidates = _extract_table_html_from_obj(raw_output)
+    for table_html in table_html_candidates:
+        layout, _ = _parse_table_layout(table_html)
+        for row_cells in layout:
+            for cell in row_cells:
+                value = _normalize_space(str(cell.get("text", "")))
+                compact_value = compact_text(value)
+                if compact_value:
+                    table_compact_tokens.add(compact_value)
+
     if isinstance(raw_output, list):
         for page in raw_output:
             if not isinstance(page, dict):
@@ -99,28 +157,43 @@ def _extract_table_footnotes(pred_raw: dict[str, Any], pred_structured: dict[str
                 if not parsed:
                     continue
                 label, content = parsed
-                if "footnote" not in label:
-                    continue
                 cleaned = _strip_html_tags(content)
-                if cleaned and cleaned not in notes:
-                    notes.append(cleaned)
+                if not cleaned:
+                    continue
+                if "footnote" in label:
+                    _append_unique(notes, cleaned)
+                    continue
+                # Some pipelines emit below-table lines as `text` rather than `footnote`.
+                # Keep them as a fallback note set for human review.
+                if label in {"text", "footer", "number"}:
+                    _append_unique(fallback_notes, cleaned)
 
-    if notes:
-        return notes
+    ocr_lines = pred_raw.get("ocr_lines")
+    if isinstance(ocr_lines, list):
+        for row in ocr_lines:
+            if not isinstance(row, dict):
+                continue
+            # In dual-pass mode, pp_ocrv5 lines carry confidence scores while VL generic
+            # metadata lines are score=None. Restrict fallback notes to recognized OCR lines.
+            if row.get("score") is None:
+                continue
+            line = _normalize_space(str(row.get("text", "")))
+            if not line:
+                continue
+            if _looks_like_meta_line(line):
+                continue
+            compact_line = compact_text(line)
+            if not compact_line:
+                continue
+            # Skip lines that are already represented by table cell content.
+            if _looks_like_table_duplicate_line(compact_line):
+                continue
+            _append_unique(fallback_notes, line)
 
-    pred_text = str(pred_structured.get("pred_text", ""))
-    for match in re.finditer(
-        r"label:\s*([a-zA-Z0-9_\- ]+)\s+bbox:.*?content:\s*(.*?)(?=\s+label:|\s+number\s+footnote|$)",
-        pred_text,
-        flags=re.IGNORECASE | re.DOTALL,
-    ):
-        label = _normalize_space(match.group(1)).lower()
-        if "footnote" not in label:
-            continue
-        cleaned = _strip_html_tags(match.group(2))
-        if cleaned and cleaned not in notes:
-            notes.append(cleaned)
-    return notes
+    merged_notes: list[str] = []
+    for value in [*notes, *fallback_notes]:
+        _append_unique(merged_notes, value)
+    return merged_notes
 
 
 def _parse_span(attrs: str, name: str, default: int = 1) -> int:
@@ -638,7 +711,8 @@ def _build_table_sections_payload(table_rows: list[dict[str, Any]]) -> list[dict
 
 def _build_table_rows_payload(
     *,
-    pred_structured: dict[str, Any],
+    record_id: str | None,
+    record_type: str | None,
     tables: list[str],
     table_footnotes: list[str],
 ) -> dict[str, Any]:
@@ -649,85 +723,28 @@ def _build_table_rows_payload(
 
     return {
         "schema_version": "ocr_table_rows.v1",
-        "id": pred_structured.get("id"),
-        "type": pred_structured.get("type"),
+        "id": record_id,
+        "type": record_type,
         "table_rows": table_rows,
         "table_sections": table_sections,
         "table_footnotes": table_footnotes,
     }
 
 
-def _build_parsed_rows_preview_sections(table_rows: list[dict[str, Any]]) -> str:
-    by_table: dict[int, list[dict[str, Any]]] = {}
-    for row in table_rows:
-        if not isinstance(row, dict):
-            continue
-        table_index = int(row.get("table_index", 1))
-        by_table.setdefault(table_index, []).append(row)
-
-    sections: list[str] = []
-    for table_index in sorted(by_table.keys()):
-        rows = by_table[table_index]
-        headers: list[str] = []
-        for row in rows:
-            if "_section" in row:
-                continue
-            for key in _iter_data_headers(row):
-                if key not in headers:
-                    headers.append(key)
-
-        if not headers:
-            continue
-
-        header_html = "".join(f"<th>{html.escape(col)}</th>" for col in headers)
-        body_rows: list[str] = []
-        for row in rows:
-            if "_section" in row:
-                section = html.escape(_normalize_space(str(row.get("_section", ""))))
-                if section:
-                    body_rows.append(f'<tr class="section-row"><td colspan="{len(headers)}">{section}</td></tr>')
-                continue
-
-            cells: list[str] = []
-            for col in headers:
-                value = html.escape(_normalize_space(str(row.get(col, ""))))
-                cells.append(f"<td>{value}</td>")
-            body_rows.append(f"<tr>{''.join(cells)}</tr>")
-
-        if not body_rows:
-            continue
-
-        sections.append(
-            f"""
-<section class="table-block parsed-block">
-  <h2>Parsed Rows (Table {table_index})</h2>
-  <table class="parsed-table">
-    <thead><tr>{header_html}</tr></thead>
-    <tbody>
-      {''.join(body_rows)}
-    </tbody>
-  </table>
-</section>
-"""
-        )
-    return "".join(sections)
-
-
-def build_table_preview_html(tables: list[str], table_footnotes: list[str], table_rows: list[dict[str, Any]]) -> str:
+def build_table_preview_html(
+    tables: list[str],
+    table_footnotes: list[str],
+) -> str:
     sections: list[str] = []
     for idx, table_html in enumerate(tables, start=1):
         sections.append(f'<section class="table-block"><h2>Table {idx}</h2>{table_html}</section>')
-
-    parsed_sections = _build_parsed_rows_preview_sections(table_rows)
-    if parsed_sections:
-        sections.append(parsed_sections)
 
     if table_footnotes:
         note_items = "".join(f"<li>{html.escape(note)}</li>" for note in table_footnotes)
         sections.append(
             """
 <section class="table-block">
-  <h2>Footnotes</h2>
+  <h2>Notes (Outside Table)</h2>
   <ul class="footnote-list">
 %s
   </ul>
@@ -789,17 +806,6 @@ def build_table_preview_html(tables: list[str], table_footnotes: list[str], tabl
     .footnote-list li {{
       margin: 0 0 6px 0;
     }}
-    .parsed-block {{
-      border-color: #93c5fd;
-      background: #eff6ff;
-    }}
-    .parsed-table th {{
-      background: #dbeafe;
-    }}
-    .section-row td {{
-      background: #e5e7eb;
-      font-weight: 600;
-    }}
   </style>
 </head>
 <body>
@@ -812,22 +818,18 @@ def build_table_preview_html(tables: list[str], table_footnotes: list[str], tabl
 def save_ocr_table_outputs(
     *,
     pred_raw_path: str,
-    pred_structured_path: str,
     output_path: str,
 ) -> dict[str, Any]:
     pred_raw = json.loads(Path(pred_raw_path).read_text(encoding="utf-8"))
-    pred_structured = json.loads(Path(pred_structured_path).read_text(encoding="utf-8"))
 
     candidates: list[str] = []
-    pred_text = str(pred_structured.get("pred_text", ""))
-    candidates.extend(_extract_table_html_from_text(pred_text))
     candidates.extend(_extract_table_html_from_obj(pred_raw.get("raw_pipeline_output")))
     candidates.extend(_extract_table_html_from_obj(pred_raw.get("ocr_lines")))
     unique_tables = _dedupe_table_html(candidates)
 
     table_output_path = Path(output_path)
-    preview_output_path = table_output_path.with_name("pred_table_rows_human_review.html")
-    table_rows_output_path = table_output_path.with_name(f"{table_output_path.stem}_rows.json")
+    preview_output_path = table_output_path.with_name("pred_table_layout.html")
+    table_rows_output_path = table_output_path.with_name("pred_table_layout.json")
 
     if not unique_tables:
         _remove_if_exists(table_output_path)
@@ -841,9 +843,14 @@ def save_ocr_table_outputs(
     table_output_path.parent.mkdir(parents=True, exist_ok=True)
     table_output_path.write_text("\n\n".join(unique_tables), encoding="utf-8")
 
-    table_footnotes = _extract_table_footnotes(pred_raw, pred_structured)
+    image_path = _normalize_space(str(pred_raw.get("image_path", "")))
+    record_id = Path(image_path).stem if image_path else None
+    record_type = _normalize_space(str(pred_raw.get("image_type", ""))) or None
+
+    table_footnotes = _extract_table_footnotes(pred_raw)
     table_rows_payload = _build_table_rows_payload(
-        pred_structured=pred_structured,
+        record_id=record_id,
+        record_type=record_type,
         tables=unique_tables,
         table_footnotes=table_footnotes,
     )
@@ -851,7 +858,6 @@ def save_ocr_table_outputs(
         build_table_preview_html(
             unique_tables,
             table_footnotes,
-            table_rows_payload.get("table_rows", []),
         ),
         encoding="utf-8",
     )

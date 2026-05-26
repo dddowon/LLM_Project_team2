@@ -11,7 +11,6 @@ attrs==26.1.0
 bce-python-sdk==0.9.71
 bcrypt==5.0.0
 beautifulsoup4==4.14.3
--e git+ssh://git@github-ahnella2026/dddowon/LLM_Project_team2.git@759bf9b5bc8bee984cb6235270ae955997efb5bb#egg=bidmate_rag
 build==1.5.0
 cachetools==7.1.3
 certifi==2026.4.22
