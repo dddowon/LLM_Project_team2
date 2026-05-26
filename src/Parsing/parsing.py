@@ -449,7 +449,7 @@ def table_payload(
         "cols": table.cols,
         "cell_count": len(table.cells),
         "shape": table_shape(markdown_grid or grid),
-        "markdown": grid_to_markdown(markdown_grid or grid),
+        "grid": markdown_grid or grid,
     }
 
     if table_type == "toc_table":
@@ -481,8 +481,11 @@ def table_payload(
 
 
 def table_payload_has_content(payload: dict[str, Any]) -> bool:
-    if payload.get("markdown"):
-        return True
+    grid = payload.get("grid")
+    if isinstance(grid, list):
+        for row in grid:
+            if isinstance(row, list) and any(normalize_text(value) for value in row):
+                return True
     for key in ("rows_data", "row_groups", "summary_lines", "items"):
         values = payload.get(key)
         if isinstance(values, list) and values:

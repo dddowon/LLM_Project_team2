@@ -121,3 +121,4 @@ __pycache__/
 .mypy_cache/
 .venv/
 venv/
+.DS_Store

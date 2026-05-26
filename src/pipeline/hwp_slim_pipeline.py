@@ -27,13 +27,13 @@ def section_path_text(path_items: list[Any]) -> str:
 
 
 def default_tables_output_path(output_path: Path) -> Path:
-    return output_path.with_name(f"{output_path.stem}_tables.jsonl")
+    return output_path.with_name(f"{output_path.stem}_tables_raw.jsonl")
 
 
-def table_markdown_row(record: dict[str, Any], index: int) -> dict[str, Any]:
+def table_raw_row(record: dict[str, Any], index: int) -> dict[str, Any]:
     table = record.get("table") or {}
     section_path = record.get("section_path") or []
-    return {
+    row = {
         "table_doc_id": f"table_doc_{index:08d}",
         "file_name": record.get("file_name", ""),
         "table_id": record.get("table_id", ""),
@@ -45,17 +45,22 @@ def table_markdown_row(record: dict[str, Any], index: int) -> dict[str, Any]:
         "cols": table.get("cols"),
         "cell_count": table.get("cell_count"),
         "table_shape": table.get("shape", ""),
-        "table_markdown": table.get("markdown", ""),
+        "table_grid": table.get("grid", []),
     }
+    for key in ("rows_data", "row_groups", "summary_lines", "items", "nested_table_count"):
+        value = table.get(key)
+        if value not in ("", None, []):
+            row[key] = value
+    return row
 
 
-def build_table_markdown_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def build_table_raw_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for record in records:
         if record.get("content_type") != "table":
             continue
-        row = table_markdown_row(record, len(rows) + 1)
-        if row["table_markdown"]:
+        row = table_raw_row(record, len(rows) + 1)
+        if row["table_grid"] or any(key in row for key in ("rows_data", "row_groups", "summary_lines", "items")):
             rows.append(row)
     return rows
 
@@ -180,7 +185,7 @@ def chunk_hwp_dir_to_slim_jsonl(
     )
     write_jsonl(output_path, chunks)
 
-    table_rows = build_table_markdown_rows(records)
+    table_rows = build_table_raw_rows(records)
     if tables_output_path is None:
         tables_output_path = default_tables_output_path(output_path)
     write_jsonl(tables_output_path, table_rows)
@@ -197,7 +202,7 @@ def chunk_hwp_dir_to_slim_jsonl(
         "prechunk_records": len(records),
         "chunks": len(chunks),
         "table_chunks": table_chunks,
-        "table_markdown_rows": len(table_rows),
+        "table_raw_rows": len(table_rows),
         "text_chunks": len(chunks) - table_chunks,
         "output": str(output_path),
         "tables_output": str(tables_output_path),
