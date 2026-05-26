@@ -554,6 +554,36 @@ def convert_embedding_input(input_path: str, output_path: str, doc_id: str | Non
     print(f"Converted {count} rows -> {output_path}")
 
 
+def export_ocr_rag_handoff(
+    *,
+    ocr_eval_root: str,
+    output_manifest: str,
+    output_chunks: str,
+    engine: str | None,
+    doc_key: str | None,
+    include_review_required: bool,
+    include_html_chunk: bool,
+    html_chunk_max_chars: int,
+) -> None:
+    from src.pipeline.ocr_rag_bridge import export_ocr_eval_to_rag_inputs
+
+    manifest_count, chunk_count = export_ocr_eval_to_rag_inputs(
+        ocr_eval_root=Path(ocr_eval_root),
+        output_manifest=Path(output_manifest),
+        output_chunks=Path(output_chunks),
+        engine=engine,
+        doc_key=doc_key,
+        include_review_required=include_review_required,
+        include_html_chunk=include_html_chunk,
+        html_chunk_max_chars=html_chunk_max_chars,
+    )
+    print("ocr_export_rag_done")
+    print(f"manifest_rows: {manifest_count}")
+    print(f"chunk_rows: {chunk_count}")
+    print(f"manifest_output: {output_manifest}")
+    print(f"chunks_output: {output_chunks}")
+
+
 def extract_ocr_images(input_dir: str, output_dir: str, limit: int = 0) -> None:
     from pathlib import Path
 
@@ -999,6 +1029,139 @@ def build_pred_structured(
     print(f"pred_text: {structured['pred_text']}")
 
 
+def _compute_required_field_gaps(
+    required_fields: list[object],
+    field_metrics: list[object],
+) -> tuple[list[str], list[str]]:
+    required = [str(field).strip() for field in required_fields if str(field).strip()]
+    per_field: dict[str, dict] = {}
+    for metric in field_metrics:
+        if not isinstance(metric, dict):
+            continue
+        field_path = str(metric.get("field_path", "")).strip()
+        if not field_path:
+            continue
+        per_field[field_path] = metric
+
+    if not required:
+        required = [
+            field_name
+            for field_name, metric in per_field.items()
+            if int(metric.get("gt_total", 0)) > 0
+        ]
+
+    missing_required: list[str] = []
+    for field_name in required:
+        metric = per_field.get(field_name)
+        if not metric:
+            missing_required.append(field_name)
+            continue
+        if int(metric.get("matched", 0)) <= 0:
+            missing_required.append(field_name)
+    return required, missing_required
+
+
+def _build_eval_summary_payload(
+    *,
+    eval_payload: dict[str, object],
+    gt_path: str,
+    pred_structured_path: str,
+) -> dict[str, object]:
+    text = eval_payload.get("text", {}) if isinstance(eval_payload.get("text"), dict) else {}
+    structure = eval_payload.get("structure", {}) if isinstance(eval_payload.get("structure"), dict) else {}
+    aggregate = structure.get("aggregate", {}) if isinstance(structure.get("aggregate"), dict) else {}
+    field_metrics = structure.get("field_metrics", []) if isinstance(structure.get("field_metrics"), list) else []
+
+    required_fields, missing_required_fields = _compute_required_field_gaps(
+        required_fields=eval_payload.get("required_fields", []) if isinstance(eval_payload.get("required_fields"), list) else [],
+        field_metrics=field_metrics,
+    )
+
+    table_html = eval_payload.get("table_html", {}) if isinstance(eval_payload.get("table_html"), dict) else {}
+    table_rows = eval_payload.get("table_rows", {}) if isinstance(eval_payload.get("table_rows"), dict) else {}
+    table_html_exists = bool(table_html.get("exists", False))
+    table_rows_exists = bool(table_rows.get("exists", False))
+
+    review_reasons: list[str] = []
+    if str(eval_payload.get("status", "")).lower() != "success":
+        review_reasons.append("status_not_success")
+
+    structure_micro_recall = eval_payload.get("structure_micro_recall")
+    if structure_micro_recall is not None and float(structure_micro_recall) < 0.8:
+        review_reasons.append("structure_micro_recall<0.8")
+    if missing_required_fields:
+        review_reasons.append("required_field_missing")
+    if str(eval_payload.get("type", "")).lower() == "table" and not table_html_exists:
+        review_reasons.append("table_html_missing")
+    if str(eval_payload.get("type", "")).lower() == "table" and not table_rows_exists:
+        review_reasons.append("table_rows_missing")
+
+    return {
+        "schema_version": "ocr_eval_summary.v1",
+        "id": eval_payload.get("id"),
+        "type": eval_payload.get("type"),
+        "status": eval_payload.get("status"),
+        "latency_ms": eval_payload.get("latency_ms"),
+        "text": {
+            "exact_match": text.get("exact_match"),
+            "cer": text.get("cer"),
+            "wer": text.get("wer"),
+            "char_similarity_pct": text.get("char_similarity_pct"),
+        },
+        "structure": {
+            "mode": structure.get("mode", "field_path_value_match"),
+            "threshold": structure.get("threshold"),
+            "aggregate": {
+                "field_count": aggregate.get("field_count"),
+                "matched": aggregate.get("matched"),
+                "gt_total": aggregate.get("gt_total"),
+                "pred_total": aggregate.get("pred_total"),
+                "micro_precision": aggregate.get("micro_precision"),
+                "micro_recall": aggregate.get("micro_recall"),
+                "micro_f1": aggregate.get("micro_f1"),
+                "macro_f1": aggregate.get("macro_f1"),
+            },
+        },
+        "structure_micro_recall": eval_payload.get("structure_micro_recall"),
+        "structure_macro_f1": eval_payload.get("structure_macro_f1"),
+        "required_fields": required_fields,
+        "missing_required_fields": missing_required_fields,
+        "review_required": bool(review_reasons),
+        "review_reasons": review_reasons,
+        "table_html": table_html,
+        "table_rows": table_rows,
+        "refs": {
+            "gt_path": gt_path,
+            "pred_structured_path": pred_structured_path,
+        },
+    }
+
+
+def _build_eval_debug_payload(
+    *,
+    eval_payload: dict[str, object],
+    summary_payload: dict[str, object],
+) -> dict[str, object]:
+    structure = eval_payload.get("structure", {}) if isinstance(eval_payload.get("structure"), dict) else {}
+    field_metrics = structure.get("field_metrics", []) if isinstance(structure.get("field_metrics"), list) else []
+    include_structures = bool(summary_payload.get("missing_required_fields"))
+    debug_payload: dict[str, object] = {
+        "schema_version": "ocr_eval_debug.v1",
+        "id": eval_payload.get("id"),
+        "type": eval_payload.get("type"),
+        "status": eval_payload.get("status"),
+        "review_required": summary_payload.get("review_required", False),
+        "review_reasons": summary_payload.get("review_reasons", []),
+        "missing_required_fields": summary_payload.get("missing_required_fields", []),
+        "field_metrics": field_metrics,
+        "refs": summary_payload.get("refs", {}),
+    }
+    if include_structures:
+        debug_payload["gt_structure"] = structure.get("gt_structure", {})
+        debug_payload["pred_structure"] = structure.get("pred_structure", {})
+    return debug_payload
+
+
 def eval_pred_structured_vs_gt(
     gt_path: str,
     pred_structured_path: str,
@@ -1006,8 +1169,7 @@ def eval_pred_structured_vs_gt(
     output_path: str,
     structure_match_threshold: float = 0.65,
     table_html_path: str | None = None,
-    table_structure_warning: list[str] | None = None,
-    table_structure_diagnostics_path: str | None = None,
+    table_rows_path: str | None = None,
 ) -> None:
     from pathlib import Path
 
@@ -1032,19 +1194,39 @@ def eval_pred_structured_vs_gt(
             "exists": table_exists,
             "byte_size": table_path.stat().st_size if table_exists else 0,
         }
-    if table_structure_warning:
-        eval_payload["table_structure_warning"] = list(table_structure_warning)
-    if table_structure_diagnostics_path:
-        eval_payload["table_structure_diagnostics"] = {
-            "path": str(table_structure_diagnostics_path),
-            "exists": Path(table_structure_diagnostics_path).exists(),
+    if table_rows_path:
+        rows_path = Path(table_rows_path)
+        rows_exists = rows_path.exists() and rows_path.stat().st_size > 0
+        eval_payload["table_rows"] = {
+            "path": str(rows_path),
+            "exists": rows_exists,
+            "byte_size": rows_path.stat().st_size if rows_exists else 0,
         }
+
+    summary_payload = _build_eval_summary_payload(
+        eval_payload=eval_payload,
+        gt_path=gt_path,
+        pred_structured_path=pred_structured_path,
+    )
+    debug_payload = _build_eval_debug_payload(
+        eval_payload=eval_payload,
+        summary_payload=summary_payload,
+    )
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(eval_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps(eval_payload, ensure_ascii=False, indent=2))
-    print(f"saved: {output}")
+    output.write_text(json.dumps(summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    debug_output = output.with_name("eval_debug.json")
+    if bool(summary_payload.get("review_required", False)):
+        debug_output.write_text(json.dumps(debug_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    elif debug_output.exists():
+        debug_output.unlink()
+
+    print(json.dumps(summary_payload, ensure_ascii=False, indent=2))
+    print(f"saved_summary: {output}")
+    if bool(summary_payload.get("review_required", False)):
+        print(f"saved_debug: {debug_output}")
 
 
 def _save_pred_table_html(
@@ -1052,8 +1234,6 @@ def _save_pred_table_html(
     pred_raw_path: str,
     pred_structured_path: str,
     output_path: str,
-    table_normalization_enabled: bool,
-    table_normalization_rules_path: str | None,
 ) -> dict[str, object]:
     from src.Parsing.ocr.postprocess.ocr_table_normalizer import save_ocr_table_outputs
 
@@ -1061,8 +1241,6 @@ def _save_pred_table_html(
         pred_raw_path=pred_raw_path,
         pred_structured_path=pred_structured_path,
         output_path=output_path,
-        table_normalization_enabled=table_normalization_enabled,
-        table_normalization_rules_path=table_normalization_rules_path,
     )
 
 def ocr_run_all(
@@ -1080,8 +1258,6 @@ def ocr_run_all(
     ocr_batch_size: int = 1,
     ocr_model: object | None = None,
     structure_match_threshold: float = 0.65,
-    table_normalization_enabled: bool = True,
-    table_normalization_rules_path: str | None = None,
 ) -> None:
     normalized_engine = _normalize_ocr_engine(ocr_engine)
     print("[1/4] run-ocr")
@@ -1131,13 +1307,11 @@ def ocr_run_all(
         pred_raw_path=pred_raw_output,
         pred_structured_path=pred_structured_output,
         output_path=pred_table_html_output,
-        table_normalization_enabled=table_normalization_enabled,
-        table_normalization_rules_path=table_normalization_rules_path,
     )
     has_table_html = bool(table_outputs.get("saved", False))
     print(f"table_html_saved: {has_table_html}")
-    if table_outputs.get("table_structure_warning"):
-        print(f"table_structure_warning: {table_outputs.get('table_structure_warning')}")
+    if table_outputs.get("pred_table_rows_path"):
+        print(f"pred_table_rows_path: {table_outputs.get('pred_table_rows_path')}")
 
     print("[4/4] eval-pred-structured")
     eval_pred_structured_vs_gt(
@@ -1147,8 +1321,7 @@ def ocr_run_all(
         output_path=eval_output,
         structure_match_threshold=structure_match_threshold,
         table_html_path=pred_table_html_output,
-        table_structure_warning=table_outputs.get("table_structure_warning"),
-        table_structure_diagnostics_path=table_outputs.get("table_structure_diagnostics_path"),
+        table_rows_path=table_outputs.get("pred_table_rows_path"),
     )
     print("ocr_run_all_done")
 
@@ -1281,7 +1454,7 @@ def _resolve_ocr_doc_paths(
     output_root: str,
     image_name: str,
     ocr_engine: str,
-) -> tuple[Path, Path, Path, Path, Path, Path]:
+) -> tuple[Path, Path, Path, Path, Path, Path, Path]:
     normalized_engine = _normalize_ocr_engine(ocr_engine)
     image_path = Path(images_root) / doc_key / image_name
     gt_path = _resolve_gt_path(gt_root, doc_key)
@@ -1290,9 +1463,10 @@ def _resolve_ocr_doc_paths(
     out_dir = Path(output_root) / engine_dir_name / doc_key / image_stem
     pred_raw = out_dir / "pred_raw.json"
     pred_structured = out_dir / "pred_structured.json"
-    pred_table_html = out_dir / "pred_table.html"
-    eval_json = out_dir / "eval.json"
-    return image_path, gt_path, pred_raw, pred_structured, pred_table_html, eval_json
+    pred_table_html = out_dir / "pred_table_raw.html"
+    pred_table_rows = out_dir / "pred_table_rows.json"
+    eval_summary_json = out_dir / "eval_summary.json"
+    return image_path, gt_path, pred_raw, pred_structured, pred_table_html, pred_table_rows, eval_summary_json
 
 
 def _engine_dir_name(ocr_engine: str) -> str:
@@ -1360,11 +1534,17 @@ def ocr_run_image(
     ocr_engine: str,
     ocr_device: str,
     ocr_batch_size: int,
-    table_normalization_enabled: bool,
-    table_normalization_rules_path: str | None,
     ocr_model: object | None = None,
 ) -> bool:
-    image_path, gt_path, pred_raw, pred_structured, pred_table_html, eval_json = _resolve_ocr_doc_paths(
+    (
+        image_path,
+        gt_path,
+        pred_raw,
+        pred_structured,
+        pred_table_html,
+        _pred_table_rows,
+        eval_summary_json,
+    ) = _resolve_ocr_doc_paths(
         doc_key=doc_key,
         images_root=images_root,
         gt_root=gt_root,
@@ -1396,7 +1576,7 @@ def ocr_run_image(
         pred_raw_output=str(pred_raw),
         pred_structured_output=str(pred_structured),
         pred_table_html_output=str(pred_table_html),
-        eval_output=str(eval_json),
+        eval_output=str(eval_summary_json),
         lang=lang,
         score_threshold=score_threshold,
         structure_match_threshold=structure_match_threshold,
@@ -1404,8 +1584,6 @@ def ocr_run_image(
         ocr_device=ocr_device,
         ocr_batch_size=ocr_batch_size,
         ocr_model=ocr_model,
-        table_normalization_enabled=table_normalization_enabled,
-        table_normalization_rules_path=table_normalization_rules_path,
     )
     if not use_eval:
         print(f"[SKIP_EVAL_SUMMARY] use_eval=false: {final_item_id}")
@@ -1427,8 +1605,6 @@ def ocr_run_batch(
     ocr_engine: str,
     ocr_device: str,
     ocr_batch_size: int,
-    table_normalization_enabled: bool,
-    table_normalization_rules_path: str | None,
 ) -> None:
     normalized_engine = _normalize_ocr_engine(ocr_engine)
     shared_model = _build_shared_ocr_model(
@@ -1477,8 +1653,6 @@ def ocr_run_batch(
                     ocr_engine=ocr_engine,
                     ocr_device=ocr_device,
                     ocr_batch_size=ocr_batch_size,
-                    table_normalization_enabled=table_normalization_enabled,
-                    table_normalization_rules_path=table_normalization_rules_path,
                     ocr_model=shared_model,
                 )
                 ok_count += 1
@@ -1486,7 +1660,11 @@ def ocr_run_batch(
                     continue
 
                 eval_path = (
-                    Path(output_root) / _engine_dir_name(normalized_engine) / doc_key / Path(path.name).stem / "eval.json"
+                    Path(output_root)
+                    / _engine_dir_name(normalized_engine)
+                    / doc_key
+                    / Path(path.name).stem
+                    / "eval_summary.json"
                 )
                 if eval_path.exists():
                     result = json.loads(eval_path.read_text(encoding="utf-8"))
@@ -1504,6 +1682,8 @@ def ocr_run_batch(
                     total_fields = structure_aggregate.get("gt_total")
                     table_html_info = result.get("table_html", {}) if isinstance(result, dict) else {}
                     table_html_exists = bool(table_html_info.get("exists", False))
+                    table_rows_info = result.get("table_rows", {}) if isinstance(result, dict) else {}
+                    table_rows_exists = bool(table_rows_info.get("exists", False))
 
                     required_fields = result.get("required_fields", [])
                     if not isinstance(required_fields, list):
@@ -1513,31 +1693,33 @@ def ocr_run_batch(
                         for metric in field_metrics
                         if isinstance(metric, dict)
                     }
-                    if not required_fields:
-                        required_fields = [
-                            field_name
-                            for field_name, metric in per_field.items()
-                            if field_name and int(metric.get("gt_total", 0)) > 0
-                        ]
 
-                    missing_required_fields: list[str] = []
-                    for field_name in required_fields:
-                        metric = per_field.get(str(field_name))
-                        if not metric:
-                            missing_required_fields.append(str(field_name))
-                            continue
-                        if int(metric.get("matched", 0)) <= 0:
-                            missing_required_fields.append(str(field_name))
+                    missing_required_fields = result.get("missing_required_fields", [])
+                    if not isinstance(missing_required_fields, list):
+                        missing_required_fields = []
+                    if not missing_required_fields and required_fields and per_field:
+                        for field_name in required_fields:
+                            metric = per_field.get(str(field_name))
+                            if not metric:
+                                missing_required_fields.append(str(field_name))
+                                continue
+                            if int(metric.get("matched", 0)) <= 0:
+                                missing_required_fields.append(str(field_name))
 
-                    review_reasons: list[str] = []
-                    if structure_micro_recall is not None and float(structure_micro_recall) < 0.8:
-                        review_reasons.append("structure_micro_recall<0.8")
-                    if missing_required_fields:
-                        review_reasons.append("required_field_missing")
-                    if str(result.get("type", "")).lower() == "table" and not table_html_exists:
-                        review_reasons.append("table_html_missing")
+                    review_reasons = result.get("review_reasons", [])
+                    if not isinstance(review_reasons, list):
+                        review_reasons = []
+                    if not review_reasons:
+                        if structure_micro_recall is not None and float(structure_micro_recall) < 0.8:
+                            review_reasons.append("structure_micro_recall<0.8")
+                        if missing_required_fields:
+                            review_reasons.append("required_field_missing")
+                        if str(result.get("type", "")).lower() == "table" and not table_html_exists:
+                            review_reasons.append("table_html_missing")
+                        if str(result.get("type", "")).lower() == "table" and not table_rows_exists:
+                            review_reasons.append("table_rows_missing")
 
-                    review_required = bool(review_reasons)
+                    review_required = bool(result.get("review_required", bool(review_reasons)))
                     row = {
                         "id": result.get("id"),
                         "doc_key": doc_key,
@@ -1551,6 +1733,7 @@ def ocr_run_batch(
                         "matched_fields": matched_fields,
                         "total_fields": total_fields,
                         "table_html_exists": table_html_exists,
+                        "table_rows_exists": table_rows_exists,
                         "review_required": review_required,
                         "review_reasons": "|".join(review_reasons),
                         "missing_required_fields": "|".join(missing_required_fields),
@@ -1570,7 +1753,8 @@ def ocr_run_batch(
                                 "structure_macro_f1": structure_macro_f1,
                                 "eval_path": str(eval_path),
                                 "pred_structured_path": str(eval_path.parent / "pred_structured.json"),
-                                "pred_table_html_path": str(eval_path.parent / "pred_table.html"),
+                                "pred_table_html_path": str(eval_path.parent / "pred_table_raw.html"),
+                                "pred_table_rows_path": str(eval_path.parent / "pred_table_rows.json"),
                             }
                         )
 
@@ -1593,6 +1777,7 @@ def ocr_run_batch(
                     if row.get("structure_macro_f1") is not None:
                         print(f"구조 macro f1: {round(float(row['structure_macro_f1']), 4)}")
                     print(f"table_html_exists: {row.get('table_html_exists')}")
+                    print(f"table_rows_exists: {row.get('table_rows_exists')}")
                     if row.get("review_required"):
                         print(
                             "review_required: True "
@@ -1646,6 +1831,7 @@ def ocr_run_batch(
                     "matched_fields",
                     "total_fields",
                     "table_html_exists",
+                    "table_rows_exists",
                     "review_required",
                     "review_reasons",
                     "missing_required_fields",
@@ -1698,6 +1884,7 @@ def ocr_run_batch(
             if row.get("structure_macro_f1") is not None:
                 lines.append(f"구조 macro f1: {round(float(row['structure_macro_f1']), 4)}")
             lines.append(f"table_html_exists: {row.get('table_html_exists')}")
+            lines.append(f"table_rows_exists: {row.get('table_rows_exists')}")
             if row.get("review_required"):
                 lines.append(
                     "review_required: True "
@@ -2194,6 +2381,52 @@ def main() -> None:
     convert_parser.add_argument("--output", required=True, help="Embedding input JSONL output path")
     convert_parser.add_argument("--doc-id", default=None, help="Optional doc id override")
 
+    ocr_export_parser = subparsers.add_parser(
+        "ocr-export-rag",
+        help="Export OCR eval outputs into RAG handoff manifest/chunk JSONL",
+    )
+    ocr_export_parser.add_argument(
+        "--ocr-eval-root",
+        default="data/v2/ocr_eval",
+        help="Root folder containing OCR eval outputs",
+    )
+    ocr_export_parser.add_argument(
+        "--output-manifest",
+        default="data/v2/ocr_rag/ocr_handoff_manifest.jsonl",
+        help="Output JSONL manifest for OCR->RAG handoff",
+    )
+    ocr_export_parser.add_argument(
+        "--output-chunks",
+        default="data/v2/ocr_rag/ocr_handoff_chunks.jsonl",
+        help="Output chunk JSONL usable by embed-jsonl/build-chroma",
+    )
+    ocr_export_parser.add_argument(
+        "--engine",
+        default=None,
+        help="Optional OCR engine folder filter (e.g. paddleocr_vl)",
+    )
+    ocr_export_parser.add_argument(
+        "--doc-key",
+        default=None,
+        help="Optional document key folder filter",
+    )
+    ocr_export_parser.add_argument(
+        "--exclude-review-required",
+        action="store_true",
+        help="Exclude review_required=true items from exported handoff",
+    )
+    ocr_export_parser.add_argument(
+        "--include-html-chunk",
+        action="store_true",
+        help="Include table HTML snippet chunks in output-chunks",
+    )
+    ocr_export_parser.add_argument(
+        "--html-chunk-max-chars",
+        type=int,
+        default=1200,
+        help="Maximum chars for HTML snippet chunk when --include-html-chunk is enabled",
+    )
+
     ocr_parser = subparsers.add_parser(
         "extract-ocr-images",
         help="Extract embedded images from HWP files for OCR ground-truth preparation",
@@ -2487,6 +2720,17 @@ def main() -> None:
         )
     elif args.command == "convert-embedding-input":
         convert_embedding_input(input_path=args.input, output_path=args.output, doc_id=args.doc_id)
+    elif args.command == "ocr-export-rag":
+        export_ocr_rag_handoff(
+            ocr_eval_root=args.ocr_eval_root,
+            output_manifest=args.output_manifest,
+            output_chunks=args.output_chunks,
+            engine=args.engine,
+            doc_key=args.doc_key,
+            include_review_required=not args.exclude_review_required,
+            include_html_chunk=args.include_html_chunk,
+            html_chunk_max_chars=args.html_chunk_max_chars,
+        )
     elif args.command == "extract-ocr-images":
         extract_ocr_images(input_dir=args.input_dir, output_dir=args.output_dir, limit=args.limit)
     elif args.command == "build-pred-structured":
@@ -2535,8 +2779,6 @@ def main() -> None:
                     ocr_engine=engine_name,
                     ocr_device=ocr_cfg.device,
                     ocr_batch_size=ocr_cfg.batch_size,
-                    table_normalization_enabled=ocr_cfg.table_normalization_enabled,
-                    table_normalization_rules_path=ocr_cfg.table_normalization_rules_path,
                 )
             except Exception as exc:
                 failed_engines.append(engine_name)
@@ -2576,8 +2818,6 @@ def main() -> None:
                     ocr_engine=engine_name,
                     ocr_device=ocr_cfg.device,
                     ocr_batch_size=ocr_cfg.batch_size,
-                    table_normalization_enabled=ocr_cfg.table_normalization_enabled,
-                    table_normalization_rules_path=ocr_cfg.table_normalization_rules_path,
                 )
             except Exception as exc:
                 failed_engines.append(engine_name)

@@ -4,6 +4,4 @@ ocr:
   lang: korean
   score_threshold: 0.0
   structure_match_threshold: 0.65
-  table_normalization_enabled: true
-  table_normalization_rules_path: configs/ocr_table_normalization_rules.yaml
   batch_size: 1

@@ -18,10 +18,6 @@ class OCRConfig(BaseModel):
     score_threshold: float = 0.0
     # Minimum value similarity for GT-vs-pred structured matching.
     structure_match_threshold: float = 0.65
-    # Enable table normalization for human review and optional downstream cleanup.
-    table_normalization_enabled: bool = True
-    # Rule file for global/per_type normalization (per_doc is intentionally unsupported).
-    table_normalization_rules_path: str = "configs/ocr_table_normalization_rules.yaml"
     batch_size: int = 1
 
 

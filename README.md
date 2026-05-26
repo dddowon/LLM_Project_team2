@@ -298,14 +298,28 @@ export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH}
 
 입력/출력 규칙:
 - 이미지 입력: `data/v2/ocr_images/<doc_key>/img_001.jpg`
-- GT 입력: `data/v2/ocr_eval/incoming_gt/<doc_key>.json`
+- GT 입력: `data/v2/ocr_eval/incoming_gt/<doc_key>.jsonl` (없으면 `.json` fallback)
 - 결과 출력:
   - `data/v2/ocr_eval/<engine>/<doc_key>/<image_stem>/pred_raw.json`
   - `data/v2/ocr_eval/<engine>/<doc_key>/<image_stem>/pred_structured.json`
-  - `data/v2/ocr_eval/<engine>/<doc_key>/<image_stem>/pred_table.html`
-  - `data/v2/ocr_eval/<engine>/<doc_key>/<image_stem>/eval.json`
+  - `data/v2/ocr_eval/<engine>/<doc_key>/<image_stem>/pred_table_raw.html`
+  - `data/v2/ocr_eval/<engine>/<doc_key>/<image_stem>/pred_table_rows.json`
+  - `data/v2/ocr_eval/<engine>/<doc_key>/<image_stem>/pred_table_rows_human_review.html`
+  - `data/v2/ocr_eval/<engine>/<doc_key>/<image_stem>/eval_summary.json`
+  - `data/v2/ocr_eval/<engine>/<doc_key>/<image_stem>/eval_debug.json` (review_required=true일 때만 생성)
 - `<engine>`: `pp_ocrv5`, `pp_ocrv5_transformers`, `pp_structurev3`, `table_recognition_v2`, `paddleocr_vl`
 - `--doc-key`는 파일명이 아니라 `ocr_images` 하위 폴더명입니다.
+
+Threshold 의미:
+- `--score-threshold`:
+  - OCR 예측 생성 단계의 confidence 하한값입니다.
+  - 이 값보다 낮은 인식 결과는 `pred_structured.json` 구성에서 제외됩니다.
+  - 즉, **예측값 자체를 필터링**하는 파라미터입니다.
+- `--structure-threshold`:
+  - 평가 단계에서 GT 값과 pred 값을 매칭할 때 쓰는 유사도 임계값입니다.
+  - 이 값은 `eval_summary.json`의 구조 지표(`structure_micro_recall`, `structure_macro_f1`)에 영향을 줍니다.
+  - 즉, **점수 계산 기준을 조정**하는 파라미터입니다.
+- 둘은 역할이 다르므로 같은 값으로 고정할 필요는 없습니다.
 
 ### 이미지 1개 실행 (`ocr-run-image`)
 
@@ -313,7 +327,9 @@ export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH}
 python -m src.cli ocr-run-image \
   --doc-key "한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보" \
   --image-name "img_001.jpg" \
-  --ocr-config "configs/ocr_default.yaml"
+  --ocr-config "configs/ocr_default.yaml" \
+  --score-threshold 0.0 \
+  --structure-threshold 0.65
 ```
 
 실제 경로를 명시하려면:
@@ -329,7 +345,9 @@ python -m src.cli ocr-run-image \
   --images-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_images" \
   --gt-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_eval/incoming_gt" \
   --output-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_eval" \
-  --ocr-config "/home/imella0707/personal/LLM_Project_team2/configs/ocr_default.yaml"
+  --ocr-config "/home/imella0707/personal/LLM_Project_team2/configs/ocr_default.yaml" \
+  --score-threshold 0.0 \
+  --structure-threshold 0.65
 ```
 
 GT JSON에 `id`가 여러 개면 `--id`를 함께 지정하세요.
@@ -339,21 +357,27 @@ GT JSON에 `id`가 여러 개면 `--id`를 함께 지정하세요.
 ```bash
 python -m src.cli ocr-run-batch \
   --doc-key "한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보" \
-  --ocr-config "configs/ocr_default.yaml"
+  --ocr-config "configs/ocr_default.yaml" \
+  --score-threshold 0.0 \
+  --structure-threshold 0.65
 ```
 
 ### 전체 문서 배치 실행 (`ocr-run-batch`)
 
 ```bash
 python -m src.cli ocr-run-batch \
-  --ocr-config "configs/ocr_default.yaml"
+  --ocr-config "configs/ocr_default.yaml" \
+  --score-threshold 0.0 \
+  --structure-threshold 0.65
 ```
 
-4개 엔진을 한 번에 자동 실행하려면:
+5개 ocr엔진을 한 번에 자동 실행하려면:
 
 ```bash
 python -m src.cli ocr-run-batch \
   --ocr-config "configs/ocr_default.yaml" \
+  --score-threshold 0.0 \
+  --structure-threshold 0.65 \
   --all-engines
 ```
 
@@ -368,19 +392,81 @@ python -m src.cli ocr-run-batch \
   --images-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_images" \
   --gt-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_eval/incoming_gt" \
   --output-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_eval" \
-  --ocr-config "/home/imella0707/personal/LLM_Project_team2/configs/ocr_default.yaml"
+  --ocr-config "/home/imella0707/personal/LLM_Project_team2/configs/ocr_default.yaml" \
+  --score-threshold 0.0 \
+  --structure-threshold 0.65
+```
+
+### OCR → RAG Stage 스크립트 (권장)
+
+개발/운영은 아래 3개 엔트리포인트로 분리합니다.
+OCR과 RAG는 의존성 충돌 방지를 위해 가상환경을 분리해서 실행합니다.
+
+```bash
+# OCR만 실행 (OCR env: 기본 ocr_vl15)
+./scripts/run_ocr_stage.sh
+
+# RAG만 실행 (RAG env: 기본 llm_team2)
+./scripts/run_rag_stage.sh
+
+# OCR -> RAG 연속 실행
+./scripts/run_all_ocr_rag_pipeline.sh
+```
+
+
+
+선택한 일부 폴더만 OCR 수행 후 RAG handoff 파일로 내보내기:
+
+```bash
+# 예시 1) 특정 doc_key 1개만 처리
+DOC_KEY="인천광역시_도시계획위원회 통합관리시스템 구축용역" \
+RAG_HANDOFF_DIR="data/v2/ocr_rag" \
+./scripts/run_ocr_stage.sh
+
+# 예시 2) 다른 doc_key로 재실행
+DOC_KEY="한국생산기술연구원_EIP3.0 고압가스 안전관리 시스템 구축 용역" \
+RAG_HANDOFF_DIR="data/v2/ocr_rag" \
+./scripts/run_ocr_stage.sh
+```
+
+여러 폴더를 연속 처리하려면 `DOC_KEY`를 바꿔 반복 실행하거나, 전체 처리(`DOC_KEY` 미지정)를 사용합니다.
+
+품질 게이트 통과건만 RAG handoff에 포함하려면:
+
+```bash
+EXCLUDE_REVIEW_REQUIRED=1 ./scripts/run_ocr_stage.sh
+```
+
+`run_ocr_stage.sh` 기본 산출물:
+- `data/v2/ocr_rag/ocr_input_manifest.jsonl`
+- `data/v2/ocr_rag/ocr_input_chunks.jsonl`
+
+`run_rag_stage.sh` 기본 산출물:
+- `data/v2/ocr_rag/ocr_input_embedded.jsonl`
+- `data/v2/ocr_rag/chroma_index/`
+
+### OCR→RAG handoff를 CLI로 직접 생성 (`ocr-export-rag`)
+
+```bash
+python -m src.cli ocr-export-rag \
+  --ocr-eval-root "data/v2/ocr_eval" \
+  --engine "paddleocr_vl" \
+  --output-manifest "data/v2/ocr_rag/ocr_input_manifest.jsonl" \
+  --output-chunks "data/v2/ocr_rag/ocr_input_chunks.jsonl"
 ```
 
 ### 결과 확인 위치
 
 - OCR 이미지 추출 결과: `data/v2/ocr_images/`
-- OCR 평가 산출물(`pred_raw`, `pred_structured`, `pred_table.html`, `eval`): `data/v2/ocr_eval/`
+- OCR 평가 산출물(`pred_raw`, `pred_structured`, `pred_table_raw`, `pred_table_rows`, `eval_summary`): `data/v2/ocr_eval/`
 - 엔진 단위 요약:
   - `data/v2/ocr_eval/<engine>/ocr_eval_summary.{csv,json,txt}`
   - `data/v2/ocr_eval/<engine>/review_queue.jsonl` (규칙 기반 실패 큐)
-- `eval.json` 주요 지표:
+- `eval_summary.json` 주요 지표:
+  - `schema_version`, `gt_path`, `pred_structured_path`
+  - `review_required`, `review_reasons`
   - `type`, `status`, `latency_ms`
   - `text.char_similarity_pct`, `text.cer`, `text.wer`, `text.exact_match`
   - `structure_micro_recall`, `structure_macro_f1`
   - `structure.aggregate` (`matched`, `gt_total`, `pred_total`, `micro_precision`, `micro_recall`, `micro_f1`, `macro_f1`)
-  - `table_html.exists`, `table_html.byte_size`
+  - `table_html.exists`, `table_rows.exists`
