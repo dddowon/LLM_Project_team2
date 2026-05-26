@@ -28,6 +28,8 @@ def summarize_harness_results(results: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_doc_hit": _mean_numeric(results, "doc_hit"),
         "mean_retrieval_keyword_hit": _mean_numeric(results, "retrieval_keyword_hit"),
         "mean_context_precision": _mean_numeric(results, "context_precision"),
+        "mean_recall_at_5": _mean_numeric(results, "recall_at_5"),
+        "mean_mrr": _mean_numeric(results, "mrr"),
         "mean_f_score": _mean_int(results, "f_score"),
         "mean_r_score": _mean_int(results, "r_score"),
         "mean_s_score": _mean_int(results, "s_score"),

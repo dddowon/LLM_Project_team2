@@ -138,6 +138,11 @@ def build_question_generation_prompt(
     questions_per_doc: int,
 ) -> str:
     context = json.dumps(chunks, ensure_ascii=False, indent=2)
+    context += (
+        "\n\n각 질문은 반드시 근거가 되는 chunk_id를 gold_chunk_ids에 포함하세요."
+        "\ngold_chunk_ids는 위 문서 청크 목록에 있는 chunk_id만 사용하세요."
+        "\n질문이 여러 chunk를 근거로 하면 여러 개를 넣으세요."
+    )
     return f"""당신은 RAG 성능평가용 질문셋 생성자입니다.
     아래 문서 청크만 근거로 평가 질문을 생성하세요. (다른 문서·외부 지식은 사용하지 마세요.)
 
@@ -149,7 +154,7 @@ def build_question_generation_prompt(
 
     총 {questions_per_doc}개의 질문을 생성하세요.
     출력은 반드시 {{"questions": [...]}} 형태의 JSON 객체로만 작성하세요.
-    각 항목은 question, category, question_type, doc_id, expected_answer, ground_truth_keywords, difficulty 필드를 포함해야 합니다.
+    각 항목은 question, category, question_type, doc_id, expected_answer, ground_truth_keywords, difficulty, gold_chunk_ids 필드를 포함해야 합니다.
 
     [평가 관점 — question_type과 맞춤]
     - 단일 문서에서 요청 내용을 정확히 뽑아 답하는지 → fact, requirement_detail
@@ -235,6 +240,9 @@ def parse_question_response(content: str) -> list[dict[str, Any]]:
         keywords = item.get("ground_truth_keywords")
         if not isinstance(keywords, list):
             keywords = []
+        gold_chunk_ids = item.get("gold_chunk_ids")
+        if not isinstance(gold_chunk_ids, list):
+            gold_chunk_ids = []
         rows.append(
             {
                 "question": question,
@@ -243,6 +251,7 @@ def parse_question_response(content: str) -> list[dict[str, Any]]:
                 "doc_id": str(item.get("doc_id", "")).strip(),
                 "expected_answer": str(item.get("expected_answer", "")).strip(),
                 "ground_truth_keywords": [str(keyword) for keyword in keywords],
+                "gold_chunk_ids": [str(chunk_id) for chunk_id in gold_chunk_ids],
                 "difficulty": str(item.get("difficulty", "")).strip(),
             }
         )
@@ -284,6 +293,14 @@ def generate_questions_with_openai(
         prompt = str(row.get("prompt", "")).strip()
         if not prompt:
             continue
+        chunks_for_row = row.get("chunks")
+        if not isinstance(chunks_for_row, list):
+            chunks_for_row = []
+        valid_chunk_ids = {
+            str(chunk.get("chunk_id"))
+            for chunk in chunks_for_row
+            if isinstance(chunk, dict) and chunk.get("chunk_id")
+        }
         doc_id = str(row.get("doc_id") or "").strip()
         if doc_id:
             progress.set_postfix_str(doc_id[:40] + ("…" if len(doc_id) > 40 else ""), refresh=False)
@@ -291,6 +308,12 @@ def generate_questions_with_openai(
         for question in questions:
             if not question.get("doc_id"):
                 question["doc_id"] = row.get("doc_id", "")
+            if valid_chunk_ids:
+                question["gold_chunk_ids"] = [
+                    chunk_id
+                    for chunk_id in question.get("gold_chunk_ids", [])
+                    if chunk_id in valid_chunk_ids
+                ]
             output_rows.append(question)
 
     write_jsonl(output_path, output_rows)

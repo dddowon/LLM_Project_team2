@@ -64,6 +64,8 @@ METRIC_TITLES: dict[str, str] = {
     "doc_hit": "대상 문서 적중률",
     "retrieval_keyword_hit": "키워드 매칭률",
     "context_precision": "검색 문맥 정밀도",
+    "recall_at_5": "정답 근거 검색률",
+    "mrr": "정답 근거 순위",
     "f_score": "답변 충실도",
     "r_score": "질문 적합성",
     "s_score": "정보 종합력",
@@ -79,7 +81,13 @@ FAILURE_METRIC_TITLES: dict[str, str] = {
     "wrong_refusal": "무단 거절 여부",
 }
 
-RETRIEVAL_SUMMARY_KEYS = ("doc_hit", "retrieval_keyword_hit", "context_precision")
+RETRIEVAL_SUMMARY_KEYS = (
+    "doc_hit",
+    "retrieval_keyword_hit",
+    "context_precision",
+    "recall_at_5",
+    "mrr",
+)
 GENERATION_SUMMARY_KEYS = ("f_score", "r_score", "s_score")
 ANSWER_SUMMARY_KEYS = ("correctness_score", "task_success", "wrong_refusal")
 
@@ -335,6 +343,8 @@ def _aggregate_metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_doc_hit": mean(score_values(items, "doc_hit")),
         "mean_retrieval_keyword_hit": mean(score_values(items, "retrieval_keyword_hit")),
         "mean_context_precision": mean(score_values(items, "context_precision")),
+        "mean_recall_at_5": mean(score_values(items, "recall_at_5")),
+        "mean_mrr": mean(score_values(items, "mrr")),
         "mean_f_score": mean(score_values(items, "f_score")),
         "mean_r_score": mean(score_values(items, "r_score")),
         "mean_s_score": mean(score_values(items, "s_score")),
@@ -445,7 +455,7 @@ def should_include_in_failures(row: dict[str, Any]) -> bool:
         return True
     return any(
         _binary_metric_is_zero(row, key)
-        for key in ("doc_hit", "retrieval_keyword_hit", "context_precision")
+        for key in ("doc_hit", "retrieval_keyword_hit", "context_precision", "recall_at_5", "mrr")
     )
 
 
@@ -577,6 +587,8 @@ def failure_table_html(failures: list[dict[str, Any]]) -> str:
         "doc_hit",
         "retrieval_keyword_hit",
         "context_precision",
+        "recall_at_5",
+        "mrr",
         "f_score",
         "r_score",
         "s_score",
@@ -589,7 +601,7 @@ def failure_table_html(failures: list[dict[str, Any]]) -> str:
         "<tr class=\"group-head\">"
         '<th rowspan="2" class="sticky-col">유형</th>'
         '<th rowspan="2">질문 성격</th>'
-        '<th colspan="3" class="group-retrieval">① 검색</th>'
+        '<th colspan="5" class="group-retrieval">① 검색</th>'
         '<th colspan="3" class="group-generation">② 생성</th>'
         '<th colspan="3" class="group-answer">③ 답</th>'
         '<th colspan="3" class="group-text">본문</th>'
@@ -610,6 +622,8 @@ def failure_table_html(failures: list[dict[str, Any]]) -> str:
             f'<td class="metric-col">{html.escape(fmt_metric_value(row.get("doc_hit")))}</td>',
             f'<td class="metric-col">{html.escape(fmt_metric_value(row.get("retrieval_keyword_hit")))}</td>',
             f'<td class="metric-col">{html.escape(fmt_metric_value(row.get("context_precision")))}</td>',
+            f'<td class="metric-col">{html.escape(fmt_metric_value(row.get("recall_at_5")))}</td>',
+            f'<td class="metric-col">{html.escape(fmt_metric_value(row.get("mrr")))}</td>',
             f'<td class="metric-col">{html.escape(fmt_metric_value(row.get("f_score")))}</td>',
             f'<td class="metric-col">{html.escape(fmt_metric_value(row.get("r_score")))}</td>',
             f'<td class="metric-col">{html.escape(fmt_metric_value(row.get("s_score")))}</td>',
@@ -667,6 +681,8 @@ def eval_csv_fieldnames() -> list[str]:
         metric_label("doc_hit"),
         metric_label("retrieval_keyword_hit"),
         metric_label("context_precision"),
+        metric_label("recall_at_5"),
+        metric_label("mrr"),
         metric_label("f_score"),
         metric_label("r_score"),
         metric_label("s_score"),
@@ -694,6 +710,8 @@ def eval_row_to_csv_dict(row: dict[str, Any], *, outcome: str) -> dict[str, str 
         metric_label("doc_hit"): fmt_metric_value(row.get("doc_hit")),
         metric_label("retrieval_keyword_hit"): fmt_metric_value(row.get("retrieval_keyword_hit")),
         metric_label("context_precision"): fmt_metric_value(row.get("context_precision")),
+        metric_label("recall_at_5"): fmt_metric_value(row.get("recall_at_5")),
+        metric_label("mrr"): fmt_metric_value(row.get("mrr")),
         metric_label("f_score"): fmt_metric_value(row.get("f_score")),
         metric_label("r_score"): fmt_metric_value(row.get("r_score")),
         metric_label("s_score"): fmt_metric_value(row.get("s_score")),
@@ -866,6 +884,8 @@ def question_type_table_html(by_type: list[dict[str, Any]]) -> str:
             metric_label("doc_hit"),
             metric_label("retrieval_keyword_hit"),
             metric_label("context_precision"),
+            metric_label("recall_at_5"),
+            metric_label("mrr"),
             metric_label("f_score"),
             metric_label("r_score"),
             metric_label("s_score"),
@@ -881,6 +901,8 @@ def question_type_table_html(by_type: list[dict[str, Any]]) -> str:
                 fmt_percent(row["mean_doc_hit"]),
                 fmt_percent(row["mean_retrieval_keyword_hit"]),
                 fmt_percent(row["mean_context_precision"]),
+                fmt_percent(row["mean_recall_at_5"]),
+                fmt(row["mean_mrr"]),
                 fmt(row["mean_f_score"]),
                 fmt(row["mean_r_score"]),
                 fmt(row["mean_s_score"]),
@@ -902,9 +924,13 @@ def summary_cards_html(summary: dict[str, Any]) -> str:
     retrieval = "".join(
         card(
             key,
-            fmt_percent(summary[f"mean_{key}"])
-            if key != "total_latency_ms"
-            else fmt_seconds(summary["mean_total_latency_ms"]),
+            fmt(summary[f"mean_{key}"])
+            if key == "mrr"
+            else (
+                fmt_percent(summary[f"mean_{key}"])
+                if key != "total_latency_ms"
+                else fmt_seconds(summary["mean_total_latency_ms"])
+            ),
         )
         for key in RETRIEVAL_SUMMARY_KEYS
     )
