@@ -43,6 +43,7 @@ class RagEngine:
         *,
         include_source_text: bool = False,
         doc_id: str | None = None,
+        question_type: str | None = None,
     ) -> dict:
         embedding = self.model_client.embed_texts([question], self.config.openai.embedding_model)[0]
         results = [
@@ -55,7 +56,7 @@ class RagEngine:
             if item[1] >= self.config.retrieval.score_threshold
         ]
         context = format_context(results, self.config.generation.max_context_chars)
-        prompt = build_rag_prompt(question, context, chat_history)
+        prompt = build_rag_prompt(question, context, chat_history, question_type=question_type)
         answer = self.model_client.generate(
             prompt=prompt,
             model=self.config.openai.generation_model,
