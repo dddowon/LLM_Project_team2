@@ -299,8 +299,12 @@ export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH}
 입력/출력 규칙:
 - 이미지 입력: `data/v2/ocr_images/<doc_key>/img_001.jpg`
 - GT 입력: `data/v2/ocr_eval/incoming_gt/<doc_key>.json`
-- 결과 출력: `data/v2/ocr_eval/<engine>/<doc_key>/<image_stem>/{pred_raw,pred_structured,eval}.json`
-  - `<engine>`: `pp_ocrv5`, `pp_ocrv5_transformers`, `pp_structurev3`, `table_recognition_v2`, `paddleocr_vl`
+- 결과 출력:
+  - `data/v2/ocr_eval/<engine>/<doc_key>/<image_stem>/pred_raw.json`
+  - `data/v2/ocr_eval/<engine>/<doc_key>/<image_stem>/pred_structured.json`
+  - `data/v2/ocr_eval/<engine>/<doc_key>/<image_stem>/pred_table.html`
+  - `data/v2/ocr_eval/<engine>/<doc_key>/<image_stem>/eval.json`
+- `<engine>`: `pp_ocrv5`, `pp_ocrv5_transformers`, `pp_structurev3`, `table_recognition_v2`, `paddleocr_vl`
 - `--doc-key`는 파일명이 아니라 `ocr_images` 하위 폴더명입니다.
 
 ### 이미지 1개 실행 (`ocr-run-image`)
@@ -370,10 +374,13 @@ python -m src.cli ocr-run-batch \
 ### 결과 확인 위치
 
 - OCR 이미지 추출 결과: `data/v2/ocr_images/`
-- OCR 평가 산출물(`pred_raw`, `pred_structured`, `eval`): `data/v2/ocr_eval/`
+- OCR 평가 산출물(`pred_raw`, `pred_structured`, `pred_table.html`, `eval`): `data/v2/ocr_eval/`
+- 엔진 단위 요약:
+  - `data/v2/ocr_eval/<engine>/ocr_eval_summary.{csv,json,txt}`
+  - `data/v2/ocr_eval/<engine>/review_queue.jsonl` (규칙 기반 실패 큐)
 - `eval.json` 주요 지표:
   - `type`, `status`, `latency_ms`
-  - `engine`
-  - `text_metrics.char_similarity_pct`, `text_metrics.cer`, `text_metrics.wer`
-  - `field_match.rate_pct` (매칭 개수/전체 개수)
-  - `macro_f1`
+  - `text.char_similarity_pct`, `text.cer`, `text.wer`, `text.exact_match`
+  - `structure_micro_recall`, `structure_macro_f1`
+  - `structure.aggregate` (`matched`, `gt_total`, `pred_total`, `micro_precision`, `micro_recall`, `micro_f1`, `macro_f1`)
+  - `table_html.exists`, `table_html.byte_size`

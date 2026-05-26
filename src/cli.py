@@ -1004,102 +1004,41 @@ def eval_pred_structured_vs_gt(
     pred_structured_path: str,
     item_id: str,
     output_path: str,
-    relaxed_threshold: float = 0.65,
+    structure_match_threshold: float = 0.65,
+    table_html_path: str | None = None,
+    table_structure_warning: list[str] | None = None,
+    table_structure_diagnostics_path: str | None = None,
 ) -> None:
-    from difflib import SequenceMatcher
     from pathlib import Path
 
     from src.Parsing.ocr.evaluation.eval_pred_structured_vs_gt import (
-        levenshtein,
-        levenshtein_tokens,
+        build_eval_report,
         load_item_by_id,
-        normalize,
     )
 
     gt_item = load_item_by_id(Path(gt_path), item_id)
     pred_item = load_item_by_id(Path(pred_structured_path), item_id)
-    if "pred_structure" not in pred_item:
-        raise ValueError("Pred structured JSON missing key: pred_structure")
-
-    gt_text = str(gt_item.get("gt_text", ""))
-    pred_text = str(pred_item.get("pred_text", ""))
-    gt_norm = normalize(gt_text)
-    pred_norm = normalize(pred_text)
-    text_dist = levenshtein(gt_norm, pred_norm)
-    text_cer = text_dist / max(1, len(gt_norm))
-    char_similarity = max(0.0, 1.0 - (text_dist / max(1, len(gt_norm), len(pred_norm)))) * 100.0
-    gt_words = gt_norm.split() if gt_norm else []
-    pred_words = pred_norm.split() if pred_norm else []
-    word_dist = levenshtein_tokens(gt_words, pred_words)
-    text_wer = word_dist / max(1, len(gt_words))
-
-    gt_structure = gt_item.get("gt_structure", {}) if isinstance(gt_item.get("gt_structure", {}), dict) else {}
-
-    def normalize_text_relaxed(text: str) -> str:
-        text = str(text).lower()
-        text = text.replace("\n", " ")
-        text = re.sub(r"\s+", " ", text)
-        return text.strip()
-
-    def compact_text(text: str) -> str:
-        text = normalize_text_relaxed(text)
-        return re.sub(r"[^0-9a-z가-힣]+", "", text)
-
-    def flatten_structure(obj: object, path: str = "") -> list[dict[str, str]]:
-        rows: list[dict[str, str]] = []
-        if isinstance(obj, dict):
-            for key, value in obj.items():
-                next_path = f"{path}.{key}" if path else str(key)
-                rows.extend(flatten_structure(value, next_path))
-            return rows
-        if isinstance(obj, list):
-            for value in obj:
-                rows.extend(flatten_structure(value, path))
-            return rows
-        value = str(obj).strip()
-        if value:
-            rows.append({"field_path": path, "expected_value": value})
-        return rows
-
-    def value_match_score(expected: str, pred: str, threshold: float) -> tuple[float, bool]:
-        expected_norm = compact_text(expected)
-        pred_norm = compact_text(pred)
-        if not expected_norm:
-            return 0.0, False
-        if expected_norm in pred_norm:
-            return 1.0, True
-        score = SequenceMatcher(None, expected_norm, pred_norm).ratio()
-        return score, score >= threshold
-
-    expected_fields = flatten_structure(gt_structure)
-    matched_count = 0
-    for field in expected_fields:
-        score, matched = value_match_score(field["expected_value"], pred_text, relaxed_threshold)
-        if matched:
-            matched_count += 1
-
-    field_hit_rate = matched_count / len(expected_fields) if expected_fields else 0.0
-
-    eval_payload = {
-        "id": item_id,
-        "type": pred_item.get("type", gt_item.get("image_type", "unknown")),
-        "status": pred_item.get("status", "success"),
-        "engine": pred_item.get("model", "unknown"),
-        "latency_ms": pred_item.get("latency_ms"),
-        "text_metrics": {
-            "exact_match": gt_norm == pred_norm,
-            "cer": text_cer,
-            "wer": text_wer,
-            "char_similarity_pct": round(char_similarity, 2),
-        },
-        "field_match": {
-            "rate_pct": round(field_hit_rate * 100.0, 2),
-            "matched": matched_count,
-            "total": len(expected_fields),
-            "threshold": relaxed_threshold,
-        },
-        "macro_f1": field_hit_rate,
-    }
+    eval_payload = build_eval_report(
+        item_id=item_id,
+        gt_item=gt_item,
+        pred_item=pred_item,
+        threshold=structure_match_threshold,
+    )
+    if table_html_path:
+        table_path = Path(table_html_path)
+        table_exists = table_path.exists() and table_path.stat().st_size > 0
+        eval_payload["table_html"] = {
+            "path": str(table_path),
+            "exists": table_exists,
+            "byte_size": table_path.stat().st_size if table_exists else 0,
+        }
+    if table_structure_warning:
+        eval_payload["table_structure_warning"] = list(table_structure_warning)
+    if table_structure_diagnostics_path:
+        eval_payload["table_structure_diagnostics"] = {
+            "path": str(table_structure_diagnostics_path),
+            "exists": Path(table_structure_diagnostics_path).exists(),
+        }
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -1107,12 +1046,32 @@ def eval_pred_structured_vs_gt(
     print(json.dumps(eval_payload, ensure_ascii=False, indent=2))
     print(f"saved: {output}")
 
+
+def _save_pred_table_html(
+    *,
+    pred_raw_path: str,
+    pred_structured_path: str,
+    output_path: str,
+    table_normalization_enabled: bool,
+    table_normalization_rules_path: str | None,
+) -> dict[str, object]:
+    from src.Parsing.ocr.postprocess.ocr_table_normalizer import save_ocr_table_outputs
+
+    return save_ocr_table_outputs(
+        pred_raw_path=pred_raw_path,
+        pred_structured_path=pred_structured_path,
+        output_path=output_path,
+        table_normalization_enabled=table_normalization_enabled,
+        table_normalization_rules_path=table_normalization_rules_path,
+    )
+
 def ocr_run_all(
     image_path: str,
     gt_path: str,
     item_id: str,
     pred_raw_output: str,
     pred_structured_output: str,
+    pred_table_html_output: str,
     eval_output: str,
     lang: str = "korean",
     score_threshold: float = 0.0,
@@ -1120,10 +1079,12 @@ def ocr_run_all(
     ocr_device: str = "gpu:0",
     ocr_batch_size: int = 1,
     ocr_model: object | None = None,
-    relaxed_threshold: float = 0.65,
+    structure_match_threshold: float = 0.65,
+    table_normalization_enabled: bool = True,
+    table_normalization_rules_path: str | None = None,
 ) -> None:
     normalized_engine = _normalize_ocr_engine(ocr_engine)
-    print("[1/3] run-ocr")
+    print("[1/4] run-ocr")
     if normalized_engine == "pp_structurev3":
         run_pp_structurev3_ocr(
             image_path=image_path,
@@ -1157,7 +1118,7 @@ def ocr_run_all(
             backend_engine="transformers" if normalized_engine == "pp_ocrv5_transformers" else "paddle",
             ocr_model=ocr_model,
         )
-    print("[2/3] build-pred-structured")
+    print("[2/4] build-pred-structured")
     build_pred_structured(
         gt_path=gt_path,
         pred_raw_path=pred_raw_output,
@@ -1165,13 +1126,29 @@ def ocr_run_all(
         output_path=pred_structured_output,
         score_threshold=score_threshold,
     )
-    print("[3/3] eval-pred-structured")
+    print("[3/4] extract-table-html")
+    table_outputs = _save_pred_table_html(
+        pred_raw_path=pred_raw_output,
+        pred_structured_path=pred_structured_output,
+        output_path=pred_table_html_output,
+        table_normalization_enabled=table_normalization_enabled,
+        table_normalization_rules_path=table_normalization_rules_path,
+    )
+    has_table_html = bool(table_outputs.get("saved", False))
+    print(f"table_html_saved: {has_table_html}")
+    if table_outputs.get("table_structure_warning"):
+        print(f"table_structure_warning: {table_outputs.get('table_structure_warning')}")
+
+    print("[4/4] eval-pred-structured")
     eval_pred_structured_vs_gt(
         gt_path=gt_path,
         pred_structured_path=pred_structured_output,
         item_id=item_id,
         output_path=eval_output,
-        relaxed_threshold=relaxed_threshold,
+        structure_match_threshold=structure_match_threshold,
+        table_html_path=pred_table_html_output,
+        table_structure_warning=table_outputs.get("table_structure_warning"),
+        table_structure_diagnostics_path=table_outputs.get("table_structure_diagnostics_path"),
     )
     print("ocr_run_all_done")
 
@@ -1304,7 +1281,7 @@ def _resolve_ocr_doc_paths(
     output_root: str,
     image_name: str,
     ocr_engine: str,
-) -> tuple[Path, Path, Path, Path, Path]:
+) -> tuple[Path, Path, Path, Path, Path, Path]:
     normalized_engine = _normalize_ocr_engine(ocr_engine)
     image_path = Path(images_root) / doc_key / image_name
     gt_path = _resolve_gt_path(gt_root, doc_key)
@@ -1313,8 +1290,9 @@ def _resolve_ocr_doc_paths(
     out_dir = Path(output_root) / engine_dir_name / doc_key / image_stem
     pred_raw = out_dir / "pred_raw.json"
     pred_structured = out_dir / "pred_structured.json"
+    pred_table_html = out_dir / "pred_table.html"
     eval_json = out_dir / "eval.json"
-    return image_path, gt_path, pred_raw, pred_structured, eval_json
+    return image_path, gt_path, pred_raw, pred_structured, pred_table_html, eval_json
 
 
 def _engine_dir_name(ocr_engine: str) -> str:
@@ -1378,12 +1356,15 @@ def ocr_run_image(
     image_name: str,
     lang: str,
     score_threshold: float,
+    structure_match_threshold: float,
     ocr_engine: str,
     ocr_device: str,
     ocr_batch_size: int,
+    table_normalization_enabled: bool,
+    table_normalization_rules_path: str | None,
     ocr_model: object | None = None,
 ) -> bool:
-    image_path, gt_path, pred_raw, pred_structured, eval_json = _resolve_ocr_doc_paths(
+    image_path, gt_path, pred_raw, pred_structured, pred_table_html, eval_json = _resolve_ocr_doc_paths(
         doc_key=doc_key,
         images_root=images_root,
         gt_root=gt_root,
@@ -1414,13 +1395,17 @@ def ocr_run_image(
         item_id=final_item_id,
         pred_raw_output=str(pred_raw),
         pred_structured_output=str(pred_structured),
+        pred_table_html_output=str(pred_table_html),
         eval_output=str(eval_json),
         lang=lang,
         score_threshold=score_threshold,
+        structure_match_threshold=structure_match_threshold,
         ocr_engine=ocr_engine,
         ocr_device=ocr_device,
         ocr_batch_size=ocr_batch_size,
         ocr_model=ocr_model,
+        table_normalization_enabled=table_normalization_enabled,
+        table_normalization_rules_path=table_normalization_rules_path,
     )
     if not use_eval:
         print(f"[SKIP_EVAL_SUMMARY] use_eval=false: {final_item_id}")
@@ -1438,9 +1423,12 @@ def ocr_run_batch(
     stop_on_error: bool,
     lang: str,
     score_threshold: float,
+    structure_match_threshold: float,
     ocr_engine: str,
     ocr_device: str,
     ocr_batch_size: int,
+    table_normalization_enabled: bool,
+    table_normalization_rules_path: str | None,
 ) -> None:
     normalized_engine = _normalize_ocr_engine(ocr_engine)
     shared_model = _build_shared_ocr_model(
@@ -1467,6 +1455,7 @@ def ocr_run_batch(
     skip_gt_count = 0
     fail_count = 0
     eval_rows: list[dict[str, object]] = []
+    review_queue_rows: list[dict[str, object]] = []
 
     for doc_dir in doc_dirs:
         doc_key = doc_dir.name
@@ -1484,9 +1473,12 @@ def ocr_run_batch(
                     image_name=path.name,
                     lang=lang,
                     score_threshold=score_threshold,
+                    structure_match_threshold=structure_match_threshold,
                     ocr_engine=ocr_engine,
                     ocr_device=ocr_device,
                     ocr_batch_size=ocr_batch_size,
+                    table_normalization_enabled=table_normalization_enabled,
+                    table_normalization_rules_path=table_normalization_rules_path,
                     ocr_model=shared_model,
                 )
                 ok_count += 1
@@ -1498,12 +1490,54 @@ def ocr_run_batch(
                 )
                 if eval_path.exists():
                     result = json.loads(eval_path.read_text(encoding="utf-8"))
-                    text_metrics = result.get("text_metrics", {}) if isinstance(result, dict) else {}
-                    field_metrics = result.get("field_match", {}) if isinstance(result, dict) else {}
+                    text_metrics = result.get("text", {}) if isinstance(result, dict) else {}
+                    structure = result.get("structure", {}) if isinstance(result, dict) else {}
+                    structure_aggregate = structure.get("aggregate", {}) if isinstance(structure, dict) else {}
+                    field_metrics = structure.get("field_metrics", []) if isinstance(structure, dict) else []
                     char_similarity_pct = text_metrics.get("char_similarity_pct")
                     similarity_ratio = (
                         float(char_similarity_pct) / 100.0 if char_similarity_pct is not None else None
                     )
+                    structure_micro_recall = result.get("structure_micro_recall")
+                    structure_macro_f1 = result.get("structure_macro_f1")
+                    matched_fields = structure_aggregate.get("matched")
+                    total_fields = structure_aggregate.get("gt_total")
+                    table_html_info = result.get("table_html", {}) if isinstance(result, dict) else {}
+                    table_html_exists = bool(table_html_info.get("exists", False))
+
+                    required_fields = result.get("required_fields", [])
+                    if not isinstance(required_fields, list):
+                        required_fields = []
+                    per_field = {
+                        str(metric.get("field_path", "")): metric
+                        for metric in field_metrics
+                        if isinstance(metric, dict)
+                    }
+                    if not required_fields:
+                        required_fields = [
+                            field_name
+                            for field_name, metric in per_field.items()
+                            if field_name and int(metric.get("gt_total", 0)) > 0
+                        ]
+
+                    missing_required_fields: list[str] = []
+                    for field_name in required_fields:
+                        metric = per_field.get(str(field_name))
+                        if not metric:
+                            missing_required_fields.append(str(field_name))
+                            continue
+                        if int(metric.get("matched", 0)) <= 0:
+                            missing_required_fields.append(str(field_name))
+
+                    review_reasons: list[str] = []
+                    if structure_micro_recall is not None and float(structure_micro_recall) < 0.8:
+                        review_reasons.append("structure_micro_recall<0.8")
+                    if missing_required_fields:
+                        review_reasons.append("required_field_missing")
+                    if str(result.get("type", "")).lower() == "table" and not table_html_exists:
+                        review_reasons.append("table_html_missing")
+
+                    review_required = bool(review_reasons)
                     row = {
                         "id": result.get("id"),
                         "doc_key": doc_key,
@@ -1512,12 +1546,33 @@ def ocr_run_batch(
                         "text_similarity": similarity_ratio,
                         "cer": text_metrics.get("cer"),
                         "wer": text_metrics.get("wer"),
-                        "field_hit_rate_pct": field_metrics.get("rate_pct"),
-                        "matched_fields": field_metrics.get("matched"),
-                        "total_fields": field_metrics.get("total"),
+                        "structure_micro_recall": structure_micro_recall,
+                        "structure_macro_f1": structure_macro_f1,
+                        "matched_fields": matched_fields,
+                        "total_fields": total_fields,
+                        "table_html_exists": table_html_exists,
+                        "review_required": review_required,
+                        "review_reasons": "|".join(review_reasons),
+                        "missing_required_fields": "|".join(missing_required_fields),
                         "latency_ms": result.get("latency_ms"),
                     }
                     eval_rows.append(row)
+                    if review_required:
+                        review_queue_rows.append(
+                            {
+                                "id": result.get("id"),
+                                "doc_key": doc_key,
+                                "image_name": path.name,
+                                "type": result.get("type"),
+                                "review_reasons": review_reasons,
+                                "missing_required_fields": missing_required_fields,
+                                "structure_micro_recall": structure_micro_recall,
+                                "structure_macro_f1": structure_macro_f1,
+                                "eval_path": str(eval_path),
+                                "pred_structured_path": str(eval_path.parent / "pred_structured.json"),
+                                "pred_table_html_path": str(eval_path.parent / "pred_table.html"),
+                            }
+                        )
 
                     similarity_pct = (
                         float(row["text_similarity"]) * 100.0 if row.get("text_similarity") is not None else 0.0
@@ -1529,11 +1584,20 @@ def ocr_run_batch(
                     print(f"문자 유사도: {round(similarity_pct, 2)} %")
                     print(f"CER: {round(float(row['cer']), 4) if row.get('cer') is not None else 'N/A'}")
                     print(f"WER: {round(float(row['wer']), 4) if row.get('wer') is not None else 'N/A'}")
-                    if row.get("field_hit_rate_pct") is not None:
+                    if row.get("structure_micro_recall") is not None:
                         print(
-                            "필드값 매칭률: "
-                            f"{round(float(row['field_hit_rate_pct']), 2)} % "
+                            "구조 micro recall: "
+                            f"{round(float(row['structure_micro_recall']) * 100.0, 2)} % "
                             f"({row.get('matched_fields')}/{row.get('total_fields')})"
+                        )
+                    if row.get("structure_macro_f1") is not None:
+                        print(f"구조 macro f1: {round(float(row['structure_macro_f1']), 4)}")
+                    print(f"table_html_exists: {row.get('table_html_exists')}")
+                    if row.get("review_required"):
+                        print(
+                            "review_required: True "
+                            f"reasons={row.get('review_reasons')} "
+                            f"missing_required={row.get('missing_required_fields')}"
                         )
                     print(f"latency_ms: {row['latency_ms']}")
         except FileNotFoundError as e:
@@ -1577,9 +1641,14 @@ def ocr_run_batch(
                     "text_similarity",
                     "cer",
                     "wer",
-                    "field_hit_rate_pct",
+                    "structure_micro_recall",
+                    "structure_macro_f1",
                     "matched_fields",
                     "total_fields",
+                    "table_html_exists",
+                    "review_required",
+                    "review_reasons",
+                    "missing_required_fields",
                     "latency_ms",
                 ],
             )
@@ -1592,8 +1661,17 @@ def ocr_run_batch(
         avg_similarity = sum(float(row["text_similarity"]) for row in eval_rows if row.get("text_similarity") is not None)
         avg_similarity /= max(1, len([row for row in eval_rows if row.get("text_similarity") is not None]))
 
-        field_rates = [float(row["field_hit_rate_pct"]) for row in eval_rows if row.get("field_hit_rate_pct") is not None]
-        avg_field_hit_rate = sum(field_rates) / len(field_rates) if field_rates else 0.0
+        structure_recalls = [
+            float(row["structure_micro_recall"]) for row in eval_rows if row.get("structure_micro_recall") is not None
+        ]
+        avg_structure_micro_recall = sum(structure_recalls) / len(structure_recalls) if structure_recalls else 0.0
+        structure_macro_f1_values = [
+            float(row["structure_macro_f1"]) for row in eval_rows if row.get("structure_macro_f1") is not None
+        ]
+        avg_structure_macro_f1 = (
+            sum(structure_macro_f1_values) / len(structure_macro_f1_values) if structure_macro_f1_values else 0.0
+        )
+        review_required_count = sum(1 for row in eval_rows if bool(row.get("review_required")))
         fail_rate = (
             sum(1 for row in eval_rows if str(row.get("status", "")) != "success") / len(eval_rows) * 100.0
             if eval_rows
@@ -1611,11 +1689,20 @@ def ocr_run_batch(
             lines.append(f"문자 유사도: {round(similarity_pct, 2)} %")
             lines.append(f"CER: {round(float(row['cer']), 4) if row.get('cer') is not None else 'N/A'}")
             lines.append(f"WER: {round(float(row['wer']), 4) if row.get('wer') is not None else 'N/A'}")
-            if row.get("field_hit_rate_pct") is not None:
+            if row.get("structure_micro_recall") is not None:
                 lines.append(
-                    "필드값 매칭률: "
-                    f"{round(float(row['field_hit_rate_pct']), 2)} % "
+                    "구조 micro recall: "
+                    f"{round(float(row['structure_micro_recall']) * 100.0, 2)} % "
                     f"({row.get('matched_fields')}/{row.get('total_fields')})"
+                )
+            if row.get("structure_macro_f1") is not None:
+                lines.append(f"구조 macro f1: {round(float(row['structure_macro_f1']), 4)}")
+            lines.append(f"table_html_exists: {row.get('table_html_exists')}")
+            if row.get("review_required"):
+                lines.append(
+                    "review_required: True "
+                    f"reasons={row.get('review_reasons')} "
+                    f"missing_required={row.get('missing_required_fields')}"
                 )
             lines.append(f"latency_ms: {row.get('latency_ms')}")
 
@@ -1623,18 +1710,30 @@ def ocr_run_batch(
         lines.append("[SUMMARY]")
         lines.append(f"평가 이미지 수: {len(eval_rows)}")
         lines.append(f"평균 문자 유사도: {round(avg_similarity * 100.0, 2)} %")
-        lines.append(f"평균 필드값 매칭률: {round(avg_field_hit_rate, 2)} %")
+        lines.append(f"평균 구조 micro recall: {round(avg_structure_micro_recall * 100.0, 2)} %")
+        lines.append(f"평균 구조 macro f1: {round(avg_structure_macro_f1, 4)}")
+        lines.append(f"리뷰 큐 건수: {review_required_count}")
         lines.append(f"실패율: {round(fail_rate, 2)} %")
         summary_txt_path.write_text("\n".join(lines), encoding="utf-8")
 
         print("\n[SUMMARY]")
         print(f"평가 이미지 수: {len(eval_rows)}")
         print(f"평균 문자 유사도: {round(avg_similarity * 100.0, 2)} %")
-        print(f"평균 필드값 매칭률: {round(avg_field_hit_rate, 2)} %")
+        print(f"평균 구조 micro recall: {round(avg_structure_micro_recall * 100.0, 2)} %")
+        print(f"평균 구조 macro f1: {round(avg_structure_macro_f1, 4)}")
+        print(f"리뷰 큐 건수: {review_required_count}")
         print(f"실패율: {round(fail_rate, 2)} %")
         print(f"saved_eval_summary_csv: {summary_csv_path}")
         print(f"saved_eval_summary_json: {summary_json_path}")
         print(f"saved_eval_summary_txt: {summary_txt_path}")
+        review_queue_path = engine_out_root / "review_queue.jsonl"
+        if review_queue_rows:
+            with review_queue_path.open("w", encoding="utf-8") as f:
+                for row in review_queue_rows:
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        else:
+            review_queue_path.write_text("", encoding="utf-8")
+        print(f"saved_review_queue_jsonl: {review_queue_path}")
 
 
 def _pipeline_paths_for_input(
@@ -2126,6 +2225,12 @@ def main() -> None:
     eval_pred_parser.add_argument("--pred-structured", required=True, help="Pred structured JSON path")
     eval_pred_parser.add_argument("--id", required=True, help="Target item id")
     eval_pred_parser.add_argument("--output", required=True, help="Evaluation JSON output path")
+    eval_pred_parser.add_argument(
+        "--structure-threshold",
+        type=float,
+        default=0.65,
+        help="Value similarity threshold for structure matching",
+    )
 
     ocr_image_parser = subparsers.add_parser(
         "ocr-run-image",
@@ -2154,8 +2259,14 @@ def main() -> None:
     ocr_image_parser.add_argument(
         "--score-threshold",
         type=float,
-        default=0.0,
-        help="Minimum OCR confidence threshold for structured prediction",
+        default=None,
+        help="Override minimum OCR confidence threshold for structured prediction (default from ocr-config)",
+    )
+    ocr_image_parser.add_argument(
+        "--structure-threshold",
+        type=float,
+        default=None,
+        help="Override structure match similarity threshold for eval (default from ocr-config)",
     )
     ocr_image_parser.add_argument(
         "--all-engines",
@@ -2195,8 +2306,14 @@ def main() -> None:
     ocr_batch_parser.add_argument(
         "--score-threshold",
         type=float,
-        default=0.0,
-        help="Minimum OCR confidence threshold for structured prediction",
+        default=None,
+        help="Override minimum OCR confidence threshold for structured prediction (default from ocr-config)",
+    )
+    ocr_batch_parser.add_argument(
+        "--structure-threshold",
+        type=float,
+        default=None,
+        help="Override structure match similarity threshold for eval (default from ocr-config)",
     )
     ocr_batch_parser.add_argument(
         "--all-engines",
@@ -2386,11 +2503,20 @@ def main() -> None:
             pred_structured_path=args.pred_structured,
             item_id=args.id,
             output_path=args.output,
+            structure_match_threshold=args.structure_threshold,
         )
     elif args.command == "ocr-run-image":
         from src.config_ocr import load_ocr_config
 
         ocr_cfg = load_ocr_config(args.ocr_config).ocr
+        effective_score_threshold = (
+            args.score_threshold if args.score_threshold is not None else ocr_cfg.score_threshold
+        )
+        effective_structure_threshold = (
+            args.structure_threshold
+            if args.structure_threshold is not None
+            else ocr_cfg.structure_match_threshold
+        )
         engines = list(DEFAULT_OCR_ENGINE_MATRIX) if args.all_engines else [_normalize_ocr_engine(ocr_cfg.engine)]
         failed_engines: list[str] = []
         for engine_name in engines:
@@ -2404,10 +2530,13 @@ def main() -> None:
                     output_root=args.output_root,
                     image_name=args.image_name,
                     lang=ocr_cfg.lang or args.lang,
-                    score_threshold=ocr_cfg.score_threshold if ocr_cfg.score_threshold is not None else args.score_threshold,
+                    score_threshold=effective_score_threshold,
+                    structure_match_threshold=effective_structure_threshold,
                     ocr_engine=engine_name,
                     ocr_device=ocr_cfg.device,
                     ocr_batch_size=ocr_cfg.batch_size,
+                    table_normalization_enabled=ocr_cfg.table_normalization_enabled,
+                    table_normalization_rules_path=ocr_cfg.table_normalization_rules_path,
                 )
             except Exception as exc:
                 failed_engines.append(engine_name)
@@ -2420,6 +2549,14 @@ def main() -> None:
         from src.config_ocr import load_ocr_config
 
         ocr_cfg = load_ocr_config(args.ocr_config).ocr
+        effective_score_threshold = (
+            args.score_threshold if args.score_threshold is not None else ocr_cfg.score_threshold
+        )
+        effective_structure_threshold = (
+            args.structure_threshold
+            if args.structure_threshold is not None
+            else ocr_cfg.structure_match_threshold
+        )
         engines = list(DEFAULT_OCR_ENGINE_MATRIX) if args.all_engines else [_normalize_ocr_engine(ocr_cfg.engine)]
         failed_engines: list[str] = []
         for engine_name in engines:
@@ -2434,10 +2571,13 @@ def main() -> None:
                     limit=args.limit,
                     stop_on_error=args.stop_on_error,
                     lang=ocr_cfg.lang or args.lang,
-                    score_threshold=ocr_cfg.score_threshold if ocr_cfg.score_threshold is not None else args.score_threshold,
+                    score_threshold=effective_score_threshold,
+                    structure_match_threshold=effective_structure_threshold,
                     ocr_engine=engine_name,
                     ocr_device=ocr_cfg.device,
                     ocr_batch_size=ocr_cfg.batch_size,
+                    table_normalization_enabled=ocr_cfg.table_normalization_enabled,
+                    table_normalization_rules_path=ocr_cfg.table_normalization_rules_path,
                 )
             except Exception as exc:
                 failed_engines.append(engine_name)

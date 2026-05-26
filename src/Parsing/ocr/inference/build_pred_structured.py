@@ -1,35 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
-from difflib import SequenceMatcher
 import re
 from pathlib import Path
 
 
 def normalize_space(text: str) -> str:
     return " ".join(text.split()).strip()
-
-
-def has_hangul(text: str) -> bool:
-    return bool(re.search(r"[가-힣]", text))
-
-
-def is_english_like(text: str) -> bool:
-    if not re.search(r"[A-Za-z]", text):
-        return False
-    return bool(re.fullmatch(r"[A-Za-z0-9\s.,&'()/_-]+", text))
-
-
-def extract_hangul_segments(text: str) -> list[str]:
-    segments = re.findall(r"[가-힣][가-힣\s]*[가-힣]|[가-힣]", text)
-    return [normalize_space(seg) for seg in segments if normalize_space(seg)]
-
-
-def extract_english_segments(text: str) -> list[str]:
-    segments = re.findall(r"[A-Za-z][A-Za-z0-9\s.,&'()/_-]*[A-Za-z0-9)]", text)
-    cleaned = [normalize_space(seg) for seg in segments if normalize_space(seg)]
-    return [seg for seg in cleaned if is_english_like(seg)]
 
 
 def dedupe_keep_order(items: list[str]) -> list[str]:
@@ -55,35 +34,224 @@ def compact_text(text: object) -> str:
     return re.sub(r"[^0-9a-z가-힣]+", "", normalize_text(text))
 
 
-def is_value_matched(expected: object, pred_text: str, threshold: float = 0.65) -> tuple[bool, float]:
-    expected_norm = compact_text(expected)
-    pred_norm = compact_text(pred_text)
-    if not expected_norm:
-        return False, 0.0
-    if expected_norm in pred_norm:
-        return True, 1.0
-    score = SequenceMatcher(None, expected_norm, pred_norm).ratio()
-    return score >= threshold, score
+_TABLE_HTML_PATTERN = re.compile(r"<table\b[^>]*>.*?</table>", re.IGNORECASE | re.DOTALL)
+_ROW_PATTERN = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
+_CELL_PATTERN = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.IGNORECASE | re.DOTALL)
+_TAG_PATTERN = re.compile(r"<[^>]+>")
+_KV_LINE_PATTERN = re.compile(r"^\s*([^\n\r:：]{1,40})\s*[:：]\s*(.+)\s*$")
 
 
-def build_pred_structure_from_gt_schema(gt_obj: object, pred_text: str, threshold: float = 0.65) -> object:
-    if isinstance(gt_obj, dict):
-        return {
-            str(key): build_pred_structure_from_gt_schema(value, pred_text, threshold=threshold)
-            for key, value in gt_obj.items()
-        }
-    if isinstance(gt_obj, list):
-        matched_values: list[str] = []
-        for value in gt_obj:
-            matched, _ = is_value_matched(value, pred_text, threshold=threshold)
-            if matched:
-                matched_values.append(str(value))
-        return matched_values
-    value = str(gt_obj).strip()
-    if not value:
+def _strip_html_tags(raw: str) -> str:
+    text = re.sub(r"<br\s*/?>", "\n", raw, flags=re.IGNORECASE)
+    text = _TAG_PATTERN.sub(" ", text)
+    text = html.unescape(text)
+    return normalize_space(text)
+
+
+def _extract_table_html_candidates(text: str) -> list[str]:
+    if not text:
+        return []
+    return [candidate.strip() for candidate in _TABLE_HTML_PATTERN.findall(text) if candidate.strip()]
+
+
+def _parse_table_rows(table_html: str) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for row_html in _ROW_PATTERN.findall(table_html):
+        cells = [_strip_html_tags(cell) for cell in _CELL_PATTERN.findall(row_html)]
+        cleaned = [cell for cell in cells if cell]
+        if cleaned:
+            rows.append(cleaned)
+    return rows
+
+
+def _parse_labeled_block(block_text: str) -> tuple[str, str] | None:
+    label_match = re.search(r"label:\s*([^\n\r]+)", block_text, flags=re.IGNORECASE)
+    content_match = re.search(r"content:\s*(.*)", block_text, flags=re.IGNORECASE | re.DOTALL)
+    if not label_match or not content_match:
+        return None
+    label = normalize_space(label_match.group(1)).lower()
+    content = normalize_space(content_match.group(1).replace("#################", " "))
+    if not label or not content:
+        return None
+    return label, content
+
+
+def _extract_labeled_blocks(pred_raw_item: dict) -> list[tuple[str, str]]:
+    blocks: list[tuple[str, str]] = []
+    raw_output = pred_raw_item.get("raw_pipeline_output")
+    if isinstance(raw_output, list):
+        for page in raw_output:
+            if not isinstance(page, dict):
+                continue
+            parsing_items = page.get("parsing_res_list")
+            if not isinstance(parsing_items, list):
+                continue
+            for item in parsing_items:
+                if isinstance(item, str):
+                    parsed = _parse_labeled_block(item)
+                    if parsed:
+                        blocks.append(parsed)
+    if blocks:
+        return blocks
+
+    # Fallback: parse label/content pairs from ocr_lines plain text.
+    current_label = ""
+    for line in pred_raw_item.get("ocr_lines", []):
+        if not isinstance(line, dict):
+            continue
+        text = normalize_space(str(line.get("text", "")))
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered.startswith("label:"):
+            current_label = normalize_space(text.split(":", 1)[1]).lower()
+            continue
+        if lowered.startswith("content:"):
+            content = normalize_space(text.split(":", 1)[1])
+            if current_label and content:
+                blocks.append((current_label, content))
+            current_label = ""
+    return blocks
+
+
+def _strip_leading_marker(text: str) -> str:
+    stripped = re.sub(r"^\s*[①②③④⑤⑥⑦⑧⑨⑩]\s*", "", text)
+    stripped = re.sub(r"^\s*\d+[.)]\s*", "", stripped)
+    stripped = re.sub(r"^\s*[•·\-]\s*", "", stripped)
+    return normalize_space(stripped)
+
+
+def _canonicalize_key(text: str) -> str:
+    key = _strip_leading_marker(text)
+    key = key.strip(":-–— ")
+    key = normalize_space(key)
+    if not key:
         return ""
-    matched, _ = is_value_matched(value, pred_text, threshold=threshold)
-    return value if matched else ""
+    if len(compact_text(key)) < 2:
+        return ""
+    if len(key) > 40:
+        return ""
+    if re.fullmatch(r"[#*=\-_/\\\s]+", key):
+        return ""
+    return key
+
+
+def _looks_like_bullet_item(text: str) -> bool:
+    return bool(re.match(r"^\s*([①②③④⑤⑥⑦⑧⑨⑩]|\d+[.)]|[•·\-])\s*", text))
+
+
+def _append_field(structure: dict[str, list[str]], key: str, value: str) -> None:
+    canonical_key = _canonicalize_key(key)
+    value = normalize_space(value)
+    if not canonical_key or not value:
+        return
+    values = structure.setdefault(canonical_key, [])
+    if value not in values:
+        values.append(value)
+
+
+def _extract_fields_from_table_rows(rows: list[list[str]]) -> dict[str, list[str]]:
+    fields: dict[str, list[str]] = {}
+    pending_single_key: str | None = None
+    for row in rows:
+        if not row:
+            continue
+        if len(row) == 1:
+            single_line = normalize_space(row[0])
+            if re.search(r"\d{4}\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일", single_line):
+                _append_field(fields, "작성일", single_line)
+            if single_line.endswith("귀하"):
+                _append_field(fields, "수신", single_line)
+
+        if len(row) >= 2:
+            # Ignore likely header rows (column names only).
+            if all(len(normalize_space(cell)) <= 12 for cell in row) and any(
+                token in normalize_space(" ".join(row)) for token in ("항목", "의견", "구분", "내용")
+            ):
+                pending_single_key = None
+                continue
+            key = _canonicalize_key(row[0])
+            value = normalize_space(" ".join(row[1:]))
+            if key and value and compact_text(key) != compact_text(value):
+                _append_field(fields, key, value)
+            pending_single_key = None
+            if _looks_like_bullet_item(row[0]):
+                _append_field(fields, "검토항목", _strip_leading_marker(row[0]))
+            continue
+
+        single = normalize_space(row[0])
+        if not single:
+            continue
+        if _looks_like_bullet_item(single):
+            _append_field(fields, "검토항목", _strip_leading_marker(single))
+            pending_single_key = None
+            continue
+
+        single_key = _canonicalize_key(single)
+        if pending_single_key and single_key and compact_text(pending_single_key) != compact_text(single):
+            _append_field(fields, pending_single_key, single)
+            pending_single_key = None
+            continue
+
+        if single_key and len(single_key) <= 20:
+            pending_single_key = single_key
+        else:
+            pending_single_key = None
+    return fields
+
+
+def build_pred_structure_from_ocr(pred_text: str, pred_raw_item: dict) -> dict[str, list[str]]:
+    structure: dict[str, list[str]] = {}
+    blocks = _extract_labeled_blocks(pred_raw_item)
+
+    table_html_candidates: list[str] = []
+    title_candidates: list[str] = []
+    footnote_candidates: list[str] = []
+    free_text_candidates: list[str] = []
+
+    for label, content in blocks:
+        label_key = normalize_space(label).lower()
+        if "table" in label_key:
+            table_html_candidates.extend(_extract_table_html_candidates(content))
+            continue
+        cleaned = _strip_html_tags(content)
+        if not cleaned:
+            continue
+        if "title" in label_key:
+            title_candidates.append(cleaned)
+        elif "footnote" in label_key:
+            footnote_candidates.append(cleaned)
+        else:
+            free_text_candidates.append(cleaned)
+
+    # Fallback when parsing_res_list blocks are unavailable.
+    if not table_html_candidates:
+        table_html_candidates.extend(_extract_table_html_candidates(pred_text))
+
+    if title_candidates:
+        for title in dedupe_keep_order(title_candidates):
+            _append_field(structure, "문서명", title)
+
+    for table_html in dedupe_keep_order(table_html_candidates):
+        rows = _parse_table_rows(table_html)
+        table_fields = _extract_fields_from_table_rows(rows)
+        for key, values in table_fields.items():
+            for value in values:
+                _append_field(structure, key, value)
+
+    searchable_texts = free_text_candidates + footnote_candidates
+    for text in searchable_texts:
+        if not text:
+            continue
+        for raw_line in re.split(r"[\n\r]+", text):
+            line = normalize_space(raw_line)
+            if not line:
+                continue
+            kv_match = _KV_LINE_PATTERN.match(line)
+            if kv_match:
+                _append_field(structure, kv_match.group(1), kv_match.group(2))
+
+    return structure
 
 
 def load_item_by_id(path: Path, target_id: str) -> dict:
@@ -188,11 +356,7 @@ def build_pred_structured(gt_item: dict, pred_raw_item: dict, score_threshold: f
     ]
     result = {key: gt_item.get(key) for key in meta_keys}
     result["pred_text"] = pred_text
-    result["pred_structure"] = build_pred_structure_from_gt_schema(
-        gt_item.get("gt_structure", {}),
-        pred_text,
-        threshold=0.65,
-    )
+    result["pred_structure"] = build_pred_structure_from_ocr(pred_text, pred_raw_item)
     result["type"] = gt_item.get("image_type", "unknown")
     result["status"] = pred_raw_item.get("status", "success" if kept else "empty")
     result["latency_ms"] = pred_raw_item.get("latency_ms")

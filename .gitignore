@@ -35,6 +35,7 @@ data/**/raw/
 data/v1/raw/
 data/v2/raw/
 data/v2/ocr_images/
+data/v2/ocr_eval
 data/v3/raw/
 
 # RFP original documents

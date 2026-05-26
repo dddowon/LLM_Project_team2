@@ -5,6 +5,7 @@ import json
 import re
 from difflib import SequenceMatcher
 from pathlib import Path
+from typing import Any
 
 
 def normalize(text: str) -> str:
@@ -98,28 +99,6 @@ def _load_json_or_jsonl(path: Path) -> dict | list:
     return rows
 
 
-def compute_set_metrics(gt_values: list[str], pred_values: list[str]) -> dict:
-    gt_norm = {normalize(value): value for value in gt_values if normalize(value)}
-    pred_norm = {normalize(value): value for value in pred_values if normalize(value)}
-    gt_set = set(gt_norm.keys())
-    pred_set = set(pred_norm.keys())
-    tp = len(gt_set & pred_set)
-    precision = tp / len(pred_set) if pred_set else 0.0
-    recall = tp / len(gt_set) if gt_set else 0.0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
-    return {
-        "exact_match": gt_set == pred_set,
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-        "matched": tp,
-        "gt_total": len(gt_set),
-        "pred_total": len(pred_set),
-        "missing": [gt_norm[key] for key in sorted(gt_set - pred_set)],
-        "extra": [pred_norm[key] for key in sorted(pred_set - gt_set)],
-    }
-
-
 def normalize_text_relaxed(text: object) -> str:
     text = str(text).lower()
     text = text.replace("\n", " ")
@@ -131,26 +110,9 @@ def compact_text(text: object) -> str:
     return re.sub(r"[^0-9a-z가-힣]+", "", normalize_text_relaxed(text))
 
 
-def flatten_structure(obj: object, path: str = "") -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
-    if isinstance(obj, dict):
-        for key, value in obj.items():
-            next_path = f"{path}.{key}" if path else str(key)
-            rows.extend(flatten_structure(value, next_path))
-        return rows
-    if isinstance(obj, list):
-        for value in obj:
-            rows.extend(flatten_structure(value, path))
-        return rows
-    value = str(obj).strip()
-    if value:
-        rows.append({"field_path": path, "expected_value": value})
-    return rows
-
-
-def value_match_score(expected: object, pred_text: str, threshold: float = 0.65) -> tuple[float, bool]:
+def value_match_score(expected: object, predicted: object, threshold: float = 0.65) -> tuple[float, bool]:
     expected_norm = compact_text(expected)
-    pred_norm = compact_text(pred_text)
+    pred_norm = compact_text(predicted)
     if not expected_norm:
         return 0.0, False
     if expected_norm in pred_norm:
@@ -159,16 +121,147 @@ def value_match_score(expected: object, pred_text: str, threshold: float = 0.65)
     return score, score >= threshold
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate GT JSON against pred_structured JSON")
-    parser.add_argument("--gt", required=True, help="GT path (.json/.jsonl)")
-    parser.add_argument("--pred-structured", required=True, help="Pred structured JSON path")
-    parser.add_argument("--id", required=True, help="Target id")
-    parser.add_argument("--output", required=True, help="Output report path")
-    args = parser.parse_args()
+def _dedupe_values(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        normalized = compact_text(value)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(str(value).strip())
+    return deduped
 
-    gt_item = load_item_by_id(Path(args.gt), args.id)
-    pred_item = load_item_by_id(Path(args.pred_structured), args.id)
+
+def flatten_structure_values(obj: object, path: str = "", acc: dict[str, list[str]] | None = None) -> dict[str, list[str]]:
+    if acc is None:
+        acc = {}
+
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            next_path = f"{path}.{key}" if path else str(key)
+            flatten_structure_values(value, next_path, acc)
+        return acc
+
+    if isinstance(obj, list):
+        for value in obj:
+            if isinstance(value, (dict, list)):
+                flatten_structure_values(value, path, acc)
+                continue
+            text = str(value).strip()
+            if text:
+                acc.setdefault(path, []).append(text)
+        return acc
+
+    text = str(obj).strip()
+    if text:
+        acc.setdefault(path, []).append(text)
+    return acc
+
+
+def match_field_values(gt_values: list[str], pred_values: list[str], threshold: float) -> dict[str, Any]:
+    expected = _dedupe_values(gt_values)
+    predicted = _dedupe_values(pred_values)
+
+    candidate_pairs: list[tuple[float, int, int]] = []
+    for expected_idx, expected_value in enumerate(expected):
+        for predicted_idx, predicted_value in enumerate(predicted):
+            score, matched = value_match_score(expected_value, predicted_value, threshold=threshold)
+            if matched:
+                candidate_pairs.append((score, expected_idx, predicted_idx))
+    candidate_pairs.sort(key=lambda x: x[0], reverse=True)
+
+    used_expected: set[int] = set()
+    used_predicted: set[int] = set()
+    matched_pairs: list[dict[str, Any]] = []
+    for score, expected_idx, predicted_idx in candidate_pairs:
+        if expected_idx in used_expected or predicted_idx in used_predicted:
+            continue
+        used_expected.add(expected_idx)
+        used_predicted.add(predicted_idx)
+        matched_pairs.append(
+            {
+                "gt_value": expected[expected_idx],
+                "pred_value": predicted[predicted_idx],
+                "score": round(score, 4),
+            }
+        )
+
+    matched = len(matched_pairs)
+    gt_total = len(expected)
+    pred_total = len(predicted)
+    precision = matched / pred_total if pred_total else (1.0 if gt_total == 0 else 0.0)
+    recall = matched / gt_total if gt_total else 1.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
+
+    missing = [value for idx, value in enumerate(expected) if idx not in used_expected]
+    extra = [value for idx, value in enumerate(predicted) if idx not in used_predicted]
+    return {
+        "exact_match": not missing and not extra,
+        "precision": round(precision, 6),
+        "recall": round(recall, 6),
+        "f1": round(f1, 6),
+        "matched": matched,
+        "gt_total": gt_total,
+        "pred_total": pred_total,
+        "missing": missing,
+        "extra": extra,
+        "matched_pairs": matched_pairs,
+    }
+
+
+def evaluate_structure(
+    gt_structure: dict[str, Any], pred_structure: dict[str, Any], threshold: float
+) -> tuple[list[dict[str, Any]], dict[str, float]]:
+    gt_map = flatten_structure_values(gt_structure)
+    pred_map = flatten_structure_values(pred_structure)
+    field_paths = sorted(set(gt_map.keys()) | set(pred_map.keys()))
+
+    field_metrics: list[dict[str, Any]] = []
+    matched_total = 0
+    gt_total = 0
+    pred_total = 0
+    macro_f1_values: list[float] = []
+
+    for field_path in field_paths:
+        per_field = match_field_values(gt_map.get(field_path, []), pred_map.get(field_path, []), threshold)
+        per_field["field_path"] = field_path
+        field_metrics.append(per_field)
+
+        matched_total += int(per_field["matched"])
+        gt_total += int(per_field["gt_total"])
+        pred_total += int(per_field["pred_total"])
+        macro_f1_values.append(float(per_field["f1"]))
+
+    micro_precision = matched_total / pred_total if pred_total else (1.0 if gt_total == 0 else 0.0)
+    micro_recall = matched_total / gt_total if gt_total else 1.0
+    micro_f1 = (
+        2 * micro_precision * micro_recall / (micro_precision + micro_recall)
+        if (micro_precision + micro_recall)
+        else 0.0
+    )
+    macro_f1 = sum(macro_f1_values) / len(macro_f1_values) if macro_f1_values else 0.0
+
+    aggregate = {
+        "gt_total": gt_total,
+        "pred_total": pred_total,
+        "matched": matched_total,
+        "micro_precision": micro_precision,
+        "micro_recall": micro_recall,
+        "micro_f1": micro_f1,
+        "macro_f1": macro_f1,
+        "field_count": len(field_paths),
+    }
+    return field_metrics, aggregate
+
+
+def build_eval_report(
+    *,
+    item_id: str,
+    gt_item: dict[str, Any],
+    pred_item: dict[str, Any],
+    threshold: float = 0.65,
+) -> dict[str, Any]:
     if "pred_structure" not in pred_item:
         raise ValueError("Pred structured JSON missing key: pred_structure")
 
@@ -189,19 +282,14 @@ def main() -> None:
         pred_item.get("pred_structure", {}) if isinstance(pred_item.get("pred_structure", {}), dict) else {}
     )
 
-    expected_fields = flatten_structure(gt_structure)
-    matched_total = 0
-    for field in expected_fields:
-        _, matched = value_match_score(field["expected_value"], pred_text, threshold=0.65)
-        if matched:
-            matched_total += 1
-    field_match_rate = matched_total / len(expected_fields) if expected_fields else 0.0
+    field_metrics, aggregate = evaluate_structure(gt_structure, pred_structure, threshold=threshold)
 
-    report = {
-        "id": args.id,
+    return {
+        "id": item_id,
         "type": pred_item.get("type", gt_item.get("image_type", "unknown")),
         "status": pred_item.get("status", "success"),
         "latency_ms": pred_item.get("latency_ms"),
+        "required_fields": gt_item.get("required_fields", []),
         "text": {
             "gt_text": gt_text,
             "pred_text": pred_text,
@@ -211,18 +299,44 @@ def main() -> None:
             "char_similarity_pct": round(char_similarity, 2),
         },
         "structure": {
-            "mode": "gt_schema_value_match",
+            "mode": "field_path_value_match",
+            "threshold": threshold,
             "gt_structure": gt_structure,
             "pred_structure": pred_structure,
+            "field_metrics": field_metrics,
+            "aggregate": {
+                "field_count": aggregate["field_count"],
+                "matched": aggregate["matched"],
+                "gt_total": aggregate["gt_total"],
+                "pred_total": aggregate["pred_total"],
+                "micro_precision": round(aggregate["micro_precision"], 6),
+                "micro_recall": round(aggregate["micro_recall"], 6),
+                "micro_f1": round(aggregate["micro_f1"], 6),
+                "macro_f1": round(aggregate["macro_f1"], 6),
+            },
         },
-        "field_match": {
-            "rate_pct": round(field_match_rate * 100.0, 2),
-            "matched": matched_total,
-            "total": len(expected_fields),
-            "threshold": 0.65,
-        },
-        "macro_f1": field_match_rate,
+        "structure_micro_recall": round(aggregate["micro_recall"], 6),
+        "structure_macro_f1": round(aggregate["macro_f1"], 6),
     }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Evaluate GT JSON against pred_structured JSON")
+    parser.add_argument("--gt", required=True, help="GT path (.json/.jsonl)")
+    parser.add_argument("--pred-structured", required=True, help="Pred structured JSON path")
+    parser.add_argument("--id", required=True, help="Target id")
+    parser.add_argument("--output", required=True, help="Output report path")
+    parser.add_argument("--threshold", type=float, default=0.65, help="Value match threshold")
+    args = parser.parse_args()
+
+    gt_item = load_item_by_id(Path(args.gt), args.id)
+    pred_item = load_item_by_id(Path(args.pred_structured), args.id)
+    report = build_eval_report(
+        item_id=args.id,
+        gt_item=gt_item,
+        pred_item=pred_item,
+        threshold=args.threshold,
+    )
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
