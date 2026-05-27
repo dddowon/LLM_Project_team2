@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,13 @@ from src.models.openai_client import supports_chat_temperature
 from src.utils.jsonl import read_jsonl, write_jsonl
 
 
-_GENERIC_DOC_PARENT_NAMES = frozenset({"data", "v2", "raw", "processed", "outputs"})
+_GENERIC_DOC_PARENT_NAMES = frozenset({"data", "v2", "raw", "processed", "outputs", "ocr_rag"})
+DEFAULT_OCR_CHUNKS_REL = Path("ocr_rag/ocr_input_chunks.jsonl")
+
+
+def is_ocr_handoff_chunk_file(path: Path) -> bool:
+    """OCR→RAG handoff 단일 파일은 glob 대상에서 제외하고 전용 경로로만 로드한다."""
+    return path.name == "ocr_input_chunks.jsonl" and path.parent.name == "ocr_rag"
 
 
 def find_chunk_files(
@@ -23,7 +30,13 @@ def find_chunk_files(
 ) -> list[Path]:
     """run-pipeline 산출물처럼 하위 폴더에 있는 chunks JSONL도 찾는다."""
     iterator = input_dir.rglob(pattern) if recursive else input_dir.glob(pattern)
-    return sorted(path for path in iterator if path.is_file())
+    return sorted(
+        path for path in iterator if path.is_file() and not is_ocr_handoff_chunk_file(path)
+    )
+
+
+def default_ocr_chunks_path(input_dir: Path) -> Path:
+    return input_dir / DEFAULT_OCR_CHUNKS_REL
 
 
 def load_chunk_files(
@@ -31,13 +44,37 @@ def load_chunk_files(
     pattern: str = "*_chunks.jsonl",
     *,
     recursive: bool = True,
+    extra_chunk_paths: list[Path] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for path in find_chunk_files(input_dir, pattern, recursive=recursive):
+    seen_paths: set[Path] = set()
+
+    def ingest(path: Path) -> None:
+        resolved = path.resolve()
+        if resolved in seen_paths or not path.is_file():
+            return
+        seen_paths.add(resolved)
         for row in read_jsonl(path):
             item = dict(row)
             item["_source_chunk_file"] = str(path)
             rows.append(item)
+
+    for path in find_chunk_files(input_dir, pattern, recursive=recursive):
+        ingest(path)
+
+    ocr_path = default_ocr_chunks_path(input_dir)
+    paths_to_add: list[Path] = [ocr_path, *(extra_chunk_paths or [])]
+    if not ocr_path.is_file():
+        warnings.warn(
+            f"OCR handoff가 없습니다: {ocr_path}\n"
+            "  → ./scripts/run_ocr_stage.sh 후 ./scripts/run_rag_stage.sh (또는 ocr-export-rag + embed-jsonl)",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    for path in paths_to_add:
+        ingest(path)
+
     return rows
 
 
@@ -91,14 +128,50 @@ def group_chunks_by_doc(chunks: list[dict[str, Any]]) -> dict[str, list[dict[str
     return grouped
 
 
-def sample_chunks(rows: list[dict[str, Any]], max_chunks: int) -> list[dict[str, Any]]:
+def _stride_sample(rows: list[dict[str, Any]], max_chunks: int) -> list[dict[str, Any]]:
     if len(rows) <= max_chunks:
-        return rows
-    if max_chunks <= 1:
+        return list(rows)
+    if max_chunks <= 0:
+        return []
+    if max_chunks == 1:
         return [rows[0]]
     step = (len(rows) - 1) / (max_chunks - 1)
     indices = [round(i * step) for i in range(max_chunks)]
     return [rows[index] for index in indices]
+
+
+def _dedupe_chunks_by_id(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        chunk_id = str(row.get("chunk_id") or row.get("id") or "").strip()
+        if chunk_id and chunk_id in seen:
+            continue
+        if chunk_id:
+            seen.add(chunk_id)
+        out.append(row)
+    return out
+
+
+def sample_chunks(rows: list[dict[str, Any]], max_chunks: int) -> list[dict[str, Any]]:
+    """문서당 샘플. OCR 청크가 있으면 최소 1개는 컨텍스트에 포함한다."""
+    if len(rows) <= max_chunks:
+        return rows
+    ocr_rows = [row for row in rows if is_ocr_chunk(row)]
+    other_rows = [row for row in rows if not is_ocr_chunk(row)]
+    picked: list[dict[str, Any]] = []
+    if ocr_rows:
+        ocr_slots = 1 if max_chunks == 1 else min(len(ocr_rows), max(1, max_chunks // 3))
+        picked.extend(_stride_sample(ocr_rows, ocr_slots))
+    remain = max_chunks - len(picked)
+    if remain > 0:
+        picked_ids = {str(row.get("chunk_id") or row.get("id") or "") for row in picked}
+        pool = other_rows if other_rows else [
+            row for row in ocr_rows if str(row.get("chunk_id") or row.get("id") or "") not in picked_ids
+        ]
+        if pool:
+            picked.extend(_stride_sample(pool, remain))
+    return _dedupe_chunks_by_id(picked)
 
 
 def build_generation_inputs(
@@ -228,6 +301,7 @@ def generate_eval_questions(
     pattern: str = "*_chunks.jsonl",
     *,
     recursive: bool = True,
+    extra_chunk_paths: list[Path] | None = None,
     max_docs: int = 5,
     max_chunks_per_doc: int = 8,
     max_chars_per_chunk: int = 1200,
@@ -236,10 +310,18 @@ def generate_eval_questions(
 ) -> None:
     if output_path.exists() and not overwrite:
         raise FileExistsError(f"이미 파일이 있습니다: {output_path}")
-    chunks = load_chunk_files(input_dir, pattern, recursive=recursive)
+    chunks = load_chunk_files(
+        input_dir,
+        pattern,
+        recursive=recursive,
+        extra_chunk_paths=extra_chunk_paths,
+    )
     if not chunks:
         scope = f"{input_dir}/**/{pattern}" if recursive else f"{input_dir}/{pattern}"
-        raise RuntimeError(f"청크 JSONL 파일을 찾지 못했습니다: {scope}")
+        raise RuntimeError(
+            f"청크 JSONL을 찾지 못했습니다: {scope} "
+            f"(OCR handoff: {default_ocr_chunks_path(input_dir)})"
+        )
     rows = build_generation_inputs(
         chunks,
         max_docs=max_docs,
@@ -360,7 +442,9 @@ def generate_questions_with_openai(
             else:
                 question["gold_chunk_ids"] = gold_ids
             if not question.get("eval_focus"):
-                if any(str(chunk_by_id[cid].get("source") or "") == "ocr" for cid in gold_ids):
+                if is_unanswerable:
+                    question["eval_focus"] = "text"
+                elif any(str(chunk_by_id[cid].get("source") or "") == "ocr" for cid in gold_ids):
                     question["eval_focus"] = "ocr_image"
                 else:
                     question["eval_focus"] = "text"
@@ -379,6 +463,13 @@ def main() -> None:
         help="청크 JSONL 루트 (하위 폴더까지 검색, run-pipeline 산출 구조)",
     )
     parser.add_argument("--pattern", default="*_chunks.jsonl")
+    parser.add_argument(
+        "--extra-chunk-file",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="추가 청크 JSONL (여러 번 지정 가능)",
+    )
     parser.add_argument(
         "--recursive",
         action="store_true",
@@ -423,8 +514,17 @@ def main() -> None:
     input_dir = Path(args.input_dir)
     output_path = Path(args.output)
 
+    extra_paths = [Path(path) for path in args.extra_chunk_file]
     chunk_files = find_chunk_files(input_dir, args.pattern, recursive=args.recursive)
-    chunks = load_chunk_files(input_dir, args.pattern, recursive=args.recursive)
+    ocr_path = default_ocr_chunks_path(input_dir)
+    if ocr_path.is_file() and ocr_path not in chunk_files:
+        chunk_files = sorted({*chunk_files, ocr_path})
+    chunks = load_chunk_files(
+        input_dir,
+        args.pattern,
+        recursive=args.recursive,
+        extra_chunk_paths=extra_paths,
+    )
     grouped = group_chunks_by_doc(chunks)
     print(f"recursive: {args.recursive}")
     print(f"chunk_files: {len(chunk_files)}")
@@ -449,6 +549,7 @@ def main() -> None:
         output_path=output_path,
         pattern=args.pattern,
         recursive=args.recursive,
+        extra_chunk_paths=extra_paths,
         max_docs=args.max_docs,
         max_chunks_per_doc=args.max_chunks_per_doc,
         max_chars_per_chunk=args.max_chars_per_chunk,

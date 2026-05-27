@@ -26,6 +26,12 @@ QUESTION_TYPE_LABELS = {
 
 QUESTION_TYPE_ORDER = list(QUESTION_TYPE_LABELS.values()) + ["미분류"]
 
+EVAL_FOCUS_LABELS = {
+    "text": "본문·표 (HWP)",
+    "ocr_image": "OCR/스캔 이미지",
+}
+EVAL_FOCUS_ORDER = list(EVAL_FOCUS_LABELS.values()) + ["미분류"]
+
 FAILURE_REASON_LABELS = {
     "wrong_doc": "잘못된 문서 검색 (Wrong Doc)",
     "wrong_refusal": "무단 거절 (Wrong Refusal)",
@@ -167,6 +173,20 @@ def metric_label(field: str) -> str:
 
 def row_question_type_key(row: dict[str, Any]) -> str:
     return str(row.get("question_type") or "").strip().lower()
+
+
+def row_eval_focus_key(row: dict[str, Any]) -> str:
+    focus = str(row.get("eval_focus") or "").strip().lower()
+    if focus in EVAL_FOCUS_LABELS:
+        return focus
+    return ""
+
+
+def row_eval_focus(row: dict[str, Any]) -> str:
+    key = row_eval_focus_key(row)
+    if not key:
+        return "미분류"
+    return EVAL_FOCUS_LABELS[key]
 
 
 def row_is_answerable(row: dict[str, Any]) -> bool:
@@ -385,6 +405,30 @@ def _question_type_sort_key(label: str) -> tuple[int, str]:
     if label in QUESTION_TYPE_ORDER:
         return (QUESTION_TYPE_ORDER.index(label), label)
     return (len(QUESTION_TYPE_ORDER), label)
+
+
+def _eval_focus_sort_key(label: str) -> tuple[int, str]:
+    if label in EVAL_FOCUS_ORDER:
+        return (EVAL_FOCUS_ORDER.index(label), label)
+    return (len(EVAL_FOCUS_ORDER), label)
+
+
+def summarize_by_eval_focus(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[row_eval_focus(row)].append(row)
+    summary_rows: list[dict[str, Any]] = []
+    for label, items in sorted(grouped.items(), key=lambda kv: _eval_focus_sort_key(kv[0])):
+        focus_key = row_eval_focus_key(items[0]) if items else ""
+        summary_rows.append(
+            {
+                "label": label,
+                "eval_focus_key": focus_key,
+                "n": len(items),
+                **_aggregate_metrics(items),
+            }
+        )
+    return summary_rows
 
 
 def summarize_by_question_type(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -891,26 +935,10 @@ def table_html(headers: list[str], rows: list[list[Any]]) -> str:
     )
 
 
-def report_nav_html() -> str:
-    links = (
-        ("#summary", "요약"),
-        ("#outcomes", "태스크 결과"),
-        ("#legend", "지표 정의"),
-        ("#by-type", "유형별 통계"),
-        ("#charts", "시각화"),
-        ("#failures", "오답 노트"),
-    )
-    items = "".join(
-        f'<li><a href="{html.escape(href)}">{html.escape(label)}</a></li>'
-        for href, label in links
-    )
-    return f'<nav aria-label="리포트 목차"><ul class="report-nav">{items}</ul></nav>'
-
-
-def question_type_table_html(by_type: list[dict[str, Any]]) -> str:
+def _metrics_breakdown_table_html(by_group: list[dict[str, Any]]) -> str:
     return table_html(
         [
-            "질문 성격",
+            "구분",
             "샘플 수 (n)",
             metric_label("doc_hit"),
             metric_label("retrieval_keyword_hit"),
@@ -942,9 +970,34 @@ def question_type_table_html(by_type: list[dict[str, Any]]) -> str:
                 fmt_wrong_refusal_for_type_row(row),
                 fmt_seconds(row["mean_total_latency_ms"]),
             ]
-            for row in by_type
+            for row in by_group
         ],
     )
+
+
+def report_nav_html() -> str:
+    links = (
+        ("#summary", "요약"),
+        ("#outcomes", "태스크 결과"),
+        ("#legend", "지표 정의"),
+        ("#by-type", "유형별 통계"),
+        ("#by-focus", "근거 유형"),
+        ("#charts", "시각화"),
+        ("#failures", "오답 노트"),
+    )
+    items = "".join(
+        f'<li><a href="{html.escape(href)}">{html.escape(label)}</a></li>'
+        for href, label in links
+    )
+    return f'<nav aria-label="리포트 목차"><ul class="report-nav">{items}</ul></nav>'
+
+
+def question_type_table_html(by_type: list[dict[str, Any]]) -> str:
+    return _metrics_breakdown_table_html(by_type)
+
+
+def eval_focus_table_html(by_focus: list[dict[str, Any]]) -> str:
+    return _metrics_breakdown_table_html(by_focus)
 
 
 def summary_cards_html(summary: dict[str, Any]) -> str:
@@ -1135,6 +1188,7 @@ def render_html(
     summary = summarize(rows)
     outcomes = summarize_task_outcomes(rows)
     by_type = summarize_by_question_type(rows)
+    by_focus = summarize_by_eval_focus(rows)
     pool_rows = [row for row in rows if should_include_in_failures(row)]
 
     def chart_max_value(field: str) -> float:
@@ -1199,6 +1253,13 @@ def render_html(
 <h2>📋 질문 성격별 세부 지표 통계</h2>
 <p class="note">질문 유형별 평균 지표입니다. 무단 거절 오류율은 답변 가능 유형만 집계합니다.</p>
 {question_type_table_html(by_type)}
+</section>
+<section id="by-focus" class="report-section">
+<h2>🖼️ 근거 유형별 세부 지표 (eval_focus)</h2>
+<p class="note">질문셋의 <code>eval_focus</code> 필드 기준입니다.
+<code>ocr_image</code>는 PaddleOCR 등 이미지 청크 근거 질문,
+<code>text</code>는 HWP 본문·표 청크 근거 질문입니다. 미분류는 필드가 비어 있거나 알 수 없는 값입니다.</p>
+{eval_focus_table_html(by_focus)}
 </section>
 <section id="charts" class="report-section">
 <p class="note">유형별 막대 차트입니다. 섹션 제목을 클릭하면 접거나 펼칠 수 있습니다.</p>
