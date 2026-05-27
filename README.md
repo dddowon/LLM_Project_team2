@@ -413,6 +413,13 @@ OCR과 RAG는 의존성 충돌 방지를 위해 가상환경을 분리해서 실
 ./scripts/run_all_ocr_rag_pipeline.sh
 ```
 
+기본 동작(중요):
+- `run_ocr_stage.sh`는 기본적으로 OCR 결과를 전량 RAG handoff로 export합니다.
+  - 기본값: `EXCLUDE_REVIEW_REQUIRED=0`
+  - `EXCLUDE_REVIEW_REQUIRED=1`일 때만 `review_required=true` 항목을 제외합니다.
+- `USE_DOC_UNWARPING=1`이 기본값이며, `ocr-run-batch`에 `--use-doc-unwarping`을 전달합니다.
+- `INCLUDE_HTML_CHUNK=0`이 기본값입니다. 즉 HTML 스니펫은 RAG 청크에 기본 포함되지 않습니다.
+
 
 
 선택한 일부 폴더만 OCR 수행 후 RAG handoff 파일로 내보내기:
@@ -431,10 +438,22 @@ RAG_HANDOFF_DIR="data/v2/ocr_rag" \
 
 여러 폴더를 연속 처리하려면 `DOC_KEY`를 바꿔 반복 실행하거나, 전체 처리(`DOC_KEY` 미지정)를 사용합니다.
 
+문서 왜곡 보정을 끄고 비교 실행하려면:
+
+```bash
+USE_DOC_UNWARPING=0 ./scripts/run_ocr_stage.sh
+```
+
 품질 게이트 통과건만 RAG handoff에 포함하려면:
 
 ```bash
 EXCLUDE_REVIEW_REQUIRED=1 ./scripts/run_ocr_stage.sh
+```
+
+HTML 스니펫까지 RAG 청크에 포함하려면(기본 비권장):
+
+```bash
+INCLUDE_HTML_CHUNK=1 HTML_CHUNK_MAX_CHARS=1200 ./scripts/run_ocr_stage.sh
 ```
 
 `run_ocr_stage.sh` 기본 산출물:
@@ -444,6 +463,11 @@ EXCLUDE_REVIEW_REQUIRED=1 ./scripts/run_ocr_stage.sh
 `run_rag_stage.sh` 기본 산출물:
 - `data/v2/ocr_rag/ocr_input_embedded.jsonl`
 - `data/v2/ocr_rag/chroma_index/`
+
+운영 원칙:
+- 팀 간 OCR→RAG 인터페이스 파일은 `data/v2/ocr_rag/ocr_input_chunks.jsonl` 단일 파일로 고정합니다.
+- `chroma_index/`는 RAG 임베딩/인덱싱 이후의 런타임 산출물이며 전달 표준 포맷이 아닙니다.
+- `pred_table_layout.html`은 사람 검수용 참고 파일이며, 기본 RAG 입력 계약 포맷이 아닙니다.
 
 ### OCR→RAG handoff를 CLI로 직접 생성 (`ocr-export-rag`)
 
