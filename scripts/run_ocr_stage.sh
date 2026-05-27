@@ -3,7 +3,7 @@ set -euo pipefail
 
 # [Design Intent]
 # OCR 전용 환경(ocr_vl15)에서 실행하는 Stage-1 파이프라인.
-# 1) OCR 추론/평가 산출물 생성 (paddleocr_vl 엔진은 내부에서 표 보강 추론 자동 수행)
+# 1) OCR 추론/평가 산출물 생성 (TABLE_DUAL_PASS=1일 때 표 영역 2-stage 추론 활성화)
 # 2) OCR 산출물을 RAG handoff(JSONL)로 export
 # 기본값은 전량 export이며, EXCLUDE_REVIEW_REQUIRED=1 일 때만 review_required 건을 제외한다.
 
@@ -27,6 +27,7 @@ EXCLUDE_REVIEW_REQUIRED="${EXCLUDE_REVIEW_REQUIRED:-0}"
 INCLUDE_HTML_CHUNK="${INCLUDE_HTML_CHUNK:-0}"
 HTML_CHUNK_MAX_CHARS="${HTML_CHUNK_MAX_CHARS:-1200}"
 USE_DOC_UNWARPING="${USE_DOC_UNWARPING:-1}"
+TABLE_DUAL_PASS="${TABLE_DUAL_PASS:-0}"
 
 echo "[OCR STAGE] root=${ROOT_DIR}"
 echo "[OCR STAGE] env=${OCR_ENV_NAME}"
@@ -51,6 +52,9 @@ OCR_BATCH_ARGS=(
 )
 if [[ "${USE_DOC_UNWARPING}" == "1" ]]; then
   OCR_BATCH_ARGS+=(--use-doc-unwarping)
+fi
+if [[ "${TABLE_DUAL_PASS}" == "1" ]]; then
+  OCR_BATCH_ARGS+=(--table-dual-pass)
 fi
 if [[ -n "${DOC_KEY}" ]]; then
   OCR_BATCH_ARGS+=(--doc-key "${DOC_KEY}")
@@ -82,6 +86,7 @@ python "${EXPORT_ARGS[@]}"
 echo "[OCR STAGE DONE]"
 echo "exclude_review_required: ${EXCLUDE_REVIEW_REQUIRED}"
 echo "use_doc_unwarping: ${USE_DOC_UNWARPING}"
+echo "table_dual_pass: ${TABLE_DUAL_PASS}"
 echo "include_html_chunk: ${INCLUDE_HTML_CHUNK}"
 echo "html_chunk_max_chars: ${HTML_CHUNK_MAX_CHARS}"
 echo "manifest: ${MANIFEST_OUTPUT}"
