@@ -86,49 +86,11 @@ def evaluate(config_path: str) -> None:
     rows = []
     for item in tqdm(questions, desc="Evaluating"):
         question = item["question"]
-        result = engine.answer(question)
+        doc_id = str(item.get("doc_id") or "").strip() or None
+        result = engine.answer(question, doc_id=doc_id)
         rows.append({**item, **result})
     write_jsonl(config.paths.evaluation_output, rows)
     print(f"Wrote evaluation results -> {config.paths.evaluation_output}")
-
-
-def evaluate_mlflow(
-    config_path: str,
-    *,
-    output_path: str | None,
-    judge_model: str,
-    no_llm_judge: bool,
-    tracking_uri: str | None,
-    experiment_name: str,
-    run_name: str | None,
-    evaluation_set: str | None,
-) -> None:
-    from dotenv import load_dotenv
-
-    from pathlib import Path
-
-    try:
-        from src.evaluation.mlflow_harness import run_eval_harness_mlflow
-    except ImportError as exc:
-        raise SystemExit(
-            "evaluate-mlflow requires MLflow. Install with: pip install -e \".[mlflow]\""
-        ) from exc
-
-    load_dotenv()
-    out, summary, run_id = run_eval_harness_mlflow(
-        config_path,
-        evaluation_set=Path(evaluation_set) if evaluation_set else None,
-        output_path=Path(output_path) if output_path else None,
-        judge_model=judge_model,
-        run_llm_judge=not no_llm_judge,
-        tracking_uri=tracking_uri,
-        experiment_name=experiment_name,
-        run_name=run_name,
-    )
-    print(f"Wrote harness evaluation -> {out}")
-    print(f"Summary: {summary}")
-    if run_id:
-        print(f"MLflow run_id: {run_id}")
 
 
 def evaluate_harness(
@@ -137,6 +99,7 @@ def evaluate_harness(
     output_path: str | None,
     judge_model: str,
     no_llm_judge: bool,
+    no_correctness_judge: bool,
     no_langsmith_feedback: bool,
 ) -> None:
     from src.evaluation.langsmith_harness import run_eval_harness
@@ -146,6 +109,7 @@ def evaluate_harness(
         output_path=Path(output_path) if output_path else None,
         judge_model=judge_model,
         run_llm_judge=not no_llm_judge,
+        run_correctness_judge=not no_correctness_judge,
         langsmith_feedback=not no_langsmith_feedback,
     )
     print(f"Wrote harness evaluation -> {out}")
@@ -189,6 +153,38 @@ def build_chroma_index(input_path: str, index_dir: str, doc_id: str | None = Non
         doc_id=doc_id,
     )
     print(f"Built Chroma index with {count} chunks -> {index_dir}")
+
+
+def merge_embedded_checkpoint(
+    config_path: str,
+    *,
+    input_dir: str,
+    index_dir: str | None,
+    merged_output: str | None,
+    pattern: str,
+    recursive: bool,
+    merge_only: bool,
+) -> None:
+    from src.pipeline.merge_embedded import build_unified_chroma_index
+
+    resolved_index = Path(resolve_index_dir(config_path, index_dir))
+    result = build_unified_chroma_index(
+        input_dir=Path(input_dir),
+        index_dir=resolved_index,
+        merged_output=Path(merged_output) if merged_output else None,
+        pattern=pattern,
+        recursive=recursive,
+        skip_chroma_build=merge_only,
+    )
+    print(f"merged_sources: {result.source_files}")
+    print(f"merged_rows: {result.total_rows}")
+    print(f"duplicate_chunk_ids_rewritten: {result.duplicate_chunk_ids}")
+    print(f"merged_jsonl: {result.merged_path}")
+    if merge_only:
+        print("skip_chroma_build: True (merge JSONL only)")
+    else:
+        print(f"index_dir: {result.index_dir}")
+        print(f"chunks_in_index: {result.chunks_in_index}")
 
 
 def parse_hwp(
@@ -755,7 +751,7 @@ def main() -> None:
     )
     harness_parser.add_argument(
         "--judge-model",
-        default="gpt-4o",
+        default="gpt-5-mini",
         help="OpenAI chat model for faithfulness/relevance scoring",
     )
     harness_parser.add_argument(
@@ -768,45 +764,10 @@ def main() -> None:
         action="store_true",
         help="Do not attach LangSmith Client feedback scores (tracing still follows LANGSMITH_* env)",
     )
-
-    mlflow_parser = subparsers.add_parser(
-        "evaluate-mlflow",
-        help="Same as evaluate-harness but logs to MLflow (requires pip install -e '.[mlflow]')",
-    )
-    mlflow_parser.add_argument(
-        "--output",
-        default=None,
-        help="Output JSONL path (default: outputs/eval_harness_results.jsonl)",
-    )
-    mlflow_parser.add_argument(
-        "--evaluation-set",
-        default=None,
-        help="Evaluation questions JSONL (default: config paths.evaluation_set)",
-    )
-    mlflow_parser.add_argument(
-        "--judge-model",
-        default="gpt-4o-mini",
-        help="OpenAI chat model for faithfulness/relevance scoring",
-    )
-    mlflow_parser.add_argument(
-        "--no-llm-judge",
+    harness_parser.add_argument(
+        "--no-correctness-judge",
         action="store_true",
-        help="Skip GPT judge (retrieval keyword metrics only if keywords are present)",
-    )
-    mlflow_parser.add_argument(
-        "--tracking-uri",
-        default=None,
-        help="MLflow tracking URI (overrides MLFLOW_TRACKING_URI env; default: local ./mlruns)",
-    )
-    mlflow_parser.add_argument(
-        "--experiment-name",
-        default="bidmate-rag-eval",
-        help="MLflow experiment name",
-    )
-    mlflow_parser.add_argument(
-        "--run-name",
-        default=None,
-        help="MLflow run name (default: eval_YYYYMMDD_HHMMSS UTC)",
+        help="Skip expected_answer correctness judge (retrieval + f/r/s only)",
     )
 
     check_parser = subparsers.add_parser(
@@ -834,6 +795,41 @@ def main() -> None:
         help="Chroma checkpoint output directory; defaults to config paths.index_dir",
     )
     chroma_parser.add_argument("--doc-id", default=None, help="Optional doc id override")
+
+    merge_parser = subparsers.add_parser(
+        "merge-embedded",
+        help="Merge data/v2 *_embedded.jsonl files and build unified Chroma checkpoint",
+    )
+    merge_parser.add_argument(
+        "--input-dir",
+        default="data/v2",
+        help="Root directory to search for embedded JSONL files",
+    )
+    merge_parser.add_argument(
+        "--index-dir",
+        default=None,
+        help="Unified Chroma output directory; defaults to config paths.index_dir",
+    )
+    merge_parser.add_argument(
+        "--merged-output",
+        default=None,
+        help="Merged embedded JSONL path (default: checkpoints/all_embedded.jsonl)",
+    )
+    merge_parser.add_argument(
+        "--pattern",
+        default="*_embedded.jsonl",
+        help="Glob pattern for embedded files under --input-dir",
+    )
+    merge_parser.add_argument(
+        "--no-recursive",
+        action="store_true",
+        help="Search only --input-dir itself, not subfolders",
+    )
+    merge_parser.add_argument(
+        "--merge-only",
+        action="store_true",
+        help="Write merged JSONL only; skip build-chroma",
+    )
 
     parse_parser = subparsers.add_parser("parse-hwp", help="Parse HWP into prechunk JSONL")
     parse_input = parse_parser.add_mutually_exclusive_group(required=True)
@@ -1048,18 +1044,8 @@ def main() -> None:
             output_path=args.output,
             judge_model=args.judge_model,
             no_llm_judge=args.no_llm_judge,
+            no_correctness_judge=args.no_correctness_judge,
             no_langsmith_feedback=args.no_langsmith_feedback,
-        )
-    elif args.command == "evaluate-mlflow":
-        evaluate_mlflow(
-            args.config,
-            output_path=args.output,
-            judge_model=args.judge_model,
-            no_llm_judge=args.no_llm_judge,
-            tracking_uri=args.tracking_uri,
-            experiment_name=args.experiment_name,
-            run_name=args.run_name,
-            evaluation_set=args.evaluation_set,
         )
     elif args.command == "check-setup":
         from src.utils.setup_check import run_setup_check
@@ -1078,6 +1064,16 @@ def main() -> None:
             input_path=args.input,
             index_dir=str(resolve_index_dir(args.config, args.index_dir)),
             doc_id=args.doc_id,
+        )
+    elif args.command == "merge-embedded":
+        merge_embedded_checkpoint(
+            args.config,
+            input_dir=args.input_dir,
+            index_dir=args.index_dir,
+            merged_output=args.merged_output,
+            pattern=args.pattern,
+            recursive=not args.no_recursive,
+            merge_only=args.merge_only,
         )
     elif args.command == "parse-hwp":
         parse_hwp(

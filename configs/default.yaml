@@ -24,8 +24,8 @@ chunking:
   min_chunk_chars: 80
 
 retrieval:
-  top_k: 5
-  score_threshold: 0.0
+  top_k: 8
+  score_threshold: 0.25
 
 generation:
   max_context_chars: 12000
