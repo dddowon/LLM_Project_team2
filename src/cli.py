@@ -584,12 +584,36 @@ def export_ocr_rag_handoff(
     print(f"chunks_output: {output_chunks}")
 
 
-def extract_ocr_images(input_dir: str, output_dir: str, limit: int = 0) -> None:
+def extract_ocr_images(
+    input_dir: str,
+    output_dir: str,
+    *,
+    limit: int = 0,
+    source_type: str = "all",
+    recursive: bool = False,
+    pdf_min_width: int = 100,
+    pdf_min_height: int = 40,
+    pdf_min_area: int = 10_000,
+    pdf_min_bytes: int = 1_000,
+) -> None:
     from pathlib import Path
 
-    from src.Parsing.ocr.inference.extract_hwp_images import extract_images_in_dir
+    from src.Parsing.ocr.inference.extract_hwp_pdf_images import extract_images_in_dir
 
-    saved = extract_images_in_dir(Path(input_dir), Path(output_dir), limit=limit)
+    include_hwp = source_type in {"all", "hwp"}
+    include_pdf = source_type in {"all", "pdf"}
+    saved = extract_images_in_dir(
+        Path(input_dir),
+        Path(output_dir),
+        limit=limit,
+        include_hwp=include_hwp,
+        include_pdf=include_pdf,
+        recursive=recursive,
+        pdf_min_width=pdf_min_width,
+        pdf_min_height=pdf_min_height,
+        pdf_min_area=pdf_min_area,
+        pdf_min_bytes=pdf_min_bytes,
+    )
     print(f"saved_images: {len(saved)}")
     print(f"output_dir: {output_dir}")
 
@@ -2612,11 +2636,26 @@ def main() -> None:
 
     ocr_parser = subparsers.add_parser(
         "extract-ocr-images",
-        help="Extract embedded images from HWP files for OCR ground-truth preparation",
+        help="Extract embedded images from HWP/PDF files for OCR preparation",
     )
-    ocr_parser.add_argument("--input-dir", required=True, help="Directory containing HWP files")
-    ocr_parser.add_argument("--output-dir", required=True, help="Directory to save extracted images")
+    ocr_parser.add_argument("--input-dir", required=True, help="Directory containing HWP/PDF files")
+    ocr_parser.add_argument(
+        "--output-dir",
+        default="data/v2/ocr_images",
+        help="Directory to save extracted images (default: data/v2/ocr_images)",
+    )
     ocr_parser.add_argument("--limit", type=int, default=0, help="Process first N files only; 0=all")
+    ocr_parser.add_argument(
+        "--source-type",
+        choices=["all", "hwp", "pdf"],
+        default="all",
+        help="Source file types to process",
+    )
+    ocr_parser.add_argument("--recursive", action="store_true", help="Recursively search input-dir")
+    ocr_parser.add_argument("--pdf-min-width", type=int, default=100, help="PDF image min width")
+    ocr_parser.add_argument("--pdf-min-height", type=int, default=40, help="PDF image min height")
+    ocr_parser.add_argument("--pdf-min-area", type=int, default=10_000, help="PDF image min area")
+    ocr_parser.add_argument("--pdf-min-bytes", type=int, default=1_000, help="PDF image min byte size")
 
     build_pred_parser = subparsers.add_parser(
         "build-pred-structured",
@@ -2949,7 +2988,17 @@ def main() -> None:
             html_chunk_max_chars=args.html_chunk_max_chars,
         )
     elif args.command == "extract-ocr-images":
-        extract_ocr_images(input_dir=args.input_dir, output_dir=args.output_dir, limit=args.limit)
+        extract_ocr_images(
+            input_dir=args.input_dir,
+            output_dir=args.output_dir,
+            limit=args.limit,
+            source_type=args.source_type,
+            recursive=args.recursive,
+            pdf_min_width=args.pdf_min_width,
+            pdf_min_height=args.pdf_min_height,
+            pdf_min_area=args.pdf_min_area,
+            pdf_min_bytes=args.pdf_min_bytes,
+        )
     elif args.command == "build-pred-structured":
         build_pred_structured(
             gt_path=args.gt,

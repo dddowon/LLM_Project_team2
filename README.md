@@ -321,6 +321,29 @@ Threshold 의미:
   - 즉, **점수 계산 기준을 조정**하는 파라미터입니다.
 - 둘은 역할이 다르므로 같은 값으로 고정할 필요는 없습니다.
 
+### OCR 입력 이미지 추출 (`extract-ocr-images`)
+
+HWP/PDF를 한 번에 처리해서 `data/v2/ocr_images/<doc_key>/img_XXX.<ext>` 구조로 저장합니다.
+
+```bash
+python -m src.cli extract-ocr-images \
+  --input-dir "data/raw" \
+  --output-dir "data/v2/ocr_images" \
+  --source-type all
+```
+
+PDF에서 불필요한 작은 이미지를 줄이려면 필터 임계값을 조정합니다.
+
+```bash
+python -m src.cli extract-ocr-images \
+  --input-dir "data/raw" \
+  --source-type pdf \
+  --pdf-min-width 100 \
+  --pdf-min-height 40 \
+  --pdf-min-area 10000 \
+  --pdf-min-bytes 1000
+```
+
 ### 이미지 1개 실행 (`ocr-run-image`)
 
 ```bash
