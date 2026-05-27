@@ -11,6 +11,7 @@ dependencies = [
     "openai>=1.99.0",
     "pandas>=2.2.0",
     "pydantic>=2.7.0",
+    "pymupdf>=1.24.0",
     "pypdf>=4.2.0",
     "python-dotenv>=1.0.1",
     "pyyaml>=6.0.1",
@@ -21,9 +22,6 @@ dependencies = [
 dev = [
     "pytest>=8.2.0",
     "ruff>=0.5.0",
-]
-mlflow = [
-    "mlflow>=2.14.0",
 ]
 hwp = [
     "pyhwp>=0.1b15",

@@ -125,3 +125,4 @@ __pycache__/
 .venv/
 venv/
 .codex
+.DS_Store

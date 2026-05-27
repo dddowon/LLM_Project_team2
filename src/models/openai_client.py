@@ -25,7 +25,7 @@ class OpenAIModelClient:
             "model": model,
             "input": prompt,
         }
-        if temperature is not None and _supports_temperature(model):
+        if temperature is not None and supports_chat_temperature(model):
             request["temperature"] = temperature
 
         try:
@@ -38,5 +38,6 @@ class OpenAIModelClient:
         return response.output_text
 
 
-def _supports_temperature(model: str) -> bool:
+def supports_chat_temperature(model: str) -> bool:
+    """GPT-5 계열은 chat/responses API에서 temperature 미지원인 경우가 많음."""
     return not model.lower().startswith("gpt-5")
