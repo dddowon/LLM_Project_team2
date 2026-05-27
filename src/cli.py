@@ -40,6 +40,23 @@ def _discover_hwp_in_dir(input_dir: str | Path) -> list[Path]:
     return input_files
 
 
+def _discover_hwp_pdf_in_dir(
+    input_dir: str | Path,
+    *,
+    glob_pattern: str = "*",
+    recursive: bool = False,
+    limit_files: int = 0,
+) -> list[Path]:
+    from src.pipeline.mixed_slim_pipeline import discover_source_files
+
+    input_files = discover_source_files(Path(input_dir), glob_pattern=glob_pattern, recursive=recursive)
+    if limit_files:
+        input_files = input_files[:limit_files]
+    if not input_files:
+        raise SystemExit(f"No HWP/PDF files found in: {input_dir}")
+    return input_files
+
+
 def ingest(config_path: str) -> None:
     from tqdm import tqdm
 
@@ -479,6 +496,69 @@ def chunk_hwp_slim(
         include_cover=not exclude_cover,
         include_toc=include_toc,
         stop_on_error=stop_on_error,
+    )
+    for key, value in result.items():
+        print(f"{key}: {value}")
+
+
+def chunk_mixed_slim(
+    input_dir: str,
+    input_files: list[str] | None,
+    output_path: str | None,
+    errors_path: str | None,
+    tables_output_path: str | None,
+    glob_pattern: str,
+    recursive: bool,
+    limit_files: int,
+    group_size: int,
+    text_chunk_size: int,
+    text_overlap: int,
+    table_chunk_size: int,
+    max_table_rows: int,
+    include_toc: bool,
+    exclude_cover: bool,
+    stop_on_error: bool,
+    pdf_backend: str,
+    pdf_no_tables: bool,
+) -> None:
+    from pathlib import Path
+
+    from src.pipeline.mixed_slim_pipeline import chunk_mixed_dir_to_slim_jsonl, safe_output_stem
+
+    selected_input_files = [Path(path) for path in input_files] if input_files else None
+    if output_path is None:
+        if selected_input_files and len(selected_input_files) == 1:
+            stem = safe_output_stem(selected_input_files[0].stem)
+            resolved_output_path = Path("data/v2/samples") / f"{stem}_mixed_slim.jsonl"
+            resolved_tables_output_path = (
+                Path(tables_output_path) if tables_output_path else Path("data/v2/samples") / f"{stem}_mixed_tables_raw.jsonl"
+            )
+        else:
+            resolved_output_path = Path("data/v2/mixed_chunks_slim.jsonl")
+            resolved_tables_output_path = Path(tables_output_path) if tables_output_path else None
+    else:
+        resolved_output_path = Path(output_path)
+        resolved_tables_output_path = Path(tables_output_path) if tables_output_path else None
+
+    result = chunk_mixed_dir_to_slim_jsonl(
+        input_dir=Path(input_dir),
+        input_files=selected_input_files,
+        output_path=resolved_output_path,
+        errors_path=Path(errors_path) if errors_path else None,
+        tables_output_path=resolved_tables_output_path,
+        glob_pattern=glob_pattern,
+        recursive=recursive,
+        limit_files=limit_files,
+        group_size=group_size,
+        text_chunk_size=text_chunk_size,
+        text_overlap=text_overlap,
+        table_chunk_size=table_chunk_size,
+        max_table_rows=max_table_rows,
+        include_cover=not exclude_cover,
+        include_toc=include_toc,
+        stop_on_error=stop_on_error,
+        pdf_backend=pdf_backend,
+        pdf_extract_tables=not pdf_no_tables,
     )
     for key, value in result.items():
         print(f"{key}: {value}")
@@ -2146,6 +2226,45 @@ def _pipeline_paths_for_input(
     return prechunk, heading_debug, chunks, embedded, metadata_sample
 
 
+def _parse_pipeline_input_file(
+    input_file: Path,
+    *,
+    prechunk: Path,
+    heading_debug: Path | None,
+    group_size: int,
+    debug_headings: bool,
+    pdf_backend: str,
+    pdf_no_tables: bool,
+) -> None:
+    suffix = input_file.suffix.lower()
+    if suffix == ".hwp":
+        parse_hwp(
+            str(prechunk),
+            input_path=str(input_file),
+            debug_headings=str(heading_debug) if debug_headings and heading_debug else None,
+            group_size=group_size,
+        )
+        return
+
+    if suffix == ".pdf":
+        from src.Parsing.pdf_parsing import build_prechunk_records, write_jsonl
+
+        records = build_prechunk_records(
+            input_file,
+            group_size=group_size,
+            debug_headings_path=heading_debug if debug_headings else None,
+            backend=pdf_backend,
+            extract_tables=not pdf_no_tables,
+        )
+        write_jsonl(prechunk, records)
+        print(f"parsed_records: {len(records)}")
+        print(f"written_records: {len(records)}")
+        print(f"output: {prechunk}")
+        return
+
+    raise SystemExit(f"Unsupported run-pipeline input extension: {input_file.suffix}")
+
+
 def _run_pipeline_for_file(
     input_file: Path,
     *,
@@ -2163,6 +2282,8 @@ def _run_pipeline_for_file(
     chunks_output: str | None = None,
     embedded_output: str | None = None,
     debug_headings_output: str | None = None,
+    pdf_backend: str = "auto",
+    pdf_no_tables: bool = False,
 ) -> None:
     import chromadb
 
@@ -2177,12 +2298,15 @@ def _run_pipeline_for_file(
     resolved_index_dir = index_dir or str(prechunk.parent / "chroma_index")
 
     print(f"pipeline_input: {input_file}")
-    print("[1/4] parse-hwp")
-    parse_hwp(
-        str(prechunk),
-        input_path=str(input_file),
-        debug_headings=str(heading_debug) if debug_headings and heading_debug else None,
+    print("[1/4] parse-document")
+    _parse_pipeline_input_file(
+        input_file,
+        prechunk=prechunk,
+        heading_debug=heading_debug,
         group_size=group_size,
+        debug_headings=debug_headings,
+        pdf_backend=pdf_backend,
+        pdf_no_tables=pdf_no_tables,
     )
 
     print("[2/4] chunk-jsonl")
@@ -2225,6 +2349,97 @@ def _run_pipeline_for_file(
         print(f"metadata_sample: {metadata_sample}")
 
 
+def _dump_chroma_metadata_sample(index_dir: str, output_path: Path, *, dump_limit: int) -> None:
+    import chromadb
+
+    client = chromadb.PersistentClient(path=str(index_dir))
+    col = client.get_collection("rfp_chunks")
+    result = col.get(limit=max(1, dump_limit), include=["metadatas"])
+    keys = [
+        "file_name",
+        "section_path_text",
+        "section_type",
+        "table_type",
+        "table_id",
+        "row_range",
+        "chunk_id",
+        "doc_id",
+        "row_idx",
+    ]
+    rows = [{k: m.get(k) for k in keys} for m in result.get("metadatas", [])]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _run_pipeline_for_mixed_dir(
+    input_dir: Path,
+    *,
+    output_dir: str,
+    index_dir: str | None,
+    doc_id: str | None,
+    model: str,
+    batch_size: int,
+    force_real: bool,
+    group_size: int,
+    dump_metadata_sample: bool,
+    dump_limit: int,
+    glob_pattern: str,
+    recursive: bool,
+    limit_files: int,
+    pdf_backend: str,
+    pdf_no_tables: bool,
+) -> None:
+    from src.pipeline.mixed_slim_pipeline import chunk_mixed_dir_to_slim_jsonl
+
+    output_root = Path(output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
+    chunks = output_root / "mixed_chunks_slim.jsonl"
+    tables = output_root / "mixed_tables_raw.jsonl"
+    errors = output_root / "mixed_chunks_slim_errors.json"
+    embedded = output_root / "mixed_embedded.jsonl"
+    metadata_sample = output_root / "mixed_chroma_metadata_sample.json"
+    resolved_index_dir = index_dir or str(output_root / "chroma_index")
+
+    print(f"pipeline_input_dir: {input_dir}")
+    print("[1/3] parse/chunk-mixed-slim")
+    result = chunk_mixed_dir_to_slim_jsonl(
+        input_dir=input_dir,
+        output_path=chunks,
+        errors_path=errors,
+        tables_output_path=tables,
+        glob_pattern=glob_pattern,
+        recursive=recursive,
+        limit_files=limit_files,
+        group_size=group_size,
+        pdf_backend=pdf_backend,
+        pdf_extract_tables=not pdf_no_tables,
+    )
+    for key, value in result.items():
+        print(f"{key}: {value}")
+
+    print("[2/3] embed-jsonl")
+    embed_jsonl(
+        input_path=str(chunks),
+        output_path=str(embedded),
+        model=model,
+        batch_size=batch_size,
+        force_real=force_real,
+    )
+
+    print("[3/3] build-chroma")
+    build_chroma_index(input_path=str(embedded), index_dir=resolved_index_dir, doc_id=doc_id)
+    if dump_metadata_sample:
+        _dump_chroma_metadata_sample(resolved_index_dir, metadata_sample, dump_limit=dump_limit)
+
+    print("pipeline_done")
+    print(f"chunks: {chunks}")
+    print(f"tables: {tables}")
+    print(f"embedded: {embedded}")
+    print(f"index_dir: {resolved_index_dir}")
+    if dump_metadata_sample:
+        print(f"metadata_sample: {metadata_sample}")
+
+
 def run_pipeline(
     *,
     input_path: str | None = None,
@@ -2243,11 +2458,16 @@ def run_pipeline(
     chunks_output: str | None = None,
     embedded_output: str | None = None,
     debug_headings_output: str | None = None,
+    glob_pattern: str = "*",
+    recursive: bool = False,
+    limit_files: int = 0,
+    pdf_backend: str = "auto",
+    pdf_no_tables: bool = False,
 ) -> None:
     _require_exactly_one(
         a=input_path,
         b=input_dir,
-        a_name="--input (single HWP)",
+        a_name="--input (single HWP/PDF)",
         b_name="--input-dir (folder)",
     )
 
@@ -2272,28 +2492,34 @@ def run_pipeline(
             chunks_output=chunks_output,
             embedded_output=embedded_output,
             debug_headings_output=debug_headings_output,
+            pdf_backend=pdf_backend,
+            pdf_no_tables=pdf_no_tables,
         )
         return
 
-    input_files = _discover_hwp_in_dir(input_dir)  # type: ignore[arg-type]
-
-    resolved_index = index_dir
-    for index, input_file in enumerate(input_files, start=1):
-        print(f"\n=== [{index}/{len(input_files)}] {input_file.name} ===")
-        _run_pipeline_for_file(
-            input_file,
-            output_dir=output_dir,
-            index_dir=resolved_index,
-            doc_id=doc_id,
-            model=model,
-            batch_size=batch_size,
-            force_real=force_real,
-            group_size=group_size,
-            debug_headings=debug_headings,
-            dump_metadata_sample=dump_metadata_sample and index == len(input_files),
-            dump_limit=dump_limit,
-        )
-    print(f"\nall_done: {len(input_files)} file(s)")
+    _discover_hwp_pdf_in_dir(
+        input_dir,  # type: ignore[arg-type]
+        glob_pattern=glob_pattern,
+        recursive=recursive,
+        limit_files=limit_files,
+    )
+    _run_pipeline_for_mixed_dir(
+        Path(input_dir),  # type: ignore[arg-type]
+        output_dir=output_dir,
+        index_dir=index_dir,
+        doc_id=doc_id,
+        model=model,
+        batch_size=batch_size,
+        force_real=force_real,
+        group_size=group_size,
+        dump_metadata_sample=dump_metadata_sample,
+        dump_limit=dump_limit,
+        glob_pattern=glob_pattern,
+        recursive=recursive,
+        limit_files=limit_files,
+        pdf_backend=pdf_backend,
+        pdf_no_tables=pdf_no_tables,
+    )
 
 
 def main() -> None:
@@ -2552,6 +2778,47 @@ def main() -> None:
     chunk_slim_parser.add_argument("--exclude-cover", action="store_true", help="Exclude cover_text records")
     chunk_slim_parser.add_argument("--stop-on-error", action="store_true", help="Stop when one file fails")
 
+    chunk_mixed_parser = subparsers.add_parser(
+        "chunk-mixed-slim",
+        help="Parse HWP/PDF files into one slim JSONL including section and table chunks",
+    )
+    chunk_mixed_parser.add_argument("--input-dir", default="data/v1/raw", help="Directory containing HWP/PDF files")
+    chunk_mixed_parser.add_argument(
+        "--input-file",
+        action="append",
+        default=None,
+        help="Specific HWP/PDF file to process; can be passed multiple times. Overrides directory discovery.",
+    )
+    chunk_mixed_parser.add_argument("--output", default=None, help="Output slim chunk JSONL")
+    chunk_mixed_parser.add_argument("--errors-output", default=None, help="Optional errors JSON path")
+    chunk_mixed_parser.add_argument(
+        "--tables-output",
+        default=None,
+        help="Optional table-only raw JSONL path; defaults to <output_stem>_tables_raw.jsonl",
+    )
+    chunk_mixed_parser.add_argument("--glob", default="*", help="Filename glob before extension filtering")
+    chunk_mixed_parser.add_argument("--recursive", action="store_true", help="Search input directory recursively")
+    chunk_mixed_parser.add_argument("--limit-files", type=int, default=0, help="Process first N files; 0=all")
+    chunk_mixed_parser.add_argument("--group-size", type=int, default=8, help="Table row group size")
+    chunk_mixed_parser.add_argument("--text-chunk-size", type=int, default=900, help="Text chunk body size")
+    chunk_mixed_parser.add_argument("--text-overlap", type=int, default=150, help="Text overlap chars")
+    chunk_mixed_parser.add_argument("--table-chunk-size", type=int, default=1000, help="Table chunk body size")
+    chunk_mixed_parser.add_argument("--max-table-rows", type=int, default=6, help="Max table rows per chunk")
+    chunk_mixed_parser.add_argument("--include-toc", action="store_true", help="Include TOC records")
+    chunk_mixed_parser.add_argument("--exclude-cover", action="store_true", help="Exclude cover_text records")
+    chunk_mixed_parser.add_argument("--stop-on-error", action="store_true", help="Stop when one file fails")
+    chunk_mixed_parser.add_argument(
+        "--pdf-backend",
+        choices=("auto", "pymupdf", "pypdf"),
+        default="auto",
+        help="PDF parser backend. auto prefers PyMuPDF, then pypdf fallback.",
+    )
+    chunk_mixed_parser.add_argument(
+        "--pdf-no-tables",
+        action="store_true",
+        help="Disable PyMuPDF PDF table extraction and keep PDF text only.",
+    )
+
     convert_parser = subparsers.add_parser(
         "convert-embedding-input",
         help="Convert prechunk/chunk JSONL to embedding input JSONL",
@@ -2772,15 +3039,15 @@ def main() -> None:
         help="Run parse->chunk->embed->build-chroma in one command",
     )
     pipeline_input = pipeline_parser.add_mutually_exclusive_group(required=True)
-    pipeline_input.add_argument("--input", help="Single HWP file path")
+    pipeline_input.add_argument("--input", help="Single HWP/PDF file path")
     pipeline_input.add_argument(
         "--input-dir",
-        help="Folder of HWP files (*.hwp in that folder only; one pipeline per file)",
+        help="Folder of HWP/PDF files; builds one unified chunk/embedding/index output",
     )
     pipeline_parser.add_argument(
         "--output-dir",
         default="data/v2",
-        help="Base output directory when --*-output paths are omitted (per-file subfolder)",
+        help="Base output directory when --*-output paths are omitted",
     )
     pipeline_parser.add_argument("--prechunk-output", default=None, help="Prechunk JSONL path (--input only)")
     pipeline_parser.add_argument("--chunks-output", default=None, help="Chunks JSONL path (--input only)")
@@ -2800,6 +3067,20 @@ def main() -> None:
     pipeline_parser.add_argument("--batch-size", type=int, default=64, help="Embedding batch size")
     pipeline_parser.add_argument("--force-real", action="store_true", help="Fail if OPENAI_API_KEY is missing")
     pipeline_parser.add_argument("--group-size", type=int, default=8, help="Table row group size for parser")
+    pipeline_parser.add_argument("--glob", default="*", help="Input-dir filename glob before extension filtering")
+    pipeline_parser.add_argument("--recursive", action="store_true", help="Search input-dir recursively")
+    pipeline_parser.add_argument("--limit-files", type=int, default=0, help="Process first N input-dir files; 0=all")
+    pipeline_parser.add_argument(
+        "--pdf-backend",
+        choices=("auto", "pymupdf", "pypdf"),
+        default="auto",
+        help="PDF parser backend. auto prefers PyMuPDF, then pypdf fallback.",
+    )
+    pipeline_parser.add_argument(
+        "--pdf-no-tables",
+        action="store_true",
+        help="Disable PDF table extraction and keep PDF text only.",
+    )
     pipeline_parser.add_argument("--no-debug-headings", action="store_true", help="Skip heading debug JSONL")
     pipeline_parser.add_argument(
         "--dump-metadata-sample",
@@ -2930,6 +3211,27 @@ def main() -> None:
             include_toc=args.include_toc,
             exclude_cover=args.exclude_cover,
             stop_on_error=args.stop_on_error,
+        )
+    elif args.command == "chunk-mixed-slim":
+        chunk_mixed_slim(
+            input_dir=args.input_dir,
+            input_files=args.input_file,
+            output_path=args.output,
+            errors_path=args.errors_output,
+            tables_output_path=args.tables_output,
+            glob_pattern=args.glob,
+            recursive=args.recursive,
+            limit_files=args.limit_files,
+            group_size=args.group_size,
+            text_chunk_size=args.text_chunk_size,
+            text_overlap=args.text_overlap,
+            table_chunk_size=args.table_chunk_size,
+            max_table_rows=args.max_table_rows,
+            include_toc=args.include_toc,
+            exclude_cover=args.exclude_cover,
+            stop_on_error=args.stop_on_error,
+            pdf_backend=args.pdf_backend,
+            pdf_no_tables=args.pdf_no_tables,
         )
     elif args.command == "convert-embedding-input":
         convert_embedding_input(input_path=args.input, output_path=args.output, doc_id=args.doc_id)
@@ -3074,6 +3376,11 @@ def main() -> None:
             chunks_output=args.chunks_output,
             embedded_output=args.embedded_output,
             debug_headings_output=args.debug_headings_output,
+            glob_pattern=args.glob,
+            recursive=args.recursive,
+            limit_files=args.limit_files,
+            pdf_backend=args.pdf_backend,
+            pdf_no_tables=args.pdf_no_tables,
         )
 
 
