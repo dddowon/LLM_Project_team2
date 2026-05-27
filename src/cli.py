@@ -1,10 +1,29 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 import sys
 from pathlib import Path
+
+DEFAULT_OCR_ENGINE_MATRIX = (
+    "pp_ocrv5",
+    "pp_ocrv5_transformers",
+    "pp_structurev3",
+    "table_recognition_v2",
+    "paddleocr_vl",
+)
+
+
+def _normalize_ocr_engine(ocr_engine: str) -> str:
+    key = str(ocr_engine).strip().lower()
+    if key in DEFAULT_OCR_ENGINE_MATRIX:
+        return key
+    supported = ", ".join(DEFAULT_OCR_ENGINE_MATRIX)
+    raise ValueError(
+        f"Unsupported OCR engine: {ocr_engine}. Use one of: {supported}"
+    )
 
 
 def _require_exactly_one(*, a, b, a_name: str, b_name: str) -> None:
@@ -531,6 +550,1558 @@ def convert_embedding_input(input_path: str, output_path: str, doc_id: str | Non
     print(f"Converted {count} rows -> {output_path}")
 
 
+def export_ocr_rag_handoff(
+    *,
+    ocr_eval_root: str,
+    output_manifest: str,
+    output_chunks: str,
+    engine: str | None,
+    doc_key: str | None,
+    include_review_required: bool,
+    include_html_chunk: bool,
+    html_chunk_max_chars: int,
+) -> None:
+    from src.pipeline.ocr_rag_bridge import export_ocr_eval_to_rag_inputs
+
+    manifest_count, chunk_count = export_ocr_eval_to_rag_inputs(
+        ocr_eval_root=Path(ocr_eval_root),
+        output_manifest=Path(output_manifest),
+        output_chunks=Path(output_chunks),
+        engine=engine,
+        doc_key=doc_key,
+        include_review_required=include_review_required,
+        include_html_chunk=include_html_chunk,
+        html_chunk_max_chars=html_chunk_max_chars,
+    )
+    print("ocr_export_rag_done")
+    print(f"manifest_rows: {manifest_count}")
+    print(f"chunk_rows: {chunk_count}")
+    print(f"manifest_output: {output_manifest}")
+    print(f"chunks_output: {output_chunks}")
+
+
+def extract_ocr_images(input_dir: str, output_dir: str, limit: int = 0) -> None:
+    from pathlib import Path
+
+    from src.Parsing.ocr.inference.extract_hwp_images import extract_images_in_dir
+
+    saved = extract_images_in_dir(Path(input_dir), Path(output_dir), limit=limit)
+    print(f"saved_images: {len(saved)}")
+    print(f"output_dir: {output_dir}")
+
+
+def _to_list(value: object) -> list[object]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, str):
+        return [value]
+    try:
+        return list(value)  # type: ignore[arg-type]
+    except TypeError:
+        return [value]
+
+
+def _make_json_safe(value: object) -> object:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _make_json_safe(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_make_json_safe(item) for item in value]
+    if hasattr(value, "tolist"):
+        try:
+            return _make_json_safe(value.tolist())
+        except Exception:
+            pass
+    if hasattr(value, "item"):
+        try:
+            return _make_json_safe(value.item())
+        except Exception:
+            pass
+    return str(value)
+
+
+def _result_item_to_dict(item: object) -> dict:
+    candidate: object
+    if hasattr(item, "to_dict"):
+        try:
+            candidate = item.to_dict()  # type: ignore[no-any-return]
+            safe = _make_json_safe(candidate)
+            if isinstance(safe, dict):
+                return safe
+            return {"raw": str(safe)}
+        except Exception:
+            pass
+    if isinstance(item, dict):
+        safe = _make_json_safe(item)
+        if isinstance(safe, dict):
+            return safe
+        return {"raw": str(safe)}
+    return {"raw": str(_make_json_safe(item))}
+
+
+def _collect_texts(value: object) -> list[str]:
+    texts: list[str] = []
+    if value is None:
+        return texts
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            texts.append(text)
+        return texts
+    if isinstance(value, dict):
+        preferred_keys = [
+            "text",
+            "texts",
+            "rec_texts",
+            "markdown",
+            "content",
+            "result",
+            "answer",
+            "output",
+            "prediction",
+            "html",
+            "table_html",
+            "table_markdown",
+        ]
+        ignore_keys = {"image", "image_path", "input_path", "query", "prompt"}
+        used_keys: set[str] = set()
+        for key in preferred_keys:
+            if key in value:
+                texts.extend(_collect_texts(value.get(key)))
+                used_keys.add(key)
+        for key, nested in value.items():
+            if key in ignore_keys or key in used_keys:
+                continue
+            texts.extend(_collect_texts(nested))
+        return texts
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            texts.extend(_collect_texts(item))
+        return texts
+    return texts
+
+
+def _dedupe_text_rows(rows: list[dict]) -> list[dict]:
+    deduped_rows: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        key = str(row.get("text", "")).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped_rows.append({"text": key, "score": row.get("score"), "poly": row.get("poly")})
+    return deduped_rows
+
+
+def _extract_generic_rows_and_raw(results: object) -> tuple[list[dict], list[dict]]:
+    rows: list[dict] = []
+    raw_items: list[dict] = []
+    for item in _to_list(results):
+        item_dict = _result_item_to_dict(item)
+        raw_items.append(item_dict)
+        extracted = _collect_texts(item_dict)
+        for text_block in extracted:
+            for line in (seg.strip() for seg in str(text_block).splitlines()):
+                if line:
+                    rows.append({"text": line, "score": None, "poly": None})
+    return _dedupe_text_rows(rows), raw_items
+
+
+def _extract_ppocr_rows_and_raw(results: object) -> tuple[list[dict], list[dict]]:
+    rows: list[dict] = []
+    raw_items: list[dict] = []
+    for item in _to_list(results):
+        item_dict = _result_item_to_dict(item)
+        raw_items.append(item_dict)
+        rec_texts = _to_list(item_dict.get("rec_texts"))
+        rec_scores = _to_list(item_dict.get("rec_scores"))
+        rec_polys = _to_list(item_dict.get("rec_polys"))
+        for idx, text in enumerate(rec_texts):
+            poly = rec_polys[idx] if idx < len(rec_polys) else None
+            rows.append(
+                {
+                    "text": str(text),
+                    "score": float(rec_scores[idx]) if idx < len(rec_scores) and rec_scores[idx] is not None else None,
+                    "poly": poly.tolist() if hasattr(poly, "tolist") else poly,
+                }
+            )
+    if rows:
+        return _dedupe_text_rows(rows), raw_items
+    generic_rows, _ = _extract_generic_rows_and_raw(raw_items)
+    return generic_rows, raw_items
+
+
+def _write_ocr_payload(output_path: str, payload: dict) -> None:
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    safe_payload = _make_json_safe(payload)
+    output.write_text(json.dumps(safe_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"ocr_lines: {len(payload.get('ocr_lines', []))}")
+    print(f"latency_ms: {payload.get('latency_ms')}")
+    print(f"output: {output}")
+
+
+def _build_pp_ocrv5_model(*, lang: str, device: str, engine: str = "paddle") -> object:
+    from paddleocr import PaddleOCR
+
+    candidates = [
+        {
+            "lang": lang,
+            "device": device,
+            "engine": engine,
+            "use_doc_orientation_classify": False,
+            "use_doc_unwarping": False,
+            "use_textline_orientation": False,
+        },
+        {
+            "lang": lang,
+            "engine": engine,
+            "use_doc_orientation_classify": False,
+            "use_doc_unwarping": False,
+            "use_textline_orientation": False,
+        },
+        {"lang": lang, "engine": engine},
+        {},
+    ]
+    last_error: Exception | None = None
+    for kwargs in candidates:
+        try:
+            return PaddleOCR(**kwargs)
+        except Exception as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    return PaddleOCR()
+
+
+def _build_pp_structurev3_model(*, lang: str, device: str) -> object:
+    from paddleocr import PPStructureV3
+
+    candidates = [
+        {
+            "device": device,
+            "use_doc_orientation_classify": False,
+            "use_doc_unwarping": False,
+        },
+        {"use_doc_orientation_classify": False, "use_doc_unwarping": False},
+        {"device": device},
+        {},
+    ]
+    last_error: Exception | None = None
+    for kwargs in candidates:
+        try:
+            return PPStructureV3(**kwargs)
+        except Exception as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    return PPStructureV3()
+
+
+def _build_table_recognition_v2_model(*, lang: str, device: str) -> object:
+    from paddleocr import TableRecognitionPipelineV2
+
+    candidates = [
+        {"device": device, "use_doc_orientation_classify": False, "use_doc_unwarping": False},
+        {"use_doc_orientation_classify": False, "use_doc_unwarping": False},
+        {"device": device},
+        {},
+    ]
+    last_error: Exception | None = None
+    for kwargs in candidates:
+        try:
+            return TableRecognitionPipelineV2(**kwargs)
+        except Exception as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    return TableRecognitionPipelineV2()
+
+
+def _build_paddleocr_vl_model(
+    *,
+    device: str,
+    use_doc_orientation_classify: bool = False,
+    use_doc_unwarping: bool = False,
+    use_chart_recognition: bool = False,
+) -> object:
+    from paddleocr import PaddleOCRVL
+
+    candidates = [
+        {
+            "device": device,
+            "use_doc_orientation_classify": use_doc_orientation_classify,
+            "use_doc_unwarping": use_doc_unwarping,
+            "use_chart_recognition": use_chart_recognition,
+        },
+        {"device": device},
+        {},
+    ]
+    last_error: Exception | None = None
+    for kwargs in candidates:
+        try:
+            return PaddleOCRVL(**kwargs)
+        except Exception as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    return PaddleOCRVL()
+
+
+def run_paddle_ocr(
+    image_path: str,
+    output_path: str,
+    lang: str = "korean",
+    device: str = "gpu:0",
+    backend_engine: str = "paddle",
+    ocr_model: object | None = None,
+) -> None:
+    import time
+
+    image = Path(image_path)
+    if not image.exists():
+        raise FileNotFoundError(f"Image not found: {image}")
+
+    model = (
+        ocr_model
+        if ocr_model is not None
+        else _build_pp_ocrv5_model(lang=lang, device=device, engine=backend_engine)
+    )
+    start = time.perf_counter()
+    results = model.predict(str(image))
+    latency_ms = (time.perf_counter() - start) * 1000.0
+    rows, raw_items = _extract_ppocr_rows_and_raw(results)
+    payload = {
+        "image_path": str(image),
+        "model": f"pp_ocrv5:{backend_engine}",
+        "lang": lang,
+        "status": "success",
+        "latency_ms": round(latency_ms, 2),
+        "ocr_lines": rows,
+        "raw_pipeline_output": raw_items,
+    }
+    _write_ocr_payload(output_path, payload)
+
+
+def run_pp_structurev3_ocr(
+    image_path: str,
+    output_path: str,
+    lang: str = "korean",
+    device: str = "gpu:0",
+    structure_model: object | None = None,
+) -> None:
+    import time
+
+    image = Path(image_path)
+    if not image.exists():
+        raise FileNotFoundError(f"Image not found: {image}")
+
+    model = structure_model if structure_model is not None else _build_pp_structurev3_model(lang=lang, device=device)
+    start = time.perf_counter()
+    results = model.predict(
+        input=str(image),
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+    )
+    latency_ms = (time.perf_counter() - start) * 1000.0
+    rows, raw_items = _extract_generic_rows_and_raw(results)
+    payload = {
+        "image_path": str(image),
+        "model": "pp_structurev3",
+        "lang": lang,
+        "status": "success",
+        "latency_ms": round(latency_ms, 2),
+        "ocr_lines": rows,
+        "raw_pipeline_output": raw_items,
+    }
+    _write_ocr_payload(output_path, payload)
+
+
+def run_paddleocr_vl_ocr(
+    image_path: str,
+    output_path: str,
+    device: str = "gpu:0",
+    batch_size: int = 1,
+    use_doc_orientation_classify: bool = False,
+    use_doc_unwarping: bool = False,
+    use_chart_recognition: bool = False,
+    ocr_model: object | None = None,
+) -> None:
+    import time
+
+    image = Path(image_path)
+    if not image.exists():
+        raise FileNotFoundError(f"Image not found: {image}")
+
+    model = (
+        ocr_model
+        if ocr_model is not None
+        else _build_paddleocr_vl_model(
+            device=device,
+            use_doc_orientation_classify=use_doc_orientation_classify,
+            use_doc_unwarping=use_doc_unwarping,
+            use_chart_recognition=use_chart_recognition,
+        )
+    )
+
+    start = time.perf_counter()
+    results = model.predict(
+        input=str(image),
+        batch_size=batch_size,
+        use_doc_orientation_classify=use_doc_orientation_classify,
+        use_doc_unwarping=use_doc_unwarping,
+        use_chart_recognition=use_chart_recognition,
+    )
+    latency_ms = (time.perf_counter() - start) * 1000.0
+    rows, raw_items = _extract_generic_rows_and_raw(results)
+    payload = {
+        "image_path": str(image),
+        "model": "paddleocr_vl",
+        "lang": "multilingual",
+        "status": "success",
+        "latency_ms": round(latency_ms, 2),
+        "ocr_lines": rows,
+        "raw_pipeline_output": raw_items,
+    }
+    _write_ocr_payload(output_path, payload)
+
+
+def run_table_recognition_v2_ocr(
+    image_path: str,
+    output_path: str,
+    lang: str = "korean",
+    device: str = "gpu:0",
+    use_doc_orientation_classify: bool = False,
+    use_doc_unwarping: bool = False,
+    use_table_orientation_classify: bool = True,
+    use_ocr_results_with_table_cells: bool = True,
+    text_det_limit_side_len: int | None = None,
+    table_model: object | None = None,
+) -> None:
+    import time
+
+    image = Path(image_path)
+    if not image.exists():
+        raise FileNotFoundError(f"Image not found: {image}")
+
+    model = table_model if table_model is not None else _build_table_recognition_v2_model(lang=lang, device=device)
+    start = time.perf_counter()
+    predict_kwargs = {
+        "input": str(image),
+        "use_doc_orientation_classify": use_doc_orientation_classify,
+        "use_doc_unwarping": use_doc_unwarping,
+        "use_layout_detection": True,
+        "use_ocr_model": True,
+        "use_table_orientation_classify": use_table_orientation_classify,
+        "use_ocr_results_with_table_cells": use_ocr_results_with_table_cells,
+    }
+    if text_det_limit_side_len is not None:
+        predict_kwargs["text_det_limit_side_len"] = text_det_limit_side_len
+    results = model.predict(**predict_kwargs)
+    latency_ms = (time.perf_counter() - start) * 1000.0
+    rows, raw_items = _extract_generic_rows_and_raw(results)
+    payload = {
+        "image_path": str(image),
+        "model": "table_recognition_v2",
+        "lang": lang,
+        "status": "success",
+        "latency_ms": round(latency_ms, 2),
+        "ocr_lines": rows,
+        "raw_pipeline_output": raw_items,
+    }
+    _write_ocr_payload(output_path, payload)
+
+
+def _build_shared_ocr_model(
+    *,
+    ocr_engine: str,
+    lang: str,
+    ocr_device: str,
+    use_doc_orientation_classify: bool = False,
+    use_doc_unwarping: bool = False,
+    use_chart_recognition: bool = False,
+) -> object | None:
+    engine = _normalize_ocr_engine(ocr_engine)
+    if engine == "pp_ocrv5":
+        print(f"[PP-OCRv5] initialize once: lang={lang}, device={ocr_device}")
+        return _build_pp_ocrv5_model(lang=lang, device=ocr_device)
+    if engine == "pp_ocrv5_transformers":
+        print(f"[PP-OCRv5 Transformers] initialize once: lang={lang}, device={ocr_device}")
+        return _build_pp_ocrv5_model(lang=lang, device=ocr_device, engine="transformers")
+    if engine == "pp_structurev3":
+        print(f"[PP-StructureV3] initialize once: lang={lang}, device={ocr_device}")
+        return _build_pp_structurev3_model(lang=lang, device=ocr_device)
+    if engine == "paddleocr_vl":
+        print(f"[PaddleOCR-VL] initialize once: device={ocr_device}")
+        return _build_paddleocr_vl_model(
+            device=ocr_device,
+            use_doc_orientation_classify=use_doc_orientation_classify,
+            use_doc_unwarping=use_doc_unwarping,
+            use_chart_recognition=use_chart_recognition,
+        )
+    if engine == "table_recognition_v2":
+        print(f"[table_recognition_v2] initialize once: lang={lang}, device={ocr_device}")
+        return _build_table_recognition_v2_model(lang=lang, device=ocr_device)
+    return None
+
+
+def build_pred_structured(
+    gt_path: str,
+    pred_raw_path: str,
+    item_id: str,
+    output_path: str,
+    score_threshold: float = 0.0,
+) -> None:
+    from pathlib import Path
+
+    from src.Parsing.ocr.inference.build_pred_structured import (
+        build_pred_structured as build_structured_item,
+        load_item_by_id,
+        load_pred_raw,
+    )
+
+    gt_item = load_item_by_id(Path(gt_path), item_id)
+    pred_raw_item = load_pred_raw(Path(pred_raw_path), item_id)
+    structured = build_structured_item(gt_item, pred_raw_item, score_threshold=score_threshold)
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(structured, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"output: {output}")
+    print(f"pred_text: {structured['pred_text']}")
+
+
+def _compute_required_field_gaps(
+    required_fields: list[object],
+    field_metrics: list[object],
+) -> tuple[list[str], list[str]]:
+    required = [str(field).strip() for field in required_fields if str(field).strip()]
+    per_field: dict[str, dict] = {}
+    for metric in field_metrics:
+        if not isinstance(metric, dict):
+            continue
+        field_path = str(metric.get("field_path", "")).strip()
+        if not field_path:
+            continue
+        per_field[field_path] = metric
+
+    if not required:
+        required = [
+            field_name
+            for field_name, metric in per_field.items()
+            if int(metric.get("gt_total", 0)) > 0
+        ]
+
+    missing_required: list[str] = []
+    for field_name in required:
+        metric = per_field.get(field_name)
+        if not metric:
+            missing_required.append(field_name)
+            continue
+        if int(metric.get("matched", 0)) <= 0:
+            missing_required.append(field_name)
+    return required, missing_required
+
+
+def _build_eval_summary_payload(
+    *,
+    eval_payload: dict[str, object],
+    gt_path: str,
+    pred_structured_path: str,
+) -> dict[str, object]:
+    text = eval_payload.get("text", {}) if isinstance(eval_payload.get("text"), dict) else {}
+    structure = eval_payload.get("structure", {}) if isinstance(eval_payload.get("structure"), dict) else {}
+    aggregate = structure.get("aggregate", {}) if isinstance(structure.get("aggregate"), dict) else {}
+    field_metrics = structure.get("field_metrics", []) if isinstance(structure.get("field_metrics"), list) else []
+
+    required_fields, missing_required_fields = _compute_required_field_gaps(
+        required_fields=eval_payload.get("required_fields", []) if isinstance(eval_payload.get("required_fields"), list) else [],
+        field_metrics=field_metrics,
+    )
+
+    table_html = eval_payload.get("table_html", {}) if isinstance(eval_payload.get("table_html"), dict) else {}
+    table_rows = eval_payload.get("table_rows", {}) if isinstance(eval_payload.get("table_rows"), dict) else {}
+    table_html_exists = bool(table_html.get("exists", False))
+    table_rows_exists = bool(table_rows.get("exists", False))
+
+    review_reasons: list[str] = []
+    if str(eval_payload.get("status", "")).lower() != "success":
+        review_reasons.append("status_not_success")
+
+    structure_micro_recall = eval_payload.get("structure_micro_recall")
+    if structure_micro_recall is not None and float(structure_micro_recall) < 0.8:
+        review_reasons.append("structure_micro_recall<0.8")
+    if missing_required_fields:
+        review_reasons.append("required_field_missing")
+    if str(eval_payload.get("type", "")).lower() == "table" and not table_html_exists:
+        review_reasons.append("table_html_missing")
+    if str(eval_payload.get("type", "")).lower() == "table" and not table_rows_exists:
+        review_reasons.append("table_rows_missing")
+
+    return {
+        "schema_version": "ocr_eval_summary.v1",
+        "id": eval_payload.get("id"),
+        "type": eval_payload.get("type"),
+        "status": eval_payload.get("status"),
+        "latency_ms": eval_payload.get("latency_ms"),
+        "text": {
+            "exact_match": text.get("exact_match"),
+            "cer": text.get("cer"),
+            "wer": text.get("wer"),
+            "char_similarity_pct": text.get("char_similarity_pct"),
+        },
+        "structure": {
+            "mode": structure.get("mode", "field_path_value_match"),
+            "threshold": structure.get("threshold"),
+            "aggregate": {
+                "field_count": aggregate.get("field_count"),
+                "matched": aggregate.get("matched"),
+                "gt_total": aggregate.get("gt_total"),
+                "pred_total": aggregate.get("pred_total"),
+                "micro_precision": aggregate.get("micro_precision"),
+                "micro_recall": aggregate.get("micro_recall"),
+                "micro_f1": aggregate.get("micro_f1"),
+                "macro_f1": aggregate.get("macro_f1"),
+            },
+        },
+        "structure_micro_recall": eval_payload.get("structure_micro_recall"),
+        "structure_macro_f1": eval_payload.get("structure_macro_f1"),
+        "required_fields": required_fields,
+        "missing_required_fields": missing_required_fields,
+        "review_required": bool(review_reasons),
+        "review_reasons": review_reasons,
+        "table_html": table_html,
+        "table_rows": table_rows,
+        "refs": {
+            "gt_path": gt_path,
+            "pred_structured_path": pred_structured_path,
+        },
+    }
+
+
+def _build_eval_debug_payload(
+    *,
+    eval_payload: dict[str, object],
+    summary_payload: dict[str, object],
+) -> dict[str, object]:
+    structure = eval_payload.get("structure", {}) if isinstance(eval_payload.get("structure"), dict) else {}
+    field_metrics = structure.get("field_metrics", []) if isinstance(structure.get("field_metrics"), list) else []
+    include_structures = bool(summary_payload.get("missing_required_fields"))
+    debug_payload: dict[str, object] = {
+        "schema_version": "ocr_eval_debug.v1",
+        "id": eval_payload.get("id"),
+        "type": eval_payload.get("type"),
+        "status": eval_payload.get("status"),
+        "review_required": summary_payload.get("review_required", False),
+        "review_reasons": summary_payload.get("review_reasons", []),
+        "missing_required_fields": summary_payload.get("missing_required_fields", []),
+        "field_metrics": field_metrics,
+        "refs": summary_payload.get("refs", {}),
+    }
+    if include_structures:
+        debug_payload["gt_structure"] = structure.get("gt_structure", {})
+        debug_payload["pred_structure"] = structure.get("pred_structure", {})
+    return debug_payload
+
+
+def eval_pred_structured_vs_gt(
+    gt_path: str,
+    pred_structured_path: str,
+    item_id: str,
+    output_path: str,
+    structure_match_threshold: float = 0.65,
+    table_html_path: str | None = None,
+    table_rows_path: str | None = None,
+) -> None:
+    from pathlib import Path
+
+    from src.Parsing.ocr.evaluation.eval_pred_structured_vs_gt import (
+        build_eval_report,
+        load_item_by_id,
+    )
+
+    gt_item = load_item_by_id(Path(gt_path), item_id)
+    pred_item = load_item_by_id(Path(pred_structured_path), item_id)
+    eval_payload = build_eval_report(
+        item_id=item_id,
+        gt_item=gt_item,
+        pred_item=pred_item,
+        threshold=structure_match_threshold,
+    )
+    if table_html_path:
+        table_path = Path(table_html_path)
+        table_exists = table_path.exists() and table_path.stat().st_size > 0
+        eval_payload["table_html"] = {
+            "path": str(table_path),
+            "exists": table_exists,
+            "byte_size": table_path.stat().st_size if table_exists else 0,
+        }
+    if table_rows_path:
+        rows_path = Path(table_rows_path)
+        rows_exists = rows_path.exists() and rows_path.stat().st_size > 0
+        eval_payload["table_rows"] = {
+            "path": str(rows_path),
+            "exists": rows_exists,
+            "byte_size": rows_path.stat().st_size if rows_exists else 0,
+        }
+
+    summary_payload = _build_eval_summary_payload(
+        eval_payload=eval_payload,
+        gt_path=gt_path,
+        pred_structured_path=pred_structured_path,
+    )
+    debug_payload = _build_eval_debug_payload(
+        eval_payload=eval_payload,
+        summary_payload=summary_payload,
+    )
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    debug_output = output.with_name("gt_eval_debug.json")
+    if bool(summary_payload.get("review_required", False)):
+        debug_output.write_text(json.dumps(debug_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    elif debug_output.exists():
+        debug_output.unlink()
+
+    print(json.dumps(summary_payload, ensure_ascii=False, indent=2))
+    print(f"saved_summary: {output}")
+    if bool(summary_payload.get("review_required", False)):
+        print(f"saved_debug: {debug_output}")
+
+
+def _save_pred_table_html(
+    *,
+    pred_raw_path: str,
+    output_path: str,
+) -> dict[str, object]:
+    from src.Parsing.ocr.postprocess.ocr_table_normalizer import save_ocr_table_outputs
+
+    return save_ocr_table_outputs(
+        pred_raw_path=pred_raw_path,
+        output_path=output_path,
+    )
+
+
+def _merge_vl_and_ppocr_raw(
+    *,
+    vl_raw_path: str,
+    ppocr_raw_path: str,
+    output_path: str,
+) -> None:
+    vl_payload = json.loads(Path(vl_raw_path).read_text(encoding="utf-8"))
+    pp_payload = json.loads(Path(ppocr_raw_path).read_text(encoding="utf-8"))
+    vl_lines = vl_payload.get("ocr_lines", []) if isinstance(vl_payload.get("ocr_lines"), list) else []
+    pp_lines = pp_payload.get("ocr_lines", []) if isinstance(pp_payload.get("ocr_lines"), list) else []
+    merged_lines = _dedupe_text_rows([*vl_lines, *pp_lines])
+
+    merged_payload = dict(vl_payload)
+    merged_payload["ocr_lines"] = merged_lines
+    merged_payload["model"] = "paddleocr_vl+pp_ocrv5"
+    merged_payload["latency_ms"] = round(
+        float(vl_payload.get("latency_ms") or 0.0) + float(pp_payload.get("latency_ms") or 0.0),
+        2,
+    )
+    merged_payload["meta"] = {
+        "dual_pass": True,
+        "first_pass_model": vl_payload.get("model", "paddleocr_vl"),
+        "second_pass_model": pp_payload.get("model", "pp_ocrv5:paddle"),
+        "first_pass_path": str(vl_raw_path),
+        "second_pass_path": str(ppocr_raw_path),
+    }
+    _write_ocr_payload(output_path, merged_payload)
+
+
+def _has_table_label_in_vl_raw(vl_raw_path: str) -> bool:
+    payload = json.loads(Path(vl_raw_path).read_text(encoding="utf-8"))
+    raw_output = payload.get("raw_pipeline_output")
+    if not isinstance(raw_output, list):
+        return False
+    for page in raw_output:
+        if not isinstance(page, dict):
+            continue
+        parsing_items = page.get("parsing_res_list")
+        if not isinstance(parsing_items, list):
+            continue
+        for item in parsing_items:
+            if not isinstance(item, str):
+                continue
+            if re.search(r"label:\s*table\b", item, flags=re.IGNORECASE):
+                return True
+    return False
+
+def ocr_run_all(
+    image_path: str,
+    gt_path: str,
+    item_id: str,
+    pred_raw_output: str,
+    pred_structured_output: str,
+    pred_table_html_output: str,
+    eval_output: str,
+    lang: str = "korean",
+    score_threshold: float = 0.0,
+    ocr_engine: str = "pp_ocrv5",
+    ocr_device: str = "gpu:0",
+    ocr_batch_size: int = 1,
+    use_doc_orientation_classify: bool = False,
+    use_doc_unwarping: bool = False,
+    use_chart_recognition: bool = False,
+    use_table_orientation_classify: bool = True,
+    use_ocr_results_with_table_cells: bool = True,
+    text_det_limit_side_len: int | None = None,
+    ocr_model: object | None = None,
+    structure_match_threshold: float = 0.65,
+    table_dual_pass: bool = False,
+    table_second_engine: str = "pp_ocrv5",
+) -> None:
+    normalized_engine = _normalize_ocr_engine(ocr_engine)
+    print("[1/4] run-ocr")
+    if normalized_engine == "pp_structurev3":
+        run_pp_structurev3_ocr(
+            image_path=image_path,
+            output_path=pred_raw_output,
+            lang=lang,
+            device=ocr_device,
+            structure_model=ocr_model,
+        )
+    elif normalized_engine == "paddleocr_vl":
+        if table_dual_pass:
+            pred_raw_path = Path(pred_raw_output)
+            pred_raw_vl_output = str(pred_raw_path.with_name("pred_raw_vl.json"))
+            pred_raw_ppocr_output = str(pred_raw_path.with_name("pred_raw_ppocr.json"))
+            run_paddleocr_vl_ocr(
+                image_path=image_path,
+                output_path=pred_raw_vl_output,
+                device=ocr_device,
+                batch_size=ocr_batch_size,
+                use_doc_orientation_classify=use_doc_orientation_classify,
+                use_doc_unwarping=use_doc_unwarping,
+                use_chart_recognition=use_chart_recognition,
+                ocr_model=ocr_model,
+            )
+            if _has_table_label_in_vl_raw(pred_raw_vl_output):
+                second_engine = _normalize_ocr_engine(table_second_engine)
+                run_paddle_ocr(
+                    image_path=image_path,
+                    output_path=pred_raw_ppocr_output,
+                    lang=lang,
+                    device=ocr_device,
+                    backend_engine="transformers" if second_engine == "pp_ocrv5_transformers" else "paddle",
+                    ocr_model=None,
+                )
+                _merge_vl_and_ppocr_raw(
+                    vl_raw_path=pred_raw_vl_output,
+                    ppocr_raw_path=pred_raw_ppocr_output,
+                    output_path=pred_raw_output,
+                )
+            else:
+                vl_payload = json.loads(Path(pred_raw_vl_output).read_text(encoding="utf-8"))
+                _write_ocr_payload(pred_raw_output, vl_payload)
+        else:
+            run_paddleocr_vl_ocr(
+                image_path=image_path,
+                output_path=pred_raw_output,
+                device=ocr_device,
+                batch_size=ocr_batch_size,
+                use_doc_orientation_classify=use_doc_orientation_classify,
+                use_doc_unwarping=use_doc_unwarping,
+                use_chart_recognition=use_chart_recognition,
+                ocr_model=ocr_model,
+            )
+    elif normalized_engine == "table_recognition_v2":
+        run_table_recognition_v2_ocr(
+            image_path=image_path,
+            output_path=pred_raw_output,
+            lang=lang,
+            device=ocr_device,
+            use_doc_orientation_classify=use_doc_orientation_classify,
+            use_doc_unwarping=use_doc_unwarping,
+            use_table_orientation_classify=use_table_orientation_classify,
+            use_ocr_results_with_table_cells=use_ocr_results_with_table_cells,
+            text_det_limit_side_len=text_det_limit_side_len,
+            table_model=ocr_model,
+        )
+    else:
+        run_paddle_ocr(
+            image_path=image_path,
+            output_path=pred_raw_output,
+            lang=lang,
+            device=ocr_device,
+            backend_engine="transformers" if normalized_engine == "pp_ocrv5_transformers" else "paddle",
+            ocr_model=ocr_model,
+        )
+    print("[2/4] build-pred-structured")
+    build_pred_structured(
+        gt_path=gt_path,
+        pred_raw_path=pred_raw_output,
+        item_id=item_id,
+        output_path=pred_structured_output,
+        score_threshold=score_threshold,
+    )
+    print("[3/4] extract-table-html")
+    table_outputs = _save_pred_table_html(
+        pred_raw_path=pred_raw_output,
+        output_path=pred_table_html_output,
+    )
+    has_table_html = bool(table_outputs.get("saved", False))
+    print(f"table_html_saved: {has_table_html}")
+    if table_outputs.get("pred_table_rows_path"):
+        print(f"pred_table_rows_path: {table_outputs.get('pred_table_rows_path')}")
+
+    print("[4/4] eval-pred-structured")
+    eval_pred_structured_vs_gt(
+        gt_path=gt_path,
+        pred_structured_path=pred_structured_output,
+        item_id=item_id,
+        output_path=eval_output,
+        structure_match_threshold=structure_match_threshold,
+        table_html_path=pred_table_html_output,
+        table_rows_path=table_outputs.get("pred_table_rows_path"),
+    )
+    print("ocr_run_all_done")
+
+
+def _infer_item_id_from_gt(gt_path: Path, image_name: str | None = None) -> str:
+    payload = _load_gt_payload(gt_path)
+    if isinstance(payload, dict):
+        item_id = payload.get("id")
+        if not item_id:
+            raise ValueError(f"`id` not found in GT JSON: {gt_path}")
+        return str(item_id)
+
+    if isinstance(payload, list):
+        records: list[dict] = []
+        for item in payload:
+            if isinstance(item, dict) and item.get("id"):
+                records.append(item)
+
+        if image_name:
+            image_stem = Path(image_name).stem.lower()
+            matched_ids: list[str] = []
+            for record in records:
+                record_id = str(record.get("id", ""))
+                original_name = str(record.get("original_image_file_name", ""))
+                derived_name = str(record.get("image_file_name", ""))
+                candidate_names = [original_name, derived_name]
+                candidate_stems = [Path(name).stem.lower() for name in candidate_names if name]
+                if image_name in candidate_names or image_stem in candidate_stems:
+                    if record_id and record_id not in matched_ids:
+                        matched_ids.append(record_id)
+            if len(matched_ids) == 1:
+                return matched_ids[0]
+            if len(matched_ids) > 1:
+                raise ValueError(
+                    "Multiple ids matched by image name. Pass --id explicitly. "
+                    f"image={image_name}, ids={matched_ids}"
+                )
+
+        ids: list[str] = []
+        for record in records:
+            item_id = str(record["id"])
+            if item_id not in ids:
+                ids.append(item_id)
+        if not ids:
+            raise ValueError(f"No `id` found in GT JSON list: {gt_path}")
+        if len(ids) > 1:
+            raise ValueError(
+                f"Multiple ids found in GT JSON ({len(ids)}). Pass --id explicitly."
+                f"{' image=' + image_name + ',' if image_name else ''} ids={ids}"
+            )
+        return ids[0]
+
+    raise ValueError(f"Unsupported GT JSON shape: {type(payload).__name__}")
+
+
+def _load_gt_payload(gt_path: Path) -> dict | list[dict]:
+    raw = gt_path.read_text(encoding="utf-8")
+    stripped = raw.strip()
+    if not stripped:
+        return []
+    decoder = json.JSONDecoder()
+    pos = 0
+    top_level: list[dict | list] = []
+    while pos < len(raw):
+        while pos < len(raw) and raw[pos].isspace():
+            pos += 1
+        if pos >= len(raw):
+            break
+        item, next_pos = decoder.raw_decode(raw, pos)
+        top_level.append(item)
+        pos = next_pos
+
+    if len(top_level) == 1:
+        only = top_level[0]
+        if isinstance(only, dict):
+            return only
+        if isinstance(only, list):
+            return only
+        raise ValueError(f"Unsupported GT JSON shape in {gt_path}: {type(only).__name__}")
+
+    rows: list[dict] = []
+    for idx, block in enumerate(top_level, start=1):
+        if isinstance(block, dict):
+            rows.append(block)
+            continue
+        if isinstance(block, list):
+            for row in block:
+                if isinstance(row, dict):
+                    rows.append(row)
+                    continue
+                raise ValueError(
+                    f"Unsupported item type in GT block {idx} at {gt_path}: {type(row).__name__}"
+                )
+            continue
+        raise ValueError(f"Unsupported GT block type {idx} in {gt_path}: {type(block).__name__}")
+    return rows
+
+
+def _resolve_gt_path(gt_root: str, doc_key: str) -> Path:
+    gt_root_path = Path(gt_root)
+    jsonl_path = gt_root_path / f"{doc_key}.jsonl"
+    if jsonl_path.exists():
+        return jsonl_path
+    json_path = gt_root_path / f"{doc_key}.json"
+    if json_path.exists():
+        return json_path
+    for path in sorted(gt_root_path.glob("*.jsonl")) + sorted(gt_root_path.glob("*.json")):
+        try:
+            payload = _load_gt_payload(path)
+        except Exception:
+            continue
+        records = payload if isinstance(payload, list) else [payload]
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("source_doc_key", "")) == doc_key:
+                return path
+            record_id = str(record.get("id", ""))
+            if record_id.startswith(f"{doc_key}_"):
+                return path
+    # Prefer JSONL by default for new runs.
+    return jsonl_path
+
+
+def _resolve_ocr_doc_paths(
+    *,
+    doc_key: str,
+    images_root: str,
+    gt_root: str,
+    output_root: str,
+    image_name: str,
+    ocr_engine: str,
+) -> tuple[Path, Path, Path, Path, Path, Path, Path]:
+    normalized_engine = _normalize_ocr_engine(ocr_engine)
+    image_path = Path(images_root) / doc_key / image_name
+    gt_path = _resolve_gt_path(gt_root, doc_key)
+    engine_dir_name = _engine_dir_name(normalized_engine)
+    image_stem = Path(image_name).stem
+    out_dir = Path(output_root) / engine_dir_name / doc_key / image_stem
+    inference_dir = out_dir / "inference"
+    eval_dir = out_dir / "eval"
+    pred_raw = inference_dir / "pred_raw.json"
+    pred_structured = eval_dir / "gt_pred_structured.json"
+    pred_table_html = inference_dir / "pred_table_raw.html"
+    pred_table_rows = inference_dir / "pred_table_layout.json"
+    eval_summary_json = eval_dir / "gt_eval_summary.json"
+    return image_path, gt_path, pred_raw, pred_structured, pred_table_html, pred_table_rows, eval_summary_json
+
+
+def _engine_dir_name(ocr_engine: str) -> str:
+    return _normalize_ocr_engine(ocr_engine)
+
+
+def _resolve_image_path(doc_dir: Path, image_name: str) -> Path:
+    if not doc_dir.exists():
+        raise FileNotFoundError(f"Image folder not found: {doc_dir}")
+
+    # 1) Exact path first.
+    exact = doc_dir / image_name
+    if exact.exists():
+        return exact
+
+    # 2) Try same stem with common image extensions.
+    stem = Path(image_name).stem
+    for ext in [".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"]:
+        candidate = doc_dir / f"{stem}{ext}"
+        if candidate.exists():
+            return candidate
+
+    # 3) Fallback: first image in folder.
+    image_files = sorted(
+        [
+            path
+            for path in doc_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
+        ],
+        key=lambda p: p.name,
+    )
+    if image_files:
+        return image_files[0]
+
+    raise FileNotFoundError(f"No image files found in: {doc_dir}")
+
+
+def _list_image_paths(doc_dir: Path) -> list[Path]:
+    if not doc_dir.exists():
+        raise FileNotFoundError(f"Image folder not found: {doc_dir}")
+    image_files = sorted(
+        [
+            path
+            for path in doc_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
+        ],
+        key=lambda p: p.name,
+    )
+    if not image_files:
+        raise FileNotFoundError(f"No image files found in: {doc_dir}")
+    return image_files
+
+
+def ocr_run_image(
+    *,
+    doc_key: str,
+    item_id: str | None,
+    images_root: str,
+    gt_root: str,
+    output_root: str,
+    image_name: str,
+    lang: str,
+    score_threshold: float,
+    structure_match_threshold: float,
+    ocr_engine: str,
+    ocr_device: str,
+    ocr_batch_size: int,
+    use_doc_orientation_classify: bool = False,
+    use_doc_unwarping: bool = False,
+    use_chart_recognition: bool = False,
+    use_table_orientation_classify: bool = True,
+    use_ocr_results_with_table_cells: bool = True,
+    text_det_limit_side_len: int | None = None,
+    ocr_model: object | None = None,
+    table_dual_pass: bool = False,
+    table_second_engine: str = "pp_ocrv5",
+) -> bool:
+    (
+        image_path,
+        gt_path,
+        pred_raw,
+        pred_structured,
+        pred_table_html,
+        _pred_table_rows,
+        eval_summary_json,
+    ) = _resolve_ocr_doc_paths(
+        doc_key=doc_key,
+        images_root=images_root,
+        gt_root=gt_root,
+        output_root=output_root,
+        image_name=image_name,
+        ocr_engine=ocr_engine,
+    )
+    image_path = _resolve_image_path(Path(images_root) / doc_key, image_name)
+    if not gt_path.exists():
+        raise FileNotFoundError(f"GT not found: {gt_path}")
+
+    final_item_id = item_id or _infer_item_id_from_gt(gt_path, image_path.name)
+    gt_payload = _load_gt_payload(gt_path)
+    gt_records = gt_payload if isinstance(gt_payload, list) else [gt_payload]
+    gt_item = next(
+        (record for record in gt_records if isinstance(record, dict) and record.get("id") == final_item_id),
+        {},
+    )
+    pred_raw.parent.mkdir(parents=True, exist_ok=True)
+    print(f"doc_key: {doc_key}")
+    print(f"image: {image_path}")
+    print(f"gt: {gt_path}")
+    print(f"id: {final_item_id}")
+    use_eval = bool(gt_item.get("use_eval", True))
+    ocr_run_all(
+        image_path=str(image_path),
+        gt_path=str(gt_path),
+        item_id=final_item_id,
+        pred_raw_output=str(pred_raw),
+        pred_structured_output=str(pred_structured),
+        pred_table_html_output=str(pred_table_html),
+        eval_output=str(eval_summary_json),
+        lang=lang,
+        score_threshold=score_threshold,
+        structure_match_threshold=structure_match_threshold,
+        ocr_engine=ocr_engine,
+        ocr_device=ocr_device,
+        ocr_batch_size=ocr_batch_size,
+        use_doc_orientation_classify=use_doc_orientation_classify,
+        use_doc_unwarping=use_doc_unwarping,
+        use_chart_recognition=use_chart_recognition,
+        use_table_orientation_classify=use_table_orientation_classify,
+        use_ocr_results_with_table_cells=use_ocr_results_with_table_cells,
+        text_det_limit_side_len=text_det_limit_side_len,
+        ocr_model=ocr_model,
+        table_dual_pass=table_dual_pass,
+        table_second_engine=table_second_engine,
+    )
+    if not use_eval:
+        print(f"[SKIP_EVAL_SUMMARY] use_eval=false: {final_item_id}")
+    return use_eval
+
+
+def ocr_run_batch(
+    *,
+    images_root: str,
+    gt_root: str,
+    output_root: str,
+    image_name: str,
+    doc_key: str | None,
+    limit: int,
+    stop_on_error: bool,
+    lang: str,
+    score_threshold: float,
+    structure_match_threshold: float,
+    ocr_engine: str,
+    ocr_device: str,
+    ocr_batch_size: int,
+    use_doc_orientation_classify: bool = False,
+    use_doc_unwarping: bool = False,
+    use_chart_recognition: bool = False,
+    use_table_orientation_classify: bool = True,
+    use_ocr_results_with_table_cells: bool = True,
+    text_det_limit_side_len: int | None = None,
+    table_dual_pass: bool = False,
+    table_second_engine: str = "pp_ocrv5",
+) -> None:
+    normalized_engine = _normalize_ocr_engine(ocr_engine)
+    shared_model = _build_shared_ocr_model(
+        ocr_engine=normalized_engine,
+        lang=lang,
+        ocr_device=ocr_device,
+        use_doc_orientation_classify=use_doc_orientation_classify,
+        use_doc_unwarping=use_doc_unwarping,
+        use_chart_recognition=use_chart_recognition,
+    )
+
+    image_root_path = Path(images_root)
+    if not image_root_path.exists():
+        raise FileNotFoundError(f"images_root not found: {image_root_path}")
+
+    doc_dirs = sorted([path for path in image_root_path.iterdir() if path.is_dir()], key=lambda p: p.name)
+    if doc_key:
+        doc_dirs = [path for path in doc_dirs if path.name == doc_key]
+        if not doc_dirs:
+            raise FileNotFoundError(f"doc_key folder not found under images_root: {doc_key}")
+    if limit > 0:
+        doc_dirs = doc_dirs[:limit]
+
+    ok_count = 0
+    skip_count = 0
+    skip_image_count = 0
+    skip_gt_count = 0
+    fail_count = 0
+    eval_rows: list[dict[str, object]] = []
+    review_queue_rows: list[dict[str, object]] = []
+
+    for doc_dir in doc_dirs:
+        doc_key = doc_dir.name
+        print(f"\n=== OCR Batch: {doc_key} ===")
+        try:
+            doc_image_paths = _list_image_paths(doc_dir)
+            print(f"images_in_doc: {len(doc_image_paths)}")
+            for path in doc_image_paths:
+                include_in_eval = ocr_run_image(
+                    doc_key=doc_key,
+                    item_id=None,
+                    images_root=images_root,
+                    gt_root=gt_root,
+                    output_root=output_root,
+                    image_name=path.name,
+                    lang=lang,
+                    score_threshold=score_threshold,
+                    structure_match_threshold=structure_match_threshold,
+                    ocr_engine=ocr_engine,
+                    ocr_device=ocr_device,
+                    ocr_batch_size=ocr_batch_size,
+                    use_doc_orientation_classify=use_doc_orientation_classify,
+                    use_doc_unwarping=use_doc_unwarping,
+                    use_chart_recognition=use_chart_recognition,
+                    use_table_orientation_classify=use_table_orientation_classify,
+                    use_ocr_results_with_table_cells=use_ocr_results_with_table_cells,
+                    text_det_limit_side_len=text_det_limit_side_len,
+                    ocr_model=shared_model,
+                    table_dual_pass=table_dual_pass,
+                    table_second_engine=table_second_engine,
+                )
+                ok_count += 1
+                if not include_in_eval:
+                    continue
+
+                eval_path = (
+                    Path(output_root)
+                    / _engine_dir_name(normalized_engine)
+                    / doc_key
+                    / Path(path.name).stem
+                    / "eval"
+                    / "gt_eval_summary.json"
+                )
+                if eval_path.exists():
+                    result = json.loads(eval_path.read_text(encoding="utf-8"))
+                    text_metrics = result.get("text", {}) if isinstance(result, dict) else {}
+                    structure = result.get("structure", {}) if isinstance(result, dict) else {}
+                    structure_aggregate = structure.get("aggregate", {}) if isinstance(structure, dict) else {}
+                    field_metrics = structure.get("field_metrics", []) if isinstance(structure, dict) else []
+                    char_similarity_pct = text_metrics.get("char_similarity_pct")
+                    similarity_ratio = (
+                        float(char_similarity_pct) / 100.0 if char_similarity_pct is not None else None
+                    )
+                    structure_micro_recall = result.get("structure_micro_recall")
+                    structure_macro_f1 = result.get("structure_macro_f1")
+                    matched_fields = structure_aggregate.get("matched")
+                    total_fields = structure_aggregate.get("gt_total")
+                    table_html_info = result.get("table_html", {}) if isinstance(result, dict) else {}
+                    table_html_exists = bool(table_html_info.get("exists", False))
+                    table_rows_info = result.get("table_rows", {}) if isinstance(result, dict) else {}
+                    table_rows_exists = bool(table_rows_info.get("exists", False))
+
+                    required_fields = result.get("required_fields", [])
+                    if not isinstance(required_fields, list):
+                        required_fields = []
+                    per_field = {
+                        str(metric.get("field_path", "")): metric
+                        for metric in field_metrics
+                        if isinstance(metric, dict)
+                    }
+
+                    missing_required_fields = result.get("missing_required_fields", [])
+                    if not isinstance(missing_required_fields, list):
+                        missing_required_fields = []
+                    if not missing_required_fields and required_fields and per_field:
+                        for field_name in required_fields:
+                            metric = per_field.get(str(field_name))
+                            if not metric:
+                                missing_required_fields.append(str(field_name))
+                                continue
+                            if int(metric.get("matched", 0)) <= 0:
+                                missing_required_fields.append(str(field_name))
+
+                    review_reasons = result.get("review_reasons", [])
+                    if not isinstance(review_reasons, list):
+                        review_reasons = []
+                    if not review_reasons:
+                        if structure_micro_recall is not None and float(structure_micro_recall) < 0.8:
+                            review_reasons.append("structure_micro_recall<0.8")
+                        if missing_required_fields:
+                            review_reasons.append("required_field_missing")
+                        if str(result.get("type", "")).lower() == "table" and not table_html_exists:
+                            review_reasons.append("table_html_missing")
+                        if str(result.get("type", "")).lower() == "table" and not table_rows_exists:
+                            review_reasons.append("table_rows_missing")
+
+                    review_required = bool(result.get("review_required", bool(review_reasons)))
+                    row = {
+                        "id": result.get("id"),
+                        "doc_key": doc_key,
+                        "type": result.get("type"),
+                        "status": result.get("status"),
+                        "text_similarity": similarity_ratio,
+                        "cer": text_metrics.get("cer"),
+                        "wer": text_metrics.get("wer"),
+                        "structure_micro_recall": structure_micro_recall,
+                        "structure_macro_f1": structure_macro_f1,
+                        "matched_fields": matched_fields,
+                        "total_fields": total_fields,
+                        "table_html_exists": table_html_exists,
+                        "table_rows_exists": table_rows_exists,
+                        "review_required": review_required,
+                        "review_reasons": "|".join(review_reasons),
+                        "missing_required_fields": "|".join(missing_required_fields),
+                        "latency_ms": result.get("latency_ms"),
+                    }
+                    eval_rows.append(row)
+                    if review_required:
+                        review_queue_rows.append(
+                            {
+                                "id": result.get("id"),
+                                "doc_key": doc_key,
+                                "image_name": path.name,
+                                "type": result.get("type"),
+                                "review_reasons": review_reasons,
+                                "missing_required_fields": missing_required_fields,
+                                "structure_micro_recall": structure_micro_recall,
+                                "structure_macro_f1": structure_macro_f1,
+                                "eval_path": str(eval_path),
+                                "pred_structured_path": str(eval_path.parent / "gt_pred_structured.json"),
+                                "pred_table_html_path": str(eval_path.parent.parent / "inference" / "pred_table_raw.html"),
+                                "pred_table_rows_path": str(eval_path.parent.parent / "inference" / "pred_table_layout.json"),
+                            }
+                        )
+
+                    similarity_pct = (
+                        float(row["text_similarity"]) * 100.0 if row.get("text_similarity") is not None else 0.0
+                    )
+                    print("=" * 80)
+                    print(row["id"])
+                    print(f"type: {row['type']}")
+                    print(f"status: {row['status']}")
+                    print(f"문자 유사도: {round(similarity_pct, 2)} %")
+                    print(f"CER: {round(float(row['cer']), 4) if row.get('cer') is not None else 'N/A'}")
+                    print(f"WER: {round(float(row['wer']), 4) if row.get('wer') is not None else 'N/A'}")
+                    if row.get("structure_micro_recall") is not None:
+                        print(
+                            "구조 micro recall: "
+                            f"{round(float(row['structure_micro_recall']) * 100.0, 2)} % "
+                            f"({row.get('matched_fields')}/{row.get('total_fields')})"
+                        )
+                    if row.get("structure_macro_f1") is not None:
+                        print(f"구조 macro f1: {round(float(row['structure_macro_f1']), 4)}")
+                    print(f"table_html_exists: {row.get('table_html_exists')}")
+                    print(f"table_rows_exists: {row.get('table_rows_exists')}")
+                    if row.get("review_required"):
+                        print(
+                            "review_required: True "
+                            f"reasons={row.get('review_reasons')} "
+                            f"missing_required={row.get('missing_required_fields')}"
+                        )
+                    print(f"latency_ms: {row['latency_ms']}")
+        except FileNotFoundError as e:
+            message = str(e)
+            if "Image folder not found" in message or "No image files found" in message or "Image not found" in message:
+                print(f"[SKIP][이미지 없음] {message}")
+                skip_image_count += 1
+            elif "GT not found" in message:
+                print(f"[SKIP][GT 없음] {message}")
+                skip_gt_count += 1
+            else:
+                print(f"[SKIP] {message}")
+            skip_count += 1
+        except Exception as e:
+            print(f"[FAIL] {doc_key}: {e}")
+            fail_count += 1
+            if stop_on_error:
+                raise
+
+    print("\n=== OCR Batch Summary ===")
+    print(f"total_docs: {len(doc_dirs)}")
+    print(f"ok: {ok_count}")
+    print(f"skip: {skip_count}")
+    print(f"skip_image_missing: {skip_image_count}")
+    print(f"skip_gt_missing: {skip_gt_count}")
+    print(f"fail: {fail_count}")
+
+    if eval_rows:
+        engine_out_root = Path(output_root) / _engine_dir_name(normalized_engine)
+        engine_out_root.mkdir(parents=True, exist_ok=True)
+
+        summary_csv_path = engine_out_root / "ocr_eval_summary.csv"
+        with summary_csv_path.open("w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "id",
+                    "doc_key",
+                    "type",
+                    "status",
+                    "text_similarity",
+                    "cer",
+                    "wer",
+                    "structure_micro_recall",
+                    "structure_macro_f1",
+                    "matched_fields",
+                    "total_fields",
+                    "table_html_exists",
+                    "table_rows_exists",
+                    "review_required",
+                    "review_reasons",
+                    "missing_required_fields",
+                    "latency_ms",
+                ],
+            )
+            writer.writeheader()
+            writer.writerows(eval_rows)
+
+        summary_json_path = engine_out_root / "ocr_eval_summary.json"
+        summary_json_path.write_text(json.dumps(eval_rows, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        avg_similarity = sum(float(row["text_similarity"]) for row in eval_rows if row.get("text_similarity") is not None)
+        avg_similarity /= max(1, len([row for row in eval_rows if row.get("text_similarity") is not None]))
+
+        structure_recalls = [
+            float(row["structure_micro_recall"]) for row in eval_rows if row.get("structure_micro_recall") is not None
+        ]
+        avg_structure_micro_recall = sum(structure_recalls) / len(structure_recalls) if structure_recalls else 0.0
+        structure_macro_f1_values = [
+            float(row["structure_macro_f1"]) for row in eval_rows if row.get("structure_macro_f1") is not None
+        ]
+        avg_structure_macro_f1 = (
+            sum(structure_macro_f1_values) / len(structure_macro_f1_values) if structure_macro_f1_values else 0.0
+        )
+        review_required_count = sum(1 for row in eval_rows if bool(row.get("review_required")))
+        fail_rate = (
+            sum(1 for row in eval_rows if str(row.get("status", "")) != "success") / len(eval_rows) * 100.0
+            if eval_rows
+            else 0.0
+        )
+
+        summary_txt_path = engine_out_root / "ocr_eval_summary.txt"
+        lines: list[str] = []
+        for row in eval_rows:
+            similarity_pct = float(row["text_similarity"]) * 100.0 if row.get("text_similarity") is not None else 0.0
+            lines.append("=" * 80)
+            lines.append(str(row.get("id", "")))
+            lines.append(f"type: {row.get('type', '')}")
+            lines.append(f"status: {row.get('status', '')}")
+            lines.append(f"문자 유사도: {round(similarity_pct, 2)} %")
+            lines.append(f"CER: {round(float(row['cer']), 4) if row.get('cer') is not None else 'N/A'}")
+            lines.append(f"WER: {round(float(row['wer']), 4) if row.get('wer') is not None else 'N/A'}")
+            if row.get("structure_micro_recall") is not None:
+                lines.append(
+                    "구조 micro recall: "
+                    f"{round(float(row['structure_micro_recall']) * 100.0, 2)} % "
+                    f"({row.get('matched_fields')}/{row.get('total_fields')})"
+                )
+            if row.get("structure_macro_f1") is not None:
+                lines.append(f"구조 macro f1: {round(float(row['structure_macro_f1']), 4)}")
+            lines.append(f"table_html_exists: {row.get('table_html_exists')}")
+            lines.append(f"table_rows_exists: {row.get('table_rows_exists')}")
+            if row.get("review_required"):
+                lines.append(
+                    "review_required: True "
+                    f"reasons={row.get('review_reasons')} "
+                    f"missing_required={row.get('missing_required_fields')}"
+                )
+            lines.append(f"latency_ms: {row.get('latency_ms')}")
+
+        lines.append("")
+        lines.append("[SUMMARY]")
+        lines.append(f"평가 이미지 수: {len(eval_rows)}")
+        lines.append(f"평균 문자 유사도: {round(avg_similarity * 100.0, 2)} %")
+        lines.append(f"평균 구조 micro recall: {round(avg_structure_micro_recall * 100.0, 2)} %")
+        lines.append(f"평균 구조 macro f1: {round(avg_structure_macro_f1, 4)}")
+        lines.append(f"리뷰 큐 건수: {review_required_count}")
+        lines.append(f"실패율: {round(fail_rate, 2)} %")
+        summary_txt_path.write_text("\n".join(lines), encoding="utf-8")
+
+        print("\n[SUMMARY]")
+        print(f"평가 이미지 수: {len(eval_rows)}")
+        print(f"평균 문자 유사도: {round(avg_similarity * 100.0, 2)} %")
+        print(f"평균 구조 micro recall: {round(avg_structure_micro_recall * 100.0, 2)} %")
+        print(f"평균 구조 macro f1: {round(avg_structure_macro_f1, 4)}")
+        print(f"리뷰 큐 건수: {review_required_count}")
+        print(f"실패율: {round(fail_rate, 2)} %")
+        print(f"saved_eval_summary_csv: {summary_csv_path}")
+        print(f"saved_eval_summary_json: {summary_json_path}")
+        print(f"saved_eval_summary_txt: {summary_txt_path}")
+        review_queue_path = engine_out_root / "review_queue.jsonl"
+        if review_queue_rows:
+            with review_queue_path.open("w", encoding="utf-8") as f:
+                for row in review_queue_rows:
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        else:
+            review_queue_path.write_text("", encoding="utf-8")
+        print(f"saved_review_queue_jsonl: {review_queue_path}")
+
+
 def _pipeline_paths_for_input(
     input_file: Path,
     output_dir: str,
@@ -779,6 +2350,10 @@ def main() -> None:
         action="store_true",
         help="Make a real OpenAI API request to verify the key and network connection",
     )
+    subparsers.add_parser(
+        "check-ocr3-setup",
+        help="Validate PaddleOCR 3.x package/module installation status",
+    )
 
     embed_parser = subparsers.add_parser("embed-jsonl", help="Embed prepared JSONL rows")
     embed_parser.add_argument("--input", required=True, help="Input JSONL path")
@@ -985,6 +2560,213 @@ def main() -> None:
     convert_parser.add_argument("--output", required=True, help="Embedding input JSONL output path")
     convert_parser.add_argument("--doc-id", default=None, help="Optional doc id override")
 
+    ocr_export_parser = subparsers.add_parser(
+        "ocr-export-rag",
+        help="Export OCR eval outputs into RAG handoff manifest/chunk JSONL",
+    )
+    ocr_export_parser.add_argument(
+        "--ocr-eval-root",
+        default="data/v2/ocr_outputs",
+        help="Root folder containing OCR eval outputs",
+    )
+    ocr_export_parser.add_argument(
+        "--output-manifest",
+        default="data/v2/ocr_rag/ocr_handoff_manifest.jsonl",
+        help="Output JSONL manifest for OCR->RAG handoff",
+    )
+    ocr_export_parser.add_argument(
+        "--output-chunks",
+        default="data/v2/ocr_rag/ocr_handoff_chunks.jsonl",
+        help="Output chunk JSONL usable by embed-jsonl/build-chroma",
+    )
+    ocr_export_parser.add_argument(
+        "--engine",
+        default=None,
+        help="Optional OCR engine folder filter (e.g. paddleocr_vl)",
+    )
+    ocr_export_parser.add_argument(
+        "--doc-key",
+        default=None,
+        help="Optional document key folder filter",
+    )
+    ocr_export_parser.add_argument(
+        "--exclude-review-required",
+        action="store_true",
+        help="Exclude review_required=true items from exported handoff",
+    )
+    ocr_export_parser.add_argument(
+        "--include-html-chunk",
+        action="store_true",
+        help="Include table HTML snippet chunks in output-chunks",
+    )
+    ocr_export_parser.add_argument(
+        "--html-chunk-max-chars",
+        type=int,
+        default=1200,
+        help="Maximum chars for HTML snippet chunk when --include-html-chunk is enabled",
+    )
+
+    ocr_parser = subparsers.add_parser(
+        "extract-ocr-images",
+        help="Extract embedded images from HWP files for OCR ground-truth preparation",
+    )
+    ocr_parser.add_argument("--input-dir", required=True, help="Directory containing HWP files")
+    ocr_parser.add_argument("--output-dir", required=True, help="Directory to save extracted images")
+    ocr_parser.add_argument("--limit", type=int, default=0, help="Process first N files only; 0=all")
+
+    build_pred_parser = subparsers.add_parser(
+        "build-pred-structured",
+        help="Convert raw OCR JSON to GT-aligned pred structured JSON",
+    )
+    build_pred_parser.add_argument("--gt", required=True, help="GT path (.json/.jsonl)")
+    build_pred_parser.add_argument("--pred-raw", required=True, help="Raw OCR JSON path")
+    build_pred_parser.add_argument("--id", required=True, help="Target item id")
+    build_pred_parser.add_argument("--output", required=True, help="Pred structured JSON output path")
+    build_pred_parser.add_argument(
+        "--score-threshold",
+        type=float,
+        default=0.0,
+        help="Minimum OCR confidence threshold",
+    )
+
+    eval_pred_parser = subparsers.add_parser(
+        "eval-pred-structured",
+        help="Evaluate pred structured JSON against GT (.json/.jsonl)",
+    )
+    eval_pred_parser.add_argument("--gt", required=True, help="GT path (.json/.jsonl)")
+    eval_pred_parser.add_argument("--pred-structured", required=True, help="Pred structured JSON path")
+    eval_pred_parser.add_argument("--id", required=True, help="Target item id")
+    eval_pred_parser.add_argument("--output", required=True, help="Evaluation JSON output path")
+    eval_pred_parser.add_argument(
+        "--structure-threshold",
+        type=float,
+        default=0.65,
+        help="Value similarity threshold for structure matching",
+    )
+
+    ocr_image_parser = subparsers.add_parser(
+        "ocr-run-image",
+        help="Run OCR/eval for one image with doc_key-based path resolution",
+    )
+    ocr_image_parser.add_argument("--doc-key", required=True, help="Document key (folder name under ocr_images)")
+    ocr_image_parser.add_argument(
+        "--id",
+        default=None,
+        help="Target item id. If omitted, auto-detected from GT JSON when unique.",
+    )
+    ocr_image_parser.add_argument("--images-root", default="data/v2/ocr_images", help="Root folder of OCR images")
+    ocr_image_parser.add_argument(
+        "--gt-root",
+        default="data/v2/ocr_outputs/incoming_gt",
+        help="Root folder of GT files (.jsonl preferred, .json supported)",
+    )
+    ocr_image_parser.add_argument("--output-root", default="data/v2/ocr_outputs", help="Root folder of OCR outputs")
+    ocr_image_parser.add_argument("--image-name", default="img_001.jpg", help="Image filename inside doc folder")
+    ocr_image_parser.add_argument("--lang", default="korean", help="PaddleOCR language fallback")
+    ocr_image_parser.add_argument(
+        "--ocr-config",
+        default="configs/ocr_default.yaml",
+        help="OCR config path (engine/device/model settings)",
+    )
+    ocr_image_parser.add_argument(
+        "--score-threshold",
+        type=float,
+        default=None,
+        help="Override minimum OCR confidence threshold for structured prediction (default from ocr-config)",
+    )
+    ocr_image_parser.add_argument(
+        "--structure-threshold",
+        type=float,
+        default=None,
+        help="Override structure match similarity threshold for eval (default from ocr-config)",
+    )
+    ocr_image_parser.add_argument(
+        "--all-engines",
+        action="store_true",
+        help="Run default OCR engine matrix (pp_ocrv5, pp_ocrv5_transformers, pp_structurev3, table_recognition_v2, paddleocr_vl)",
+    )
+    ocr_image_parser.add_argument("--use-doc-orientation-classify", action="store_true")
+    ocr_image_parser.add_argument("--use-doc-unwarping", action="store_true")
+    ocr_image_parser.add_argument("--use-chart-recognition", action="store_true")
+    ocr_image_parser.add_argument("--use-table-orientation-classify", action="store_true")
+    ocr_image_parser.add_argument("--use-ocr-results-with-table-cells", action="store_true")
+    ocr_image_parser.add_argument("--text-det-limit-side-len", type=int, default=None)
+    ocr_image_parser.add_argument(
+        "--table-dual-pass",
+        action="store_true",
+        help="For table images, run VL first and then PP-OCRv5 to merge non-table text.",
+    )
+    ocr_image_parser.add_argument(
+        "--table-second-engine",
+        default="pp_ocrv5",
+        choices=["pp_ocrv5", "pp_ocrv5_transformers"],
+        help="Second pass OCR engine used when --table-dual-pass is enabled.",
+    )
+
+    ocr_batch_parser = subparsers.add_parser(
+        "ocr-run-batch",
+        help="Run OCR/eval for all doc folders under ocr_images",
+    )
+    ocr_batch_parser.add_argument("--images-root", default="data/v2/ocr_images", help="Root folder of OCR images")
+    ocr_batch_parser.add_argument(
+        "--gt-root",
+        default="data/v2/ocr_outputs/incoming_gt",
+        help="Root folder of GT files (.jsonl preferred, .json supported)",
+    )
+    ocr_batch_parser.add_argument("--output-root", default="data/v2/ocr_outputs", help="Root folder of OCR outputs")
+    ocr_batch_parser.add_argument(
+        "--doc-key",
+        default=None,
+        help="Run batch only for one document key folder under images-root",
+    )
+    ocr_batch_parser.add_argument("--image-name", default="img_001.jpg", help="Image filename inside doc folder")
+    ocr_batch_parser.add_argument("--limit", type=int, default=0, help="Process first N doc folders only; 0=all")
+    ocr_batch_parser.add_argument(
+        "--stop-on-error",
+        action="store_true",
+        help="Stop batch immediately on first failure",
+    )
+    ocr_batch_parser.add_argument("--lang", default="korean", help="PaddleOCR language fallback")
+    ocr_batch_parser.add_argument(
+        "--ocr-config",
+        default="configs/ocr_default.yaml",
+        help="OCR config path (engine/device/model settings)",
+    )
+    ocr_batch_parser.add_argument(
+        "--score-threshold",
+        type=float,
+        default=None,
+        help="Override minimum OCR confidence threshold for structured prediction (default from ocr-config)",
+    )
+    ocr_batch_parser.add_argument(
+        "--structure-threshold",
+        type=float,
+        default=None,
+        help="Override structure match similarity threshold for eval (default from ocr-config)",
+    )
+    ocr_batch_parser.add_argument(
+        "--all-engines",
+        action="store_true",
+        help="Run default OCR engine matrix (pp_ocrv5, pp_ocrv5_transformers, pp_structurev3, table_recognition_v2, paddleocr_vl)",
+    )
+    ocr_batch_parser.add_argument("--use-doc-orientation-classify", action="store_true")
+    ocr_batch_parser.add_argument("--use-doc-unwarping", action="store_true")
+    ocr_batch_parser.add_argument("--use-chart-recognition", action="store_true")
+    ocr_batch_parser.add_argument("--use-table-orientation-classify", action="store_true")
+    ocr_batch_parser.add_argument("--use-ocr-results-with-table-cells", action="store_true")
+    ocr_batch_parser.add_argument("--text-det-limit-side-len", type=int, default=None)
+    ocr_batch_parser.add_argument(
+        "--table-dual-pass",
+        action="store_true",
+        help="For table images, run VL first and then PP-OCRv5 to merge non-table text.",
+    )
+    ocr_batch_parser.add_argument(
+        "--table-second-engine",
+        default="pp_ocrv5",
+        choices=["pp_ocrv5", "pp_ocrv5_transformers"],
+        help="Second pass OCR engine used when --table-dual-pass is enabled.",
+    )
+
     pipeline_parser = subparsers.add_parser(
         "run-pipeline",
         help="Run parse->chunk->embed->build-chroma in one command",
@@ -1051,6 +2833,10 @@ def main() -> None:
         from src.utils.setup_check import run_setup_check
 
         sys.exit(run_setup_check(args.config, check_openai=args.check_openai))
+    elif args.command == "check-ocr3-setup":
+        from src.utils.ocr3_setup_check import run_ocr3_setup_check
+
+        sys.exit(run_ocr3_setup_check())
     elif args.command == "embed-jsonl":
         embed_jsonl(
             input_path=args.input,
@@ -1147,6 +2933,128 @@ def main() -> None:
         )
     elif args.command == "convert-embedding-input":
         convert_embedding_input(input_path=args.input, output_path=args.output, doc_id=args.doc_id)
+    elif args.command == "ocr-export-rag":
+        export_ocr_rag_handoff(
+            ocr_eval_root=args.ocr_eval_root,
+            output_manifest=args.output_manifest,
+            output_chunks=args.output_chunks,
+            engine=args.engine,
+            doc_key=args.doc_key,
+            include_review_required=not args.exclude_review_required,
+            include_html_chunk=args.include_html_chunk,
+            html_chunk_max_chars=args.html_chunk_max_chars,
+        )
+    elif args.command == "extract-ocr-images":
+        extract_ocr_images(input_dir=args.input_dir, output_dir=args.output_dir, limit=args.limit)
+    elif args.command == "build-pred-structured":
+        build_pred_structured(
+            gt_path=args.gt,
+            pred_raw_path=args.pred_raw,
+            item_id=args.id,
+            output_path=args.output,
+            score_threshold=args.score_threshold,
+        )
+    elif args.command == "eval-pred-structured":
+        eval_pred_structured_vs_gt(
+            gt_path=args.gt,
+            pred_structured_path=args.pred_structured,
+            item_id=args.id,
+            output_path=args.output,
+            structure_match_threshold=args.structure_threshold,
+        )
+    elif args.command == "ocr-run-image":
+        from src.config_ocr import load_ocr_config
+
+        ocr_cfg = load_ocr_config(args.ocr_config).ocr
+        effective_score_threshold = (
+            args.score_threshold if args.score_threshold is not None else ocr_cfg.score_threshold
+        )
+        effective_structure_threshold = (
+            args.structure_threshold
+            if args.structure_threshold is not None
+            else ocr_cfg.structure_match_threshold
+        )
+        engines = list(DEFAULT_OCR_ENGINE_MATRIX) if args.all_engines else [_normalize_ocr_engine(ocr_cfg.engine)]
+        failed_engines: list[str] = []
+        for engine_name in engines:
+            print(f"\n=== OCR Image Engine: {engine_name} ===")
+            try:
+                ocr_run_image(
+                    doc_key=args.doc_key,
+                    item_id=args.id,
+                    images_root=args.images_root,
+                    gt_root=args.gt_root,
+                    output_root=args.output_root,
+                    image_name=args.image_name,
+                    lang=ocr_cfg.lang or args.lang,
+                    score_threshold=effective_score_threshold,
+                    structure_match_threshold=effective_structure_threshold,
+                    ocr_engine=engine_name,
+                    ocr_device=ocr_cfg.device,
+                    ocr_batch_size=ocr_cfg.batch_size,
+                    use_doc_orientation_classify=args.use_doc_orientation_classify,
+                    use_doc_unwarping=args.use_doc_unwarping,
+                    use_chart_recognition=args.use_chart_recognition,
+                    use_table_orientation_classify=args.use_table_orientation_classify,
+                    use_ocr_results_with_table_cells=args.use_ocr_results_with_table_cells,
+                    text_det_limit_side_len=args.text_det_limit_side_len,
+                    table_dual_pass=args.table_dual_pass,
+                    table_second_engine=args.table_second_engine,
+                )
+            except Exception as exc:
+                failed_engines.append(engine_name)
+                print(f"[FAIL_ENGINE] {engine_name}: {exc}")
+                if not args.all_engines:
+                    raise
+        if failed_engines:
+            raise SystemExit(f"Failed engines: {', '.join(failed_engines)}")
+    elif args.command == "ocr-run-batch":
+        from src.config_ocr import load_ocr_config
+
+        ocr_cfg = load_ocr_config(args.ocr_config).ocr
+        effective_score_threshold = (
+            args.score_threshold if args.score_threshold is not None else ocr_cfg.score_threshold
+        )
+        effective_structure_threshold = (
+            args.structure_threshold
+            if args.structure_threshold is not None
+            else ocr_cfg.structure_match_threshold
+        )
+        engines = list(DEFAULT_OCR_ENGINE_MATRIX) if args.all_engines else [_normalize_ocr_engine(ocr_cfg.engine)]
+        failed_engines: list[str] = []
+        for engine_name in engines:
+            print(f"\n=== OCR Batch Engine: {engine_name} ===")
+            try:
+                ocr_run_batch(
+                    images_root=args.images_root,
+                    gt_root=args.gt_root,
+                    output_root=args.output_root,
+                    image_name=args.image_name,
+                    doc_key=args.doc_key,
+                    limit=args.limit,
+                    stop_on_error=args.stop_on_error,
+                    lang=ocr_cfg.lang or args.lang,
+                    score_threshold=effective_score_threshold,
+                    structure_match_threshold=effective_structure_threshold,
+                    ocr_engine=engine_name,
+                    ocr_device=ocr_cfg.device,
+                    ocr_batch_size=ocr_cfg.batch_size,
+                    use_doc_orientation_classify=args.use_doc_orientation_classify,
+                    use_doc_unwarping=args.use_doc_unwarping,
+                    use_chart_recognition=args.use_chart_recognition,
+                    use_table_orientation_classify=args.use_table_orientation_classify,
+                    use_ocr_results_with_table_cells=args.use_ocr_results_with_table_cells,
+                    text_det_limit_side_len=args.text_det_limit_side_len,
+                    table_dual_pass=args.table_dual_pass,
+                    table_second_engine=args.table_second_engine,
+                )
+            except Exception as exc:
+                failed_engines.append(engine_name)
+                print(f"[FAIL_ENGINE] {engine_name}: {exc}")
+                if not args.all_engines:
+                    raise
+        if failed_engines:
+            raise SystemExit(f"Failed engines: {', '.join(failed_engines)}")
     elif args.command == "run-pipeline":
         resolved_index = str(resolve_index_dir(args.config, args.index_dir))
         run_pipeline(

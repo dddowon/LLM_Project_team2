@@ -222,6 +222,8 @@ python -m src.cli merge-embedded \
 
 `OPENAI_API_KEY`가 없으면 `mock` 임베딩으로 동작하고, 실 API 강제 검증은 `--force-real` 옵션을 사용합니다.
 
+
+
 ## 실험 포인트
 
 - 청킹: `chunk_size`, `chunk_overlap`, 목차/장절 기반 의미 청킹 비교
@@ -275,3 +277,235 @@ python -m src.cli sampling \
 ```
 
 기준 청킹 결과와 overlap을 맞춰야 하는 경우 `chunk-jsonl`에 `--text-overlap 150`을 추가합니다.
+
+
+## OCR 파이프라인
+### OCR 환경 설치
+
+```bash
+conda create -n ocr_vl15 python=3.10.20 -y
+conda activate ocr_vl15
+pip install -r requirements_ocr_vl15.txt
+python -m src.cli check-ocr3-setup
+```
+
+`check-ocr3-setup`은 패키지 설치/버전과 기본 import 상태를 검증합니다.
+PPStructureV3, PaddleOCRVL, table_recognition_v2는 런타임 모델 다운로드가 필요하므로
+최종 검증은 실제 OCR 추론 스모크 테스트까지 통과해야 완료입니다.
+
+재현 가능한 환경 고정을 위해 설치 직후 아래 파일을 커밋합니다.
+
+```bash
+conda env export -n ocr_vl15 > envs/ocr_vl15.lock.yml
+pip freeze > envs/ocr_vl15.freeze.txt
+```
+
+현재 `requirements_ocr_vl15.txt`에는 `paddlepaddle-gpu`가 포함되어 있습니다.
+
+### 개요
+
+현재 OCR 실행은 CLI에서 아래 명령으로 통합 운영합니다.
+
+```bash
+# WSL + NVIDIA GPU 환경에서만 필요
+export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH}
+```
+
+입력/출력 규칙:
+- 이미지 입력: `data/v2/ocr_images/<doc_key>/img_001.jpg`
+- GT 입력: `data/v2/ocr_outputs/incoming_gt/<doc_key>.jsonl` (없으면 `.json` fallback)
+- 결과 출력:
+  - `data/v2/ocr_outputs/<engine>/<doc_key>/<image_stem>/inference/pred_raw.json`
+  - `data/v2/ocr_outputs/<engine>/<doc_key>/<image_stem>/inference/pred_table_raw.html`
+  - `data/v2/ocr_outputs/<engine>/<doc_key>/<image_stem>/inference/pred_table_layout.json`
+  - `data/v2/ocr_outputs/<engine>/<doc_key>/<image_stem>/inference/pred_table_layout.html`
+  - `data/v2/ocr_outputs/<engine>/<doc_key>/<image_stem>/eval/gt_pred_structured.json`
+  - `data/v2/ocr_outputs/<engine>/<doc_key>/<image_stem>/eval/gt_eval_summary.json`
+  - `data/v2/ocr_outputs/<engine>/<doc_key>/<image_stem>/eval/gt_eval_debug.json` (review_required=true일 때만 생성)
+- `<engine>`: `pp_ocrv5`, `pp_ocrv5_transformers`, `pp_structurev3`, `table_recognition_v2`, `paddleocr_vl`
+- `--doc-key`는 파일명이 아니라 `ocr_images` 하위 폴더명입니다.
+
+Threshold 의미:
+- `--score-threshold`:
+  - OCR 예측 생성 단계의 confidence 하한값입니다.
+  - 이 값보다 낮은 인식 결과는 `eval/gt_pred_structured.json` 구성에서 제외됩니다.
+  - 즉, **예측값 자체를 필터링**하는 파라미터입니다.
+- `--structure-threshold`:
+  - 평가 단계에서 GT 값과 pred 값을 매칭할 때 쓰는 유사도 임계값입니다.
+  - 이 값은 `eval/gt_eval_summary.json`의 구조 지표(`structure_micro_recall`, `structure_macro_f1`)에 영향을 줍니다.
+  - 즉, **점수 계산 기준을 조정**하는 파라미터입니다.
+- 둘은 역할이 다르므로 같은 값으로 고정할 필요는 없습니다.
+
+### 이미지 1개 실행 (`ocr-run-image`)
+
+```bash
+python -m src.cli ocr-run-image \
+  --doc-key "한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보" \
+  --image-name "img_001.jpg" \
+  --ocr-config "configs/ocr_default.yaml" \
+  --score-threshold 0.0 \
+  --structure-threshold 0.65
+```
+
+실제 경로를 명시하려면:
+
+```bash
+cd /home/imella0707/personal/LLM_Project_team2
+conda activate ocr_vl15
+export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH}   # WSL + NVIDIA GPU일 때만
+
+python -m src.cli ocr-run-image \
+  --doc-key "한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보" \
+  --image-name "img_001.jpg" \
+  --images-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_images" \
+  --gt-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_outputs/incoming_gt" \
+  --output-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_outputs" \
+  --ocr-config "/home/imella0707/personal/LLM_Project_team2/configs/ocr_default.yaml" \
+  --score-threshold 0.0 \
+  --structure-threshold 0.65
+```
+
+GT JSON에 `id`가 여러 개면 `--id`를 함께 지정하세요.
+
+### 문서 폴더 1개 실행 (`ocr-run-batch --doc-key`)
+
+```bash
+python -m src.cli ocr-run-batch \
+  --doc-key "한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보" \
+  --ocr-config "configs/ocr_default.yaml" \
+  --score-threshold 0.0 \
+  --structure-threshold 0.65
+```
+
+### 전체 문서 배치 실행 (`ocr-run-batch`)
+
+```bash
+python -m src.cli ocr-run-batch \
+  --ocr-config "configs/ocr_default.yaml" \
+  --score-threshold 0.0 \
+  --structure-threshold 0.65
+```
+
+5개 ocr엔진을 한 번에 자동 실행하려면:
+
+```bash
+python -m src.cli ocr-run-batch \
+  --ocr-config "configs/ocr_default.yaml" \
+  --score-threshold 0.0 \
+  --structure-threshold 0.65 \
+  --all-engines
+```
+
+실제 경로를 명시하려면:
+
+```bash
+cd /home/imella0707/personal/LLM_Project_team2
+conda activate ocr_vl15
+export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH}   # WSL + NVIDIA GPU일 때만
+
+python -m src.cli ocr-run-batch \
+  --images-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_images" \
+  --gt-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_outputs/incoming_gt" \
+  --output-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_outputs" \
+  --ocr-config "/home/imella0707/personal/LLM_Project_team2/configs/ocr_default.yaml" \
+  --score-threshold 0.0 \
+  --structure-threshold 0.65
+```
+
+### OCR → RAG Stage 스크립트 (권장)
+
+개발/운영은 아래 3개 엔트리포인트로 분리합니다.
+OCR과 RAG는 의존성 충돌 방지를 위해 가상환경을 분리해서 실행합니다.
+
+```bash
+# OCR만 실행 (OCR env: 기본 ocr_vl15)
+./scripts/run_ocr_stage.sh
+
+# RAG만 실행 (RAG env: 기본 llm_team2)
+./scripts/run_rag_stage.sh
+
+# OCR -> RAG 연속 실행
+./scripts/run_all_ocr_rag_pipeline.sh
+```
+
+기본 동작(중요):
+- `run_ocr_stage.sh`는 기본적으로 OCR 결과를 전량 RAG handoff로 export합니다.
+  - 기본값: `EXCLUDE_REVIEW_REQUIRED=0`
+  - `EXCLUDE_REVIEW_REQUIRED=1`일 때만 `review_required=true` 항목을 제외합니다.
+- `USE_DOC_UNWARPING=1`이 기본값이며, `ocr-run-batch`에 `--use-doc-unwarping`을 전달합니다.
+- `INCLUDE_HTML_CHUNK=0`이 기본값입니다. 즉 HTML 스니펫은 RAG 청크에 기본 포함되지 않습니다.
+
+
+
+선택한 일부 폴더만 OCR 수행 후 RAG handoff 파일로 내보내기:
+
+```bash
+# 예시 1) 특정 doc_key 1개만 처리
+DOC_KEY="인천광역시_도시계획위원회 통합관리시스템 구축용역" \
+RAG_HANDOFF_DIR="data/v2/ocr_rag" \
+./scripts/run_ocr_stage.sh
+
+# 예시 2) 다른 doc_key로 재실행
+DOC_KEY="한국생산기술연구원_EIP3.0 고압가스 안전관리 시스템 구축 용역" \
+RAG_HANDOFF_DIR="data/v2/ocr_rag" \
+./scripts/run_ocr_stage.sh
+```
+
+여러 폴더를 연속 처리하려면 `DOC_KEY`를 바꿔 반복 실행하거나, 전체 처리(`DOC_KEY` 미지정)를 사용합니다.
+
+문서 왜곡 보정을 끄고 비교 실행하려면:
+
+```bash
+USE_DOC_UNWARPING=0 ./scripts/run_ocr_stage.sh
+```
+
+품질 게이트 통과건만 RAG handoff에 포함하려면:
+
+```bash
+EXCLUDE_REVIEW_REQUIRED=1 ./scripts/run_ocr_stage.sh
+```
+
+HTML 스니펫까지 RAG 청크에 포함하려면(기본 비권장):
+
+```bash
+INCLUDE_HTML_CHUNK=1 HTML_CHUNK_MAX_CHARS=1200 ./scripts/run_ocr_stage.sh
+```
+
+`run_ocr_stage.sh` 기본 산출물:
+- `data/v2/ocr_rag/ocr_input_manifest.jsonl`
+- `data/v2/ocr_rag/ocr_input_chunks.jsonl`
+
+`run_rag_stage.sh` 기본 산출물:
+- `data/v2/ocr_rag/ocr_input_embedded.jsonl`
+- `data/v2/ocr_rag/chroma_index/`
+
+운영 원칙:
+- 팀 간 OCR→RAG 인터페이스 파일은 `data/v2/ocr_rag/ocr_input_chunks.jsonl` 단일 파일로 고정합니다.
+- `chroma_index/`는 RAG 임베딩/인덱싱 이후의 런타임 산출물이며 전달 표준 포맷이 아닙니다.
+- `pred_table_layout.html`은 사람 검수용 참고 파일이며, 기본 RAG 입력 계약 포맷이 아닙니다.
+
+### OCR→RAG handoff를 CLI로 직접 생성 (`ocr-export-rag`)
+
+```bash
+python -m src.cli ocr-export-rag \
+  --ocr-eval-root "data/v2/ocr_outputs" \
+  --engine "paddleocr_vl" \
+  --output-manifest "data/v2/ocr_rag/ocr_input_manifest.jsonl" \
+  --output-chunks "data/v2/ocr_rag/ocr_input_chunks.jsonl"
+```
+
+### 결과 확인 위치
+
+- OCR 이미지 추출 결과: `data/v2/ocr_images/`
+- OCR 산출물(`inference/*`) + OCR 평가 산출물(`eval/*`): `data/v2/ocr_outputs/`
+- 엔진 단위 요약:
+  - `data/v2/ocr_outputs/<engine>/ocr_eval_summary.{csv,json,txt}`
+  - `data/v2/ocr_outputs/<engine>/review_queue.jsonl` (규칙 기반 실패 큐)
+- `eval/gt_eval_summary.json` 주요 지표:
+  - `schema_version`, `gt_path`, `pred_structured_path`
+  - `review_required`, `review_reasons`
+  - `type`, `status`, `latency_ms`
+  - `text.char_similarity_pct`, `text.cer`, `text.wer`, `text.exact_match`
+  - `structure_micro_recall`, `structure_macro_f1`
+  - `structure.aggregate` (`matched`, `gt_total`, `pred_total`, `micro_precision`, `micro_recall`, `micro_f1`, `macro_f1`)
+  - `table_html.exists`, `table_rows.exists`

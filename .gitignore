@@ -30,9 +30,12 @@ src/*.egg-info/
 data/raw/
 data/**/raw/
 
+
 # Versioned data folders
 data/v1/raw/
 data/v2/raw/
+data/v2/ocr_images/
+data/v2/ocr_outputs/
 data/v3/raw/
 
 # RFP original documents
