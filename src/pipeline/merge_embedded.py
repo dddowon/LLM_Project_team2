@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import hashlib
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+DEFAULT_OCR_EMBEDDED_REL = Path("ocr_rag/ocr_input_embedded.jsonl")
 
 from src.utils.jsonl import read_jsonl, write_jsonl
 
@@ -114,6 +117,21 @@ def build_unified_chroma_index(
     sources = discover_embedded_jsonl(input_dir, pattern=pattern, recursive=recursive)
     if not sources:
         raise RuntimeError(f"embedded JSONL을 찾지 못했습니다: {input_dir} ({pattern})")
+
+    ocr_embedded = (input_dir / DEFAULT_OCR_EMBEDDED_REL).resolve()
+    if not ocr_embedded.is_file():
+        warnings.warn(
+            f"OCR embedded가 없습니다: {ocr_embedded}\n"
+            "  → ./scripts/run_ocr_stage.sh 후 ./scripts/run_rag_stage.sh 실행 후 merge-embedded 재실행",
+            UserWarning,
+            stacklevel=2,
+        )
+    elif ocr_embedded not in {path.resolve() for path in sources}:
+        warnings.warn(
+            f"OCR embedded가 병합 목록에 없습니다: {ocr_embedded} (pattern={pattern})",
+            UserWarning,
+            stacklevel=2,
+        )
 
     out_path = merged_output or (index_dir.parent / "all_embedded.jsonl")
     _, collisions = merge_embedded_jsonl(sources, out_path, dedupe_chunk_ids=dedupe_chunk_ids)
