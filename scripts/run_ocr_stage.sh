@@ -68,18 +68,6 @@ python "${OCR_BATCH_ARGS[@]}"
 
 mkdir -p "${RAG_HANDOFF_DIR}"
 
-if [[ "${OCR_NO_GT}" == "1" ]]; then
-  echo "[OCR STAGE] OCR_NO_GT=1 -> skip ocr-export-rag (GT-dependent)"
-  echo "[OCR STAGE DONE]"
-  echo "ocr_no_gt: ${OCR_NO_GT}"
-  echo "exclude_review_required: ${EXCLUDE_REVIEW_REQUIRED}"
-  echo "use_doc_unwarping: ${USE_DOC_UNWARPING}"
-  echo "table_dual_pass: ${TABLE_DUAL_PASS}"
-  echo "include_html_chunk: ${INCLUDE_HTML_CHUNK}"
-  echo "html_chunk_max_chars: ${HTML_CHUNK_MAX_CHARS}"
-  exit 0
-fi
-
 EXPORT_ARGS=(
   -m src.cli ocr-export-rag
   --ocr-eval-root "${OCR_OUTPUT_ROOT}"
@@ -87,6 +75,9 @@ EXPORT_ARGS=(
   --output-manifest "${MANIFEST_OUTPUT}"
   --output-chunks "${CHUNKS_OUTPUT}"
 )
+if [[ "${OCR_NO_GT}" == "1" ]]; then
+  EXPORT_ARGS+=(--allow-inference-only)
+fi
 if [[ "${EXCLUDE_REVIEW_REQUIRED}" == "1" ]]; then
   EXPORT_ARGS+=(--exclude-review-required)
 fi
