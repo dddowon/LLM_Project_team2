@@ -28,6 +28,7 @@ INCLUDE_HTML_CHUNK="${INCLUDE_HTML_CHUNK:-0}"
 HTML_CHUNK_MAX_CHARS="${HTML_CHUNK_MAX_CHARS:-1200}"
 USE_DOC_UNWARPING="${USE_DOC_UNWARPING:-1}"
 TABLE_DUAL_PASS="${TABLE_DUAL_PASS:-0}"
+OCR_NO_GT="${OCR_NO_GT:-0}"
 
 echo "[OCR STAGE] root=${ROOT_DIR}"
 echo "[OCR STAGE] env=${OCR_ENV_NAME}"
@@ -56,6 +57,9 @@ fi
 if [[ "${TABLE_DUAL_PASS}" == "1" ]]; then
   OCR_BATCH_ARGS+=(--table-dual-pass)
 fi
+if [[ "${OCR_NO_GT}" == "1" ]]; then
+  OCR_BATCH_ARGS+=(--no-gt)
+fi
 if [[ -n "${DOC_KEY}" ]]; then
   OCR_BATCH_ARGS+=(--doc-key "${DOC_KEY}")
 fi
@@ -63,6 +67,18 @@ fi
 python "${OCR_BATCH_ARGS[@]}"
 
 mkdir -p "${RAG_HANDOFF_DIR}"
+
+if [[ "${OCR_NO_GT}" == "1" ]]; then
+  echo "[OCR STAGE] OCR_NO_GT=1 -> skip ocr-export-rag (GT-dependent)"
+  echo "[OCR STAGE DONE]"
+  echo "ocr_no_gt: ${OCR_NO_GT}"
+  echo "exclude_review_required: ${EXCLUDE_REVIEW_REQUIRED}"
+  echo "use_doc_unwarping: ${USE_DOC_UNWARPING}"
+  echo "table_dual_pass: ${TABLE_DUAL_PASS}"
+  echo "include_html_chunk: ${INCLUDE_HTML_CHUNK}"
+  echo "html_chunk_max_chars: ${HTML_CHUNK_MAX_CHARS}"
+  exit 0
+fi
 
 EXPORT_ARGS=(
   -m src.cli ocr-export-rag
@@ -84,6 +100,7 @@ fi
 python "${EXPORT_ARGS[@]}"
 
 echo "[OCR STAGE DONE]"
+echo "ocr_no_gt: ${OCR_NO_GT}"
 echo "exclude_review_required: ${EXCLUDE_REVIEW_REQUIRED}"
 echo "use_doc_unwarping: ${USE_DOC_UNWARPING}"
 echo "table_dual_pass: ${TABLE_DUAL_PASS}"

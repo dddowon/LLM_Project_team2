@@ -430,6 +430,10 @@ export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH}
 - `<engine>`: `pp_ocrv5`, `pp_ocrv5_transformers`, `pp_structurev3`, `table_recognition_v2`, `paddleocr_vl`
 - `--doc-key`는 파일명이 아니라 `ocr_images` 하위 폴더명입니다.
 
+GT 의존성:
+- 기본 모드에서는 GT가 있어야 `eval/*`까지 생성됩니다.
+- `--no-gt`(또는 `OCR_NO_GT=1`)를 쓰면 GT 없이 `inference/*`만 생성하는 추론 전용 모드로 동작합니다.
+
 Threshold 의미:
 - `--score-threshold`:
   - OCR 예측 생성 단계의 confidence 하한값입니다.
@@ -495,6 +499,16 @@ python -m src.cli ocr-run-image \
 
 GT JSON에 `id`가 여러 개면 `--id`를 함께 지정하세요.
 
+### GT 없이 추론만 실행 (`--no-gt`)
+
+```bash
+python -m src.cli ocr-run-image \
+  --doc-key "한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보" \
+  --image-name "img_001.jpg" \
+  --ocr-config "configs/ocr_default.yaml" \
+  --no-gt
+```
+
 ### 문서 폴더 1개 실행 (`ocr-run-batch --doc-key`)
 
 ```bash
@@ -503,6 +517,15 @@ python -m src.cli ocr-run-batch \
   --ocr-config "configs/ocr_default.yaml" \
   --score-threshold 0.0 \
   --structure-threshold 0.65
+```
+
+GT 없이 문서 폴더 1개 추론만:
+
+```bash
+python -m src.cli ocr-run-batch \
+  --doc-key "한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보" \
+  --ocr-config "configs/ocr_default.yaml" \
+  --no-gt
 ```
 
 ### 전체 문서 배치 실행 (`ocr-run-batch`)
@@ -602,6 +625,23 @@ INCLUDE_HTML_CHUNK=1 HTML_CHUNK_MAX_CHARS=1200 ./scripts/run_ocr_stage.sh
 `run_ocr_stage.sh` 기본 산출물:
 - `data/v2/ocr_rag/ocr_input_manifest.jsonl`
 - `data/v2/ocr_rag/ocr_input_chunks.jsonl`
+
+GT 없이 Stage-1 추론만 실행하려면:
+
+```bash
+OCR_NO_GT=1 DOC_KEY="한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보" ./scripts/run_ocr_stage.sh
+```
+
+- `OCR_NO_GT=1`일 때는 `inference/*`만 생성합니다.
+- 이 모드에서는 `ocr-export-rag`를 자동으로 건너뜁니다.
+
+`run_all_ocr_rag_pipeline.sh`에서도 동일:
+
+```bash
+OCR_NO_GT=1 RUN_RAG_STAGE=0 DOC_KEY="한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보" ./scripts/run_all_ocr_rag_pipeline.sh
+```
+
+- `OCR_NO_GT=1`이면 RAG stage는 자동 스킵됩니다.
 
 `run_rag_stage.sh` 기본 산출물:
 - `data/v2/ocr_rag/ocr_input_embedded.jsonl`

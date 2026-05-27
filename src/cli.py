@@ -1442,12 +1442,12 @@ def _has_table_label_in_vl_raw(vl_raw_path: str) -> bool:
 
 def ocr_run_all(
     image_path: str,
-    gt_path: str,
-    item_id: str,
+    gt_path: str | None,
+    item_id: str | None,
     pred_raw_output: str,
-    pred_structured_output: str,
+    pred_structured_output: str | None,
     pred_table_html_output: str,
-    eval_output: str,
+    eval_output: str | None,
     lang: str = "korean",
     score_threshold: float = 0.0,
     ocr_engine: str = "pp_ocrv5",
@@ -1463,6 +1463,7 @@ def ocr_run_all(
     structure_match_threshold: float = 0.65,
     table_dual_pass: bool = False,
     table_second_engine: str = "pp_ocrv5",
+    require_gt: bool = True,
 ) -> None:
     normalized_engine = _normalize_ocr_engine(ocr_engine)
     print("[1/4] run-ocr")
@@ -1540,14 +1541,20 @@ def ocr_run_all(
             backend_engine="transformers" if normalized_engine == "pp_ocrv5_transformers" else "paddle",
             ocr_model=ocr_model,
         )
-    print("[2/4] build-pred-structured")
-    build_pred_structured(
-        gt_path=gt_path,
-        pred_raw_path=pred_raw_output,
-        item_id=item_id,
-        output_path=pred_structured_output,
-        score_threshold=score_threshold,
-    )
+    if require_gt:
+        if not gt_path or not item_id or not pred_structured_output or not eval_output:
+            raise ValueError("GT mode requires gt_path, item_id, pred_structured_output, and eval_output.")
+        print("[2/4] build-pred-structured")
+        build_pred_structured(
+            gt_path=gt_path,
+            pred_raw_path=pred_raw_output,
+            item_id=item_id,
+            output_path=pred_structured_output,
+            score_threshold=score_threshold,
+        )
+    else:
+        print("[2/4] skip-gt-structured (inference-only)")
+
     print("[3/4] extract-table-html")
     table_outputs = _save_pred_table_html(
         pred_raw_path=pred_raw_output,
@@ -1558,16 +1565,19 @@ def ocr_run_all(
     if table_outputs.get("pred_table_rows_path"):
         print(f"pred_table_rows_path: {table_outputs.get('pred_table_rows_path')}")
 
-    print("[4/4] eval-pred-structured")
-    eval_pred_structured_vs_gt(
-        gt_path=gt_path,
-        pred_structured_path=pred_structured_output,
-        item_id=item_id,
-        output_path=eval_output,
-        structure_match_threshold=structure_match_threshold,
-        table_html_path=pred_table_html_output,
-        table_rows_path=table_outputs.get("pred_table_rows_path"),
-    )
+    if require_gt:
+        print("[4/4] eval-pred-structured")
+        eval_pred_structured_vs_gt(
+            gt_path=gt_path,
+            pred_structured_path=pred_structured_output,
+            item_id=item_id,
+            output_path=eval_output,
+            structure_match_threshold=structure_match_threshold,
+            table_html_path=pred_table_html_output,
+            table_rows_path=table_outputs.get("pred_table_rows_path"),
+        )
+    else:
+        print("[4/4] skip-gt-eval (inference-only)")
     print("ocr_run_all_done")
 
 
@@ -1790,6 +1800,7 @@ def ocr_run_image(
     ocr_model: object | None = None,
     table_dual_pass: bool = False,
     table_second_engine: str = "pp_ocrv5",
+    require_gt: bool = True,
 ) -> bool:
     (
         image_path,
@@ -1808,30 +1819,36 @@ def ocr_run_image(
         ocr_engine=ocr_engine,
     )
     image_path = _resolve_image_path(Path(images_root) / doc_key, image_name)
-    if not gt_path.exists():
+    if require_gt and not gt_path.exists():
         raise FileNotFoundError(f"GT not found: {gt_path}")
 
-    final_item_id = item_id or _infer_item_id_from_gt(gt_path, image_path.name)
-    gt_payload = _load_gt_payload(gt_path)
-    gt_records = gt_payload if isinstance(gt_payload, list) else [gt_payload]
-    gt_item = next(
-        (record for record in gt_records if isinstance(record, dict) and record.get("id") == final_item_id),
-        {},
-    )
+    if require_gt:
+        final_item_id = item_id or _infer_item_id_from_gt(gt_path, image_path.name)
+        gt_payload = _load_gt_payload(gt_path)
+        gt_records = gt_payload if isinstance(gt_payload, list) else [gt_payload]
+        gt_item = next(
+            (record for record in gt_records if isinstance(record, dict) and record.get("id") == final_item_id),
+            {},
+        )
+        use_eval = bool(gt_item.get("use_eval", True))
+    else:
+        final_item_id = item_id or f"{doc_key}_{Path(image_path.name).stem}"
+        gt_path = None
+        use_eval = False
+
     pred_raw.parent.mkdir(parents=True, exist_ok=True)
     print(f"doc_key: {doc_key}")
     print(f"image: {image_path}")
-    print(f"gt: {gt_path}")
+    print(f"gt: {gt_path if gt_path else '<disabled>'}")
     print(f"id: {final_item_id}")
-    use_eval = bool(gt_item.get("use_eval", True))
     ocr_run_all(
         image_path=str(image_path),
-        gt_path=str(gt_path),
+        gt_path=str(gt_path) if gt_path else None,
         item_id=final_item_id,
         pred_raw_output=str(pred_raw),
-        pred_structured_output=str(pred_structured),
+        pred_structured_output=str(pred_structured) if require_gt else None,
         pred_table_html_output=str(pred_table_html),
-        eval_output=str(eval_summary_json),
+        eval_output=str(eval_summary_json) if require_gt else None,
         lang=lang,
         score_threshold=score_threshold,
         structure_match_threshold=structure_match_threshold,
@@ -1847,8 +1864,9 @@ def ocr_run_image(
         ocr_model=ocr_model,
         table_dual_pass=table_dual_pass,
         table_second_engine=table_second_engine,
+        require_gt=require_gt,
     )
-    if not use_eval:
+    if require_gt and not use_eval:
         print(f"[SKIP_EVAL_SUMMARY] use_eval=false: {final_item_id}")
     return use_eval
 
@@ -1876,6 +1894,7 @@ def ocr_run_batch(
     text_det_limit_side_len: int | None = None,
     table_dual_pass: bool = False,
     table_second_engine: str = "pp_ocrv5",
+    require_gt: bool = True,
 ) -> None:
     normalized_engine = _normalize_ocr_engine(ocr_engine)
     shared_model = _build_shared_ocr_model(
@@ -1936,6 +1955,7 @@ def ocr_run_batch(
                     ocr_model=shared_model,
                     table_dual_pass=table_dual_pass,
                     table_second_engine=table_second_engine,
+                    require_gt=require_gt,
                 )
                 ok_count += 1
                 if not include_in_eval:
@@ -2204,6 +2224,8 @@ def ocr_run_batch(
         else:
             review_queue_path.write_text("", encoding="utf-8")
         print(f"saved_review_queue_jsonl: {review_queue_path}")
+    elif not require_gt:
+        print("[SUMMARY] inference-only mode: GT-based eval summaries are skipped.")
 
 
 def _pipeline_paths_for_input(
@@ -3008,6 +3030,11 @@ def main() -> None:
         choices=["pp_ocrv5", "pp_ocrv5_transformers"],
         help="Second pass OCR engine used when --table-dual-pass is enabled.",
     )
+    ocr_image_parser.add_argument(
+        "--no-gt",
+        action="store_true",
+        help="Run inference-only mode without GT build/eval.",
+    )
 
     ocr_batch_parser = subparsers.add_parser(
         "ocr-run-batch",
@@ -3071,6 +3098,11 @@ def main() -> None:
         default="pp_ocrv5",
         choices=["pp_ocrv5", "pp_ocrv5_transformers"],
         help="Second pass OCR engine used when --table-dual-pass is enabled.",
+    )
+    ocr_batch_parser.add_argument(
+        "--no-gt",
+        action="store_true",
+        help="Run inference-only mode without GT build/eval.",
     )
 
     pipeline_parser = subparsers.add_parser(
@@ -3351,6 +3383,7 @@ def main() -> None:
                     text_det_limit_side_len=args.text_det_limit_side_len,
                     table_dual_pass=args.table_dual_pass,
                     table_second_engine=args.table_second_engine,
+                    require_gt=not args.no_gt,
                 )
             except Exception as exc:
                 failed_engines.append(engine_name)
@@ -3398,6 +3431,7 @@ def main() -> None:
                     text_det_limit_side_len=args.text_det_limit_side_len,
                     table_dual_pass=args.table_dual_pass,
                     table_second_engine=args.table_second_engine,
+                    require_gt=not args.no_gt,
                 )
             except Exception as exc:
                 failed_engines.append(engine_name)
