@@ -453,7 +453,7 @@ def chunk_hwp_slim(
             stem = safe_output_stem(selected_input_files[0].stem)
             resolved_output_path = Path("data/v2/samples") / f"{stem}_slim_with_tables.jsonl"
             resolved_tables_output_path = (
-                Path(tables_output_path) if tables_output_path else Path("data/v2/samples") / f"{stem}_tables_markdown.jsonl"
+                Path(tables_output_path) if tables_output_path else Path("data/v2/samples") / f"{stem}_tables_raw.jsonl"
             )
         else:
             resolved_output_path = Path("data/v2/hwp_chunks_slim.jsonl")
@@ -2538,7 +2538,7 @@ def main() -> None:
     chunk_slim_parser.add_argument(
         "--tables-output",
         default=None,
-        help="Optional table-only JSONL path with Markdown tables; defaults to <output_stem>_tables.jsonl",
+        help="Optional table-only raw JSONL path; defaults to <output_stem>_tables_raw.jsonl",
     )
     chunk_slim_parser.add_argument("--glob", default="*.hwp", help="HWP filename glob")
     chunk_slim_parser.add_argument("--recursive", action="store_true", help="Search input directory recursively")
