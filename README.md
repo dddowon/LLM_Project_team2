@@ -580,7 +580,10 @@ OCR과 RAG는 의존성 충돌 방지를 위해 가상환경을 분리해서 실
 ```
 
 기본 동작(중요):
-- `run_ocr_stage.sh`는 기본적으로 OCR 결과를 전량 RAG handoff로 export합니다.
+- `run_ocr_stage.sh`는 기본적으로 GT 없이 추론만 수행합니다.
+  - 기본값: `OCR_NO_GT=1`
+  - 이 기본 모드에서는 `inference/*`만 생성하고 `ocr-export-rag`는 실행하지 않습니다.
+- GT 평가 + RAG handoff까지 수행하려면 `OCR_NO_GT=0`으로 실행하세요.
   - 기본값: `EXCLUDE_REVIEW_REQUIRED=0`
   - `EXCLUDE_REVIEW_REQUIRED=1`일 때만 `review_required=true` 항목을 제외합니다.
 - `USE_DOC_UNWARPING=1`이 기본값이며, `ocr-run-batch`에 `--use-doc-unwarping`을 전달합니다.
@@ -622,9 +625,18 @@ HTML 스니펫까지 RAG 청크에 포함하려면(기본 비권장):
 INCLUDE_HTML_CHUNK=1 HTML_CHUNK_MAX_CHARS=1200 ./scripts/run_ocr_stage.sh
 ```
 
-`run_ocr_stage.sh` 기본 산출물:
+`run_ocr_stage.sh` 기본 산출물 (`OCR_NO_GT=1`):
+- `data/v2/ocr_outputs/<engine>/<doc_key>/<image_stem>/inference/*`
+
+GT 모드(`OCR_NO_GT=0`) 산출물:
 - `data/v2/ocr_rag/ocr_input_manifest.jsonl`
 - `data/v2/ocr_rag/ocr_input_chunks.jsonl`
+
+GT 모드 + RAG handoff까지 포함하려면:
+
+```bash
+OCR_NO_GT=0 ./scripts/run_ocr_stage.sh
+```
 
 GT 없이 Stage-1 추론만 실행하려면:
 
