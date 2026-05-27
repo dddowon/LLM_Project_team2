@@ -50,7 +50,9 @@ def extract_images_from_hwp(hwp_path: Path, output_dir: Path) -> list[Path]:
         return []
 
     saved: list[Path] = []
-    save_dir = output_dir / hwp_path.stem
+    # Keep original filename (including extension) as doc_key folder name
+    # to match pipelines that keep .pdf/.hwp suffixes in doc_id.
+    save_dir = output_dir / hwp_path.name
     save_dir.mkdir(parents=True, exist_ok=True)
 
     with olefile.OleFileIO(str(hwp_path)) as ole:
@@ -141,7 +143,9 @@ def extract_images_from_pdf(
         )
 
     saved: list[Path] = []
-    save_dir = output_dir / pdf_path.stem
+    # Keep original filename (including extension) as doc_key folder name
+    # to match pipelines that keep .pdf suffixes in doc_id.
+    save_dir = output_dir / pdf_path.name
     save_dir.mkdir(parents=True, exist_ok=True)
     seen_hashes: set[str] = set()
     image_count = 0

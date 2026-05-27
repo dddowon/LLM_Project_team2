@@ -112,6 +112,7 @@ def resolve_doc_id(row: dict[str, Any]) -> str:
         else:
             stem = source_path.stem
             default_from_path = stem[: -len("_chunks")] if stem.endswith("_chunks") else stem
+
     return str(
         row.get("doc_id")
         or metadata.get("doc_id")
