@@ -203,6 +203,27 @@ def row_wrong_refusal(row: dict[str, Any]) -> bool | None:
     return row_is_full_refusal(row)
 
 
+def row_appropriate_refusal_success(row: dict[str, Any]) -> bool:
+    """문서 외 질문에서 적절히 거절해 task_success 합격인 경우."""
+    return (
+        not row_is_answerable(row)
+        and row.get("task_success") is True
+        and row_is_full_refusal(row)
+    )
+
+
+def summarize_task_outcomes(rows: list[dict[str, Any]]) -> dict[str, int]:
+    passed = sum(1 for row in rows if row.get("task_success") is True)
+    failed = sum(1 for row in rows if row.get("task_success") is False)
+    appropriate = sum(1 for row in rows if row_appropriate_refusal_success(row))
+    return {
+        "passed": passed,
+        "failed": failed,
+        "appropriate_refusal": appropriate,
+        "unknown": len(rows) - passed - failed,
+    }
+
+
 def fmt_wrong_refusal_flag(row: dict[str, Any]) -> str:
     value = row_wrong_refusal(row)
     if value is None:
@@ -439,9 +460,18 @@ def failure_primary_kind(row: dict[str, Any]) -> str:
 
 
 def should_include_in_failures(row: dict[str, Any]) -> bool:
+    """조치가 필요한 실패만 오답 풀에 포함 (합격·적절 거절·검색만 나쁜 합격 제외)."""
     if row_partial_limitation(row) and not (
         row.get("failure_reason") or row_wrong_refusal(row) or row.get("task_success") is False
     ):
+        return False
+    if row_appropriate_refusal_success(row):
+        return False
+    if row.get("task_success") is True:
+        if is_hallucination_candidate(row):
+            return True
+        if row_wrong_refusal(row):
+            return True
         return False
     if row.get("failure_reason") or row_wrong_refusal(row):
         return True
@@ -449,7 +479,7 @@ def should_include_in_failures(row: dict[str, Any]) -> bool:
         return True
     if row.get("task_success") is False:
         return True
-    if row_is_full_refusal(row) and row.get("task_success") is not True:
+    if row_is_full_refusal(row):
         return True
     if any(_score_below(row, key) for key in ("f_score", "r_score", "s_score", "correctness_score")):
         return True
@@ -864,6 +894,7 @@ def table_html(headers: list[str], rows: list[list[Any]]) -> str:
 def report_nav_html() -> str:
     links = (
         ("#summary", "요약"),
+        ("#outcomes", "태스크 결과"),
         ("#legend", "지표 정의"),
         ("#by-type", "유형별 통계"),
         ("#charts", "시각화"),
@@ -971,6 +1002,37 @@ def summary_cards_html(summary: dict[str, Any]) -> str:
     """
 
 
+def outcome_summary_html(
+    outcomes: dict[str, int],
+    *,
+    pool_count: int,
+    displayed_failures: int,
+    total: int,
+) -> str:
+    return f"""
+    <section id="outcomes" class="report-section">
+    <h2>✅ 태스크 결과 요약</h2>
+    <div class="cards">
+        <div class="card"><div>태스크 합격 (task_success ✓)</div>
+        <div class="metric">{outcomes["passed"]}건</div></div>
+        <div class="card"><div>태스크 불합격 (task_success ✗)</div>
+        <div class="metric">{outcomes["failed"]}건</div></div>
+        <div class="card"><div>적절 거절 · 문서 외</div>
+        <div class="metric">{outcomes["appropriate_refusal"]}건</div></div>
+        <div class="card"><div>조치 대상 오답 후보</div>
+        <div class="metric">{pool_count}건</div></div>
+    </div>
+    <p class="note">
+    <strong>태스크 합격/불합격</strong>은 최종 답변 품질 기준입니다.
+    <strong>적절 거절</strong>은 문서 외(<code>unanswerable</code>) 질문에서 올바르게 거절한 합격 사례입니다.
+    <strong>조치 대상 오답 후보</strong>는 합격·적절 거절·「검색만 나쁜데 답은 맞음」을 제외한 디버깅 풀입니다.
+    HTML 오답 노트는 후보 {pool_count}건 중 우선순위 상위 <strong>{displayed_failures}건</strong>만 표시합니다.
+    CSV(<code>eval_failures.csv</code>) 건수가 harness의 <code>task_success=✗</code>와 다를 수 있습니다.
+    </p>
+    </section>
+    """
+
+
 def stage_charts_html(
     by_type: list[dict[str, Any]],
     section_title: str,
@@ -1049,11 +1111,14 @@ def metrics_legend_body_html() -> str:
     <dd>답변 가능 질문에서 <strong>본문 없이 전면 거절</strong>한 비율입니다.
     일부만 「문서에 없음」이라고 적은 <strong>부분 범위 제한</strong> 답변은 포함하지 않습니다.<br>
     • <strong>주의</strong>: 답변 불가능 질문은 계산에서 제외(해당 없음)됩니다.<br>
+    • <strong>doc_hit=0</strong>이어도 문서 외 질문에서 적절히 거절하면 합격이며, 오답 풀에 넣지 않습니다.<br>
     • <strong>부분 범위 제한</strong>·<strong>합격 사례</strong>는 HTML 오답 노트에는 넣지 않고
     <code>eval_failures.csv</code> / <code>eval_successes.csv</code>로 확인합니다.</dd>
     </dl>
 
-    <p class="legend-footnote">💡 <strong>오답 노트 시각화 가이드:</strong>
+    <p class="legend-footnote">💡 <strong>오답 노트·CSV 구분:</strong>
+    HTML 오답 노트와 <code>eval_failures.csv</code>는 <strong>조치가 필요한 실패 후보</strong>만 모읍니다.
+    harness 전체 불합격 건수와 CSV 행 수가 다를 수 있습니다(적절 거절·검색 저하 합격 제외).
     <strong>무단 거절(전면)</strong> <span class="tag tag-refusal">노란색</span>,
     동일 행에 부분 한계가 있으면 <span class="tag tag-partial">부분 범위 제한</span> 태그,
     <strong>환각 의심</strong> <span class="tag tag-hallucination">붉은색</span>.
@@ -1068,7 +1133,9 @@ def render_html(
     failure_pool_count: int,
 ) -> str:
     summary = summarize(rows)
+    outcomes = summarize_task_outcomes(rows)
     by_type = summarize_by_question_type(rows)
+    pool_rows = [row for row in rows if should_include_in_failures(row)]
 
     def chart_max_value(field: str) -> float:
         if field in ("f_score", "r_score", "s_score", "correctness_score"):
@@ -1113,11 +1180,20 @@ def render_html(
 <div class="report-wrap">
 <h1>📊 RAG 시스템 성능 평가 리포트</h1>
 <p class="report-meta">
-  전체 <strong>{summary["n"]}</strong>문항 · 오답 노트 <strong>{len(failures)}</strong>건
-  (후보 {failure_pool_count}건) · 상단 목차로 이동
+  전체 <strong>{summary["n"]}</strong>문항 ·
+  합격 <strong>{outcomes["passed"]}</strong> /
+  불합격 <strong>{outcomes["failed"]}</strong> ·
+  적절 거절 <strong>{outcomes["appropriate_refusal"]}</strong> ·
+  오답 노트 <strong>{len(failures)}</strong>건 (후보 {failure_pool_count}건)
 </p>
 {report_nav_html()}
 {summary_cards_html(summary)}
+{outcome_summary_html(
+    outcomes,
+    pool_count=failure_pool_count,
+    displayed_failures=len(failures),
+    total=summary["n"],
+)}
 {metrics_legend_fold_html()}
 <section id="by-type" class="report-section">
 <h2>📋 질문 성격별 세부 지표 통계</h2>
@@ -1132,10 +1208,12 @@ def render_html(
 </section>
 <section id="failures" class="report-section">
 <h2>📝 디버깅 오답 노트 (Error Analysis)</h2>
-<p class="note">전면 거절·오답·환각 등 실패 케이스입니다. 합격·부분 범위 제한만 있는 항목은
-<code>eval_successes.csv</code> / <code>eval_failures.csv</code>를 참고하세요. 표는 가로 스크롤이 가능합니다.</p>
-<h3>실패 유형 분포</h3>
-{failure_reason_table_html(failure_reason_counts(rows))}
+<p class="note">무단 거절·오답·환각·거절 누락 등 <strong>조치가 필요한</strong> 실패만 표시합니다.
+문서 외 적절 거절·태스크 합격(검색만 저조)은 제외됩니다.
+합격·부분 범위 제한은 <code>eval_successes.csv</code> /
+<code>eval_failures.csv</code>를 참고하세요. 표는 가로 스크롤이 가능합니다.</p>
+<h3>실패 유형 분포 (조치 대상 후보 {failure_pool_count}건)</h3>
+{failure_reason_table_html(failure_reason_counts(pool_rows))}
 {failure_table_html(failures)}
 </section>
 </div>
@@ -1157,6 +1235,7 @@ def build_report(
         return
 
     pool_count = count_failure_candidates(rows)
+    outcomes = summarize_task_outcomes(rows)
     failures = failure_rows(rows, top_n)
     html_output.parent.mkdir(parents=True, exist_ok=True)
     html_output.write_text(
@@ -1171,6 +1250,10 @@ def build_report(
     write_successes_csv(successes_path, successes)
 
     print(f"리포트 생성 완료: {html_output}")
+    print(
+        f"태스크 결과: 합격 {outcomes['passed']} · 불합격 {outcomes['failed']} · "
+        f"적절 거절 {outcomes['appropriate_refusal']}"
+    )
     print(
         f"오답 CSV: {failures_output} "
         f"(HTML {len(failures)}건 + 부분범위 CSV전용 {len(partial_only)}건 / 후보 {pool_count}건)"

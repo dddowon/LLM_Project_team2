@@ -138,18 +138,19 @@ def classify_failure_reason(
     correctness_pass: bool | None,
     has_doc_id: bool,
 ) -> str | None:
+    answerable = is_answerable_question_type(question_type)
+    if not answerable:
+        if is_refusal:
+            return None
+        return "should_refuse"
     if has_doc_id and doc_hit == 0.0:
         return "wrong_doc"
-    if is_answerable_question_type(question_type) and is_refusal:
+    if is_refusal:
         return "wrong_refusal"
-    if is_answerable_question_type(question_type) and not is_refusal and correctness_pass is False:
+    if not is_refusal and correctness_pass is False:
         return "wrong_answer"
-    if is_answerable_question_type(question_type) and keyword_hit == 0.0:
+    if keyword_hit == 0.0:
         return "low_retrieval"
-    if not is_answerable_question_type(question_type) and is_refusal:
-        return None
-    if not is_answerable_question_type(question_type) and not is_refusal:
-        return "should_refuse"
     return None
 
 

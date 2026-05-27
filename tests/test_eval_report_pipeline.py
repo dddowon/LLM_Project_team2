@@ -8,15 +8,19 @@ from pathlib import Path
 
 from src.evaluation.answer import (
     classify_answer_refusal,
+    classify_failure_reason,
     evaluate_answer_metrics,
     is_full_refusal_answer,
 )
 from src.evaluation.build_eval_report import (
     build_report,
     count_failure_candidates,
+    enrich_eval_rows,
     failure_rows,
     failure_tags,
     render_html,
+    row_appropriate_refusal_success,
+    should_include_in_failures,
     success_rows_for_csv,
 )
 from src.evaluation.harness_metrics import evaluate_row_metrics
@@ -165,6 +169,43 @@ def test_wrong_refusal_detected_without_field() -> None:
     assert out["failure_reason"] == "wrong_refusal"
 
 
+def test_unanswerable_doc_hit_zero_not_wrong_doc() -> None:
+    reason = classify_failure_reason(
+        question_type="unanswerable",
+        doc_hit=0.0,
+        keyword_hit=0.0,
+        is_refusal=True,
+        correctness_pass=None,
+        has_doc_id=True,
+    )
+    assert reason is None
+
+
+def test_appropriate_refusal_excluded_from_failure_pool() -> None:
+    row = {
+        "question": "다른 사업 예산은?",
+        "doc_id": "doc_budget",
+        "question_type": "unanswerable",
+        "answer": "제공된 문서에서 확인되지 않습니다.",
+        "doc_hit": 0.0,
+        "retrieval_keyword_hit": 0.0,
+        "task_success": True,
+    }
+    enriched = enrich_eval_rows([row])[0]
+    assert enriched["failure_reason"] is None
+    assert row_appropriate_refusal_success(enriched)
+    assert not should_include_in_failures(enriched)
+
+
+def test_task_success_with_low_retrieval_only_excluded_from_pool() -> None:
+    rows = _load_fixture_rows()
+    enriched = enrich_eval_rows(rows)
+    low_retrieval_pass = next(
+        r for r in enriched if r.get("failure_reason") == "low_retrieval" and r.get("task_success")
+    )
+    assert not should_include_in_failures(low_retrieval_pass)
+
+
 def test_build_report_from_fixture() -> None:
     rows = _load_fixture_rows()
     assert len(rows) == 9
@@ -185,18 +226,21 @@ def test_build_report_from_fixture() -> None:
         assert html_out.exists() and csv_out.exists() and successes_out.exists()
 
         summary_pos = html.index('id="summary"')
+        outcomes_pos = html.index('id="outcomes"')
         legend_pos = html.index('id="legend"')
         by_type_pos = html.index('id="by-type"')
         failures_pos = html.index('id="failures"')
-        assert summary_pos < legend_pos < by_type_pos < failures_pos
+        assert summary_pos < outcomes_pos < legend_pos < by_type_pos < failures_pos
 
         assert "무단 거절 오류율 (wrong_refusal)" in html
+        assert "조치 대상 오답 후보" in html
         assert "group-retrieval" in html
         assert ">None<" not in html
 
-        failures = failure_rows(rows, top_n=50)
-        assert len(failures) == count_failure_candidates(rows)
-        assert len(failures) >= 5
+        enriched = enrich_eval_rows(rows)
+        failures = failure_rows(enriched, top_n=50)
+        assert len(failures) == count_failure_candidates(enriched)
+        assert len(failures) == 4
 
         with csv_out.open(encoding="utf-8-sig", newline="") as f:
             reader = csv.DictReader(f)
@@ -207,7 +251,7 @@ def test_build_report_from_fixture() -> None:
         assert "부분 범위 제한 (partial_limitation)" in fieldnames
         assert "결과 분류" in fieldnames
 
-        expected_successes = success_rows_for_csv(rows, failures)
+        expected_successes = success_rows_for_csv(enriched, failures)
         with successes_out.open(encoding="utf-8-sig", newline="") as f:
             success_reader = csv.DictReader(f)
             success_rows = list(success_reader)
@@ -227,7 +271,9 @@ def test_failure_tags_cover_fixture_reasons() -> None:
 
 
 def test_render_html_failure_pool_count() -> None:
-    rows = _load_fixture_rows()
+    rows = enrich_eval_rows(_load_fixture_rows())
     failures = failure_rows(rows, 50)
     html = render_html(rows, failures, failure_pool_count=count_failure_candidates(rows))
     assert "전체 <strong>9</strong>문항" in html
+    assert "합격 <strong>5</strong>" in html
+    assert "불합격 <strong>4</strong>" in html
