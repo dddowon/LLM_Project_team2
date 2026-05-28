@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from openai import BadRequestError, OpenAI
 
+from src.utils.embedding_text import truncate_text_for_embedding
+
 
 class OpenAIModelClient:
     def __init__(self) -> None:
@@ -10,8 +12,21 @@ class OpenAIModelClient:
     def embed_texts(self, texts: list[str], model: str, batch_size: int = 64) -> list[list[float]]:
         embeddings: list[list[float]] = []
         for start in range(0, len(texts), batch_size):
-            batch = [text.replace("\n", " ") for text in texts[start : start + batch_size]]
-            response = self.client.embeddings.create(model=model, input=batch)
+            batch_raw = texts[start : start + batch_size]
+            batch = []
+            for text in batch_raw:
+                prepared, _ = truncate_text_for_embedding(text, model=model)
+                batch.append(prepared)
+            try:
+                response = self.client.embeddings.create(model=model, input=batch)
+            except BadRequestError as exc:
+                if "maximum input length" not in str(exc).lower():
+                    raise
+                for text in batch_raw:
+                    prepared, _ = truncate_text_for_embedding(text, model=model)
+                    response = self.client.embeddings.create(model=model, input=[prepared])
+                    embeddings.extend(item.embedding for item in response.data)
+                continue
             embeddings.extend(item.embedding for item in response.data)
         return embeddings
 
