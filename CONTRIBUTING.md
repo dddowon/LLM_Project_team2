@@ -5,7 +5,7 @@
 - feature/<scope>-<desc>: 기능 개발 브랜치
 ## 커밋 규칙
 - .gitmessage.txt 템플릿 사용
-- 타입 + 제목 : 내용
+- 타입: 내용
 ## PR 규칙
 - feature -> dev 로 PR
 - 승인(1명) + CI 통과 후 merge
