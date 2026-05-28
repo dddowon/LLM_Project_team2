@@ -5,6 +5,7 @@ import csv
 import json
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 DEFAULT_OCR_ENGINE_MATRIX = (
@@ -1779,6 +1780,35 @@ def _list_image_paths(doc_dir: Path) -> list[Path]:
     return image_files
 
 
+def _prepare_resized_image_if_needed(image_path: Path, max_long_side: int | None) -> tuple[Path, Path | None]:
+    # [Design Intent]
+    # OOM 완화를 위해 긴 변 기준으로만 비율 유지 축소한다.
+    # 원본은 유지하고 필요 시 임시 파일로만 추론한다.
+    if not max_long_side or max_long_side <= 0:
+        return image_path, None
+
+    import cv2
+
+    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    if image is None:
+        raise RuntimeError(f"Failed to load image for resize check: {image_path}")
+
+    height, width = image.shape[:2]
+    long_side = max(width, height)
+    if long_side <= max_long_side:
+        return image_path, None
+
+    scale = float(max_long_side) / float(long_side)
+    resized = cv2.resize(image, dsize=None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    suffix = image_path.suffix if image_path.suffix else ".jpg"
+    with tempfile.NamedTemporaryFile(prefix="ocr_resized_", suffix=suffix, delete=False) as tmp:
+        temp_path = Path(tmp.name)
+    if not cv2.imwrite(str(temp_path), resized):
+        raise RuntimeError(f"Failed to write resized temp image: {temp_path}")
+    print(f"resize_applied: {width}x{height} -> {resized.shape[1]}x{resized.shape[0]} (max_long_side={max_long_side})")
+    return temp_path, temp_path
+
+
 def ocr_run_image(
     *,
     doc_key: str,
@@ -1803,6 +1833,7 @@ def ocr_run_image(
     table_dual_pass: bool = False,
     table_second_engine: str = "pp_ocrv5",
     require_gt: bool = True,
+    max_long_side: int | None = 2000,
 ) -> bool:
     (
         image_path,
@@ -1839,35 +1870,41 @@ def ocr_run_image(
         use_eval = False
 
     pred_raw.parent.mkdir(parents=True, exist_ok=True)
-    print(f"doc_key: {doc_key}")
-    print(f"image: {image_path}")
-    print(f"gt: {gt_path if gt_path else '<disabled>'}")
-    print(f"id: {final_item_id}")
-    ocr_run_all(
-        image_path=str(image_path),
-        gt_path=str(gt_path) if gt_path else None,
-        item_id=final_item_id,
-        pred_raw_output=str(pred_raw),
-        pred_structured_output=str(pred_structured) if require_gt else None,
-        pred_table_html_output=str(pred_table_html),
-        eval_output=str(eval_summary_json) if require_gt else None,
-        lang=lang,
-        score_threshold=score_threshold,
-        structure_match_threshold=structure_match_threshold,
-        ocr_engine=ocr_engine,
-        ocr_device=ocr_device,
-        ocr_batch_size=ocr_batch_size,
-        use_doc_orientation_classify=use_doc_orientation_classify,
-        use_doc_unwarping=use_doc_unwarping,
-        use_chart_recognition=use_chart_recognition,
-        use_table_orientation_classify=use_table_orientation_classify,
-        use_ocr_results_with_table_cells=use_ocr_results_with_table_cells,
-        text_det_limit_side_len=text_det_limit_side_len,
-        ocr_model=ocr_model,
-        table_dual_pass=table_dual_pass,
-        table_second_engine=table_second_engine,
-        require_gt=require_gt,
-    )
+    prepared_image_path, temp_image_path = _prepare_resized_image_if_needed(image_path, max_long_side=max_long_side)
+    try:
+        print(f"doc_key: {doc_key}")
+        print(f"image: {image_path}")
+        print(f"image_input: {prepared_image_path}")
+        print(f"gt: {gt_path if gt_path else '<disabled>'}")
+        print(f"id: {final_item_id}")
+        ocr_run_all(
+            image_path=str(prepared_image_path),
+            gt_path=str(gt_path) if gt_path else None,
+            item_id=final_item_id,
+            pred_raw_output=str(pred_raw),
+            pred_structured_output=str(pred_structured) if require_gt else None,
+            pred_table_html_output=str(pred_table_html),
+            eval_output=str(eval_summary_json) if require_gt else None,
+            lang=lang,
+            score_threshold=score_threshold,
+            structure_match_threshold=structure_match_threshold,
+            ocr_engine=ocr_engine,
+            ocr_device=ocr_device,
+            ocr_batch_size=ocr_batch_size,
+            use_doc_orientation_classify=use_doc_orientation_classify,
+            use_doc_unwarping=use_doc_unwarping,
+            use_chart_recognition=use_chart_recognition,
+            use_table_orientation_classify=use_table_orientation_classify,
+            use_ocr_results_with_table_cells=use_ocr_results_with_table_cells,
+            text_det_limit_side_len=text_det_limit_side_len,
+            ocr_model=ocr_model,
+            table_dual_pass=table_dual_pass,
+            table_second_engine=table_second_engine,
+            require_gt=require_gt,
+        )
+    finally:
+        if temp_image_path and temp_image_path.exists():
+            temp_image_path.unlink(missing_ok=True)
     if require_gt and not use_eval:
         print(f"[SKIP_EVAL_SUMMARY] use_eval=false: {final_item_id}")
     return use_eval
@@ -1897,6 +1934,7 @@ def ocr_run_batch(
     table_dual_pass: bool = False,
     table_second_engine: str = "pp_ocrv5",
     require_gt: bool = True,
+    max_long_side: int | None = 2000,
 ) -> None:
     normalized_engine = _normalize_ocr_engine(ocr_engine)
     shared_model = _build_shared_ocr_model(
@@ -1958,6 +1996,7 @@ def ocr_run_batch(
                     table_dual_pass=table_dual_pass,
                     table_second_engine=table_second_engine,
                     require_gt=require_gt,
+                    max_long_side=max_long_side,
                 )
                 ok_count += 1
                 if not include_in_eval:
