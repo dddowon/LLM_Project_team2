@@ -57,7 +57,7 @@ def embed_prechunked_jsonl(
     if truncated_count:
         print(
             f"embedding_truncated: {truncated_count}/{len(rows)} chunks "
-            f"(OpenAI limit 8192 tokens per input)"
+            f"(OpenAI limit {8192} tokens per input; truncated for embedding only)"
         )
 
     output_rows = []

@@ -2,12 +2,26 @@ from __future__ import annotations
 
 from openai import BadRequestError, OpenAI
 
-from src.utils.embedding_text import truncate_text_for_embedding
+from src.utils.embedding_text import truncate_text_for_embedding, truncate_text_for_embedding_retry
 
 
 class OpenAIModelClient:
     def __init__(self) -> None:
         self.client = OpenAI()
+
+    def _embed_one(self, text: str, model: str) -> list[float]:
+        last_error: BadRequestError | None = None
+        for prepared in truncate_text_for_embedding_retry(text, model=model):
+            try:
+                response = self.client.embeddings.create(model=model, input=[prepared])
+                return list(response.data[0].embedding)
+            except BadRequestError as exc:
+                if "maximum input length" not in str(exc).lower():
+                    raise
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Failed to prepare embedding input within token limits")
 
     def embed_texts(self, texts: list[str], model: str, batch_size: int = 64) -> list[list[float]]:
         embeddings: list[list[float]] = []
@@ -19,15 +33,12 @@ class OpenAIModelClient:
                 batch.append(prepared)
             try:
                 response = self.client.embeddings.create(model=model, input=batch)
+                embeddings.extend(item.embedding for item in response.data)
             except BadRequestError as exc:
                 if "maximum input length" not in str(exc).lower():
                     raise
                 for text in batch_raw:
-                    prepared, _ = truncate_text_for_embedding(text, model=model)
-                    response = self.client.embeddings.create(model=model, input=[prepared])
-                    embeddings.extend(item.embedding for item in response.data)
-                continue
-            embeddings.extend(item.embedding for item in response.data)
+                    embeddings.append(self._embed_one(text, model))
         return embeddings
 
     def generate(
