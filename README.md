@@ -430,6 +430,10 @@ export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH}
 - `<engine>`: `pp_ocrv5`, `pp_ocrv5_transformers`, `pp_structurev3`, `table_recognition_v2`, `paddleocr_vl`
 - `--doc-key`는 파일명이 아니라 `ocr_images` 하위 폴더명입니다.
 
+GT 의존성:
+- 기본 모드에서는 GT가 있어야 `eval/*`까지 생성됩니다.
+- `--no-gt`(또는 `OCR_NO_GT=1`)를 쓰면 GT 없이 `inference/*`만 생성하는 추론 전용 모드로 동작합니다.
+
 Threshold 의미:
 - `--score-threshold`:
   - OCR 예측 생성 단계의 confidence 하한값입니다.
@@ -440,6 +444,29 @@ Threshold 의미:
   - 이 값은 `eval/gt_eval_summary.json`의 구조 지표(`structure_micro_recall`, `structure_macro_f1`)에 영향을 줍니다.
   - 즉, **점수 계산 기준을 조정**하는 파라미터입니다.
 - 둘은 역할이 다르므로 같은 값으로 고정할 필요는 없습니다.
+
+### OCR 입력 이미지 추출 (`extract-ocr-images`)
+
+HWP/PDF를 한 번에 처리해서 `data/v2/ocr_images/<doc_key>/img_XXX.<ext>` 구조로 저장합니다.
+
+```bash
+python -m src.cli extract-ocr-images \
+  --input-dir "data/raw" \
+  --output-dir "data/v2/ocr_images" \
+  --source-type all
+```
+
+PDF에서 불필요한 작은 이미지를 줄이려면 필터 임계값을 조정합니다.
+
+```bash
+python -m src.cli extract-ocr-images \
+  --input-dir "data/raw" \
+  --source-type pdf \
+  --pdf-min-width 100 \
+  --pdf-min-height 40 \
+  --pdf-min-area 10000 \
+  --pdf-min-bytes 1000
+```
 
 ### 이미지 1개 실행 (`ocr-run-image`)
 
@@ -472,6 +499,16 @@ python -m src.cli ocr-run-image \
 
 GT JSON에 `id`가 여러 개면 `--id`를 함께 지정하세요.
 
+### GT 없이 추론만 실행 (`--no-gt`)
+
+```bash
+python -m src.cli ocr-run-image \
+  --doc-key "한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보" \
+  --image-name "img_001.jpg" \
+  --ocr-config "configs/ocr_default.yaml" \
+  --no-gt
+```
+
 ### 문서 폴더 1개 실행 (`ocr-run-batch --doc-key`)
 
 ```bash
@@ -480,6 +517,15 @@ python -m src.cli ocr-run-batch \
   --ocr-config "configs/ocr_default.yaml" \
   --score-threshold 0.0 \
   --structure-threshold 0.65
+```
+
+GT 없이 문서 폴더 1개 추론만:
+
+```bash
+python -m src.cli ocr-run-batch \
+  --doc-key "한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보" \
+  --ocr-config "configs/ocr_default.yaml" \
+  --no-gt
 ```
 
 ### 전체 문서 배치 실행 (`ocr-run-batch`)
@@ -534,10 +580,13 @@ OCR과 RAG는 의존성 충돌 방지를 위해 가상환경을 분리해서 실
 ```
 
 기본 동작(중요):
-- `run_ocr_stage.sh`는 기본적으로 OCR 결과를 전량 RAG handoff로 export합니다.
+- `run_ocr_stage.sh` 기본값은 GT 없이 추론 전용 모드입니다.
+  - 기본값: `OCR_USE_GT=0`
+- GT 없이 추론 전용으로 실행하려면 `OCR_USE_GT=0`으로 실행하세요.
+  - 이 모드에서도 `ocr-export-rag`는 `--allow-inference-only`로 실행되어 handoff 청크를 생성합니다.
   - 기본값: `EXCLUDE_REVIEW_REQUIRED=0`
   - `EXCLUDE_REVIEW_REQUIRED=1`일 때만 `review_required=true` 항목을 제외합니다.
-- `USE_DOC_UNWARPING=1`이 기본값이며, `ocr-run-batch`에 `--use-doc-unwarping`을 전달합니다.
+- `USE_DOC_UNWARPING=0`이 기본값입니다.
 - `INCLUDE_HTML_CHUNK=0`이 기본값입니다. 즉 HTML 스니펫은 RAG 청크에 기본 포함되지 않습니다.
 
 
@@ -576,9 +625,58 @@ HTML 스니펫까지 RAG 청크에 포함하려면(기본 비권장):
 INCLUDE_HTML_CHUNK=1 HTML_CHUNK_MAX_CHARS=1200 ./scripts/run_ocr_stage.sh
 ```
 
-`run_ocr_stage.sh` 기본 산출물:
+`run_ocr_stage.sh` 산출물 (`OCR_USE_GT=0`, 추론 전용):
+- `data/v2/ocr_outputs/<engine>/<doc_key>/<image_stem>/inference/*`
 - `data/v2/ocr_rag/ocr_input_manifest.jsonl`
 - `data/v2/ocr_rag/ocr_input_chunks.jsonl`
+
+GT 모드(`OCR_USE_GT=1`) 산출물:
+- `data/v2/ocr_rag/ocr_input_manifest.jsonl`
+- `data/v2/ocr_rag/ocr_input_chunks.jsonl`
+
+GT 모드 + RAG handoff까지 포함하려면:
+
+```bash
+OCR_USE_GT=1 ./scripts/run_ocr_stage.sh
+```
+
+GT 없이 Stage-1 추론만 실행하려면:
+
+```bash
+OCR_USE_GT=0 DOC_KEY="한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보" ./scripts/run_ocr_stage.sh
+```
+
+- `OCR_USE_GT=0`일 때는 GT 기반 `eval/*` 없이 추론/청크 생성을 수행합니다.
+
+`run_all_ocr_rag_pipeline.sh`에서도 동일:
+
+```bash
+OCR_USE_GT=0 RUN_RAG_STAGE=1 DOC_KEY="한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보" ./scripts/run_all_ocr_rag_pipeline.sh
+```
+
+- `OCR_USE_GT=0`이어도 `RUN_RAG_STAGE=1`이고 chunks가 있으면 RAG stage를 실행합니다.
+
+#### 경희대학교 문서 1건 테스트 예시
+
+```bash
+# GT 없이 OCR만 실행
+DOC_KEY="경희대학교_[입찰공고] 산학협력단 정보시스템 운영 용역업체 선정" \
+OCR_USE_GT=0 \
+./scripts/run_ocr_stage.sh
+
+# RAG만 실행 (run_rag_stage.sh는 DOC_KEY를 직접 사용하지 않음)
+./scripts/run_rag_stage.sh
+
+# OCR + RAG 전체 실행 (GT 없이)
+DOC_KEY="경희대학교_[입찰공고] 산학협력단 정보시스템 운영 용역업체 선정" \
+OCR_USE_GT=0 \
+./scripts/run_all_ocr_rag_pipeline.sh
+
+# GT 기반 OCR + RAG 전체 실행
+DOC_KEY="경희대학교_[입찰공고] 산학협력단 정보시스템 운영 용역업체 선정" \
+OCR_USE_GT=1 \
+./scripts/run_all_ocr_rag_pipeline.sh
+```
 
 `run_rag_stage.sh` 기본 산출물:
 - `data/v2/ocr_rag/ocr_input_embedded.jsonl`

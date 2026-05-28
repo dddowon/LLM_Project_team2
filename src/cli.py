@@ -5,6 +5,7 @@ import csv
 import json
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 DEFAULT_OCR_ENGINE_MATRIX = (
@@ -640,6 +641,7 @@ def export_ocr_rag_handoff(
     include_review_required: bool,
     include_html_chunk: bool,
     html_chunk_max_chars: int,
+    allow_inference_only: bool,
 ) -> None:
     from src.pipeline.ocr_rag_bridge import export_ocr_eval_to_rag_inputs
 
@@ -652,20 +654,46 @@ def export_ocr_rag_handoff(
         include_review_required=include_review_required,
         include_html_chunk=include_html_chunk,
         html_chunk_max_chars=html_chunk_max_chars,
+        allow_inference_only=allow_inference_only,
     )
-    print("ocr_export_rag_done")
-    print(f"manifest_rows: {manifest_count}")
-    print(f"chunk_rows: {chunk_count}")
-    print(f"manifest_output: {output_manifest}")
-    print(f"chunks_output: {output_chunks}")
+    print("\n=== OCR Export Summary ===")
+    print("1. status: ocr_export_rag_done")
+    print(f"2. manifest_rows: {manifest_count}")
+    print(f"3. chunk_rows: {chunk_count}")
+    print(f"4. manifest_output: {output_manifest}")
+    print(f"5. chunks_output: {output_chunks}")
 
 
-def extract_ocr_images(input_dir: str, output_dir: str, limit: int = 0) -> None:
+def extract_ocr_images(
+    input_dir: str,
+    output_dir: str,
+    *,
+    limit: int = 0,
+    source_type: str = "all",
+    recursive: bool = False,
+    pdf_min_width: int = 100,
+    pdf_min_height: int = 40,
+    pdf_min_area: int = 10_000,
+    pdf_min_bytes: int = 1_000,
+) -> None:
     from pathlib import Path
 
-    from src.Parsing.ocr.inference.extract_hwp_images import extract_images_in_dir
+    from src.Parsing.ocr.inference.extract_hwp_pdf_images import extract_images_in_dir
 
-    saved = extract_images_in_dir(Path(input_dir), Path(output_dir), limit=limit)
+    include_hwp = source_type in {"all", "hwp"}
+    include_pdf = source_type in {"all", "pdf"}
+    saved = extract_images_in_dir(
+        Path(input_dir),
+        Path(output_dir),
+        limit=limit,
+        include_hwp=include_hwp,
+        include_pdf=include_pdf,
+        recursive=recursive,
+        pdf_min_width=pdf_min_width,
+        pdf_min_height=pdf_min_height,
+        pdf_min_area=pdf_min_area,
+        pdf_min_bytes=pdf_min_bytes,
+    )
     print(f"saved_images: {len(saved)}")
     print(f"output_dir: {output_dir}")
 
@@ -822,7 +850,7 @@ def _write_ocr_payload(output_path: str, payload: dict) -> None:
     safe_payload = _make_json_safe(payload)
     output.write_text(json.dumps(safe_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"ocr_lines: {len(payload.get('ocr_lines', []))}")
-    print(f"latency_ms: {payload.get('latency_ms')}")
+    print(f"per_image_latency_ms: {payload.get('latency_ms')}")
     print(f"output: {output}")
 
 
@@ -1418,12 +1446,12 @@ def _has_table_label_in_vl_raw(vl_raw_path: str) -> bool:
 
 def ocr_run_all(
     image_path: str,
-    gt_path: str,
-    item_id: str,
+    gt_path: str | None,
+    item_id: str | None,
     pred_raw_output: str,
-    pred_structured_output: str,
+    pred_structured_output: str | None,
     pred_table_html_output: str,
-    eval_output: str,
+    eval_output: str | None,
     lang: str = "korean",
     score_threshold: float = 0.0,
     ocr_engine: str = "pp_ocrv5",
@@ -1439,6 +1467,7 @@ def ocr_run_all(
     structure_match_threshold: float = 0.65,
     table_dual_pass: bool = False,
     table_second_engine: str = "pp_ocrv5",
+    require_gt: bool = True,
 ) -> None:
     normalized_engine = _normalize_ocr_engine(ocr_engine)
     print("[1/4] run-ocr")
@@ -1516,14 +1545,20 @@ def ocr_run_all(
             backend_engine="transformers" if normalized_engine == "pp_ocrv5_transformers" else "paddle",
             ocr_model=ocr_model,
         )
-    print("[2/4] build-pred-structured")
-    build_pred_structured(
-        gt_path=gt_path,
-        pred_raw_path=pred_raw_output,
-        item_id=item_id,
-        output_path=pred_structured_output,
-        score_threshold=score_threshold,
-    )
+    if require_gt:
+        if not gt_path or not item_id or not pred_structured_output or not eval_output:
+            raise ValueError("GT mode requires gt_path, item_id, pred_structured_output, and eval_output.")
+        print("[2/4] build-pred-structured")
+        build_pred_structured(
+            gt_path=gt_path,
+            pred_raw_path=pred_raw_output,
+            item_id=item_id,
+            output_path=pred_structured_output,
+            score_threshold=score_threshold,
+        )
+    else:
+        print("[2/4] skip-gt-structured (inference-only)")
+
     print("[3/4] extract-table-html")
     table_outputs = _save_pred_table_html(
         pred_raw_path=pred_raw_output,
@@ -1534,16 +1569,19 @@ def ocr_run_all(
     if table_outputs.get("pred_table_rows_path"):
         print(f"pred_table_rows_path: {table_outputs.get('pred_table_rows_path')}")
 
-    print("[4/4] eval-pred-structured")
-    eval_pred_structured_vs_gt(
-        gt_path=gt_path,
-        pred_structured_path=pred_structured_output,
-        item_id=item_id,
-        output_path=eval_output,
-        structure_match_threshold=structure_match_threshold,
-        table_html_path=pred_table_html_output,
-        table_rows_path=table_outputs.get("pred_table_rows_path"),
-    )
+    if require_gt:
+        print("[4/4] eval-pred-structured")
+        eval_pred_structured_vs_gt(
+            gt_path=gt_path,
+            pred_structured_path=pred_structured_output,
+            item_id=item_id,
+            output_path=eval_output,
+            structure_match_threshold=structure_match_threshold,
+            table_html_path=pred_table_html_output,
+            table_rows_path=table_outputs.get("pred_table_rows_path"),
+        )
+    else:
+        print("[4/4] skip-gt-eval (inference-only)")
     print("ocr_run_all_done")
 
 
@@ -1743,6 +1781,35 @@ def _list_image_paths(doc_dir: Path) -> list[Path]:
     return image_files
 
 
+def _prepare_resized_image_if_needed(image_path: Path, max_long_side: int | None) -> tuple[Path, Path | None]:
+    # [Design Intent]
+    # OOM 완화를 위해 긴 변 기준으로만 비율 유지 축소한다.
+    # 원본은 유지하고 필요 시 임시 파일로만 추론한다.
+    if not max_long_side or max_long_side <= 0:
+        return image_path, None
+
+    import cv2
+
+    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    if image is None:
+        raise RuntimeError(f"Failed to load image for resize check: {image_path}")
+
+    height, width = image.shape[:2]
+    long_side = max(width, height)
+    if long_side <= max_long_side:
+        return image_path, None
+
+    scale = float(max_long_side) / float(long_side)
+    resized = cv2.resize(image, dsize=None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    suffix = image_path.suffix if image_path.suffix else ".jpg"
+    with tempfile.NamedTemporaryFile(prefix="ocr_resized_", suffix=suffix, delete=False) as tmp:
+        temp_path = Path(tmp.name)
+    if not cv2.imwrite(str(temp_path), resized):
+        raise RuntimeError(f"Failed to write resized temp image: {temp_path}")
+    print(f"resize_applied: {width}x{height} -> {resized.shape[1]}x{resized.shape[0]} (max_long_side={max_long_side})")
+    return temp_path, temp_path
+
+
 def ocr_run_image(
     *,
     doc_key: str,
@@ -1766,6 +1833,8 @@ def ocr_run_image(
     ocr_model: object | None = None,
     table_dual_pass: bool = False,
     table_second_engine: str = "pp_ocrv5",
+    require_gt: bool = True,
+    max_long_side: int | None = 2000,
 ) -> bool:
     (
         image_path,
@@ -1784,47 +1853,60 @@ def ocr_run_image(
         ocr_engine=ocr_engine,
     )
     image_path = _resolve_image_path(Path(images_root) / doc_key, image_name)
-    if not gt_path.exists():
+    if require_gt and not gt_path.exists():
         raise FileNotFoundError(f"GT not found: {gt_path}")
 
-    final_item_id = item_id or _infer_item_id_from_gt(gt_path, image_path.name)
-    gt_payload = _load_gt_payload(gt_path)
-    gt_records = gt_payload if isinstance(gt_payload, list) else [gt_payload]
-    gt_item = next(
-        (record for record in gt_records if isinstance(record, dict) and record.get("id") == final_item_id),
-        {},
-    )
+    if require_gt:
+        final_item_id = item_id or _infer_item_id_from_gt(gt_path, image_path.name)
+        gt_payload = _load_gt_payload(gt_path)
+        gt_records = gt_payload if isinstance(gt_payload, list) else [gt_payload]
+        gt_item = next(
+            (record for record in gt_records if isinstance(record, dict) and record.get("id") == final_item_id),
+            {},
+        )
+        use_eval = bool(gt_item.get("use_eval", True))
+    else:
+        final_item_id = item_id or f"{doc_key}_{Path(image_path.name).stem}"
+        gt_path = None
+        use_eval = False
+
     pred_raw.parent.mkdir(parents=True, exist_ok=True)
-    print(f"doc_key: {doc_key}")
-    print(f"image: {image_path}")
-    print(f"gt: {gt_path}")
-    print(f"id: {final_item_id}")
-    use_eval = bool(gt_item.get("use_eval", True))
-    ocr_run_all(
-        image_path=str(image_path),
-        gt_path=str(gt_path),
-        item_id=final_item_id,
-        pred_raw_output=str(pred_raw),
-        pred_structured_output=str(pred_structured),
-        pred_table_html_output=str(pred_table_html),
-        eval_output=str(eval_summary_json),
-        lang=lang,
-        score_threshold=score_threshold,
-        structure_match_threshold=structure_match_threshold,
-        ocr_engine=ocr_engine,
-        ocr_device=ocr_device,
-        ocr_batch_size=ocr_batch_size,
-        use_doc_orientation_classify=use_doc_orientation_classify,
-        use_doc_unwarping=use_doc_unwarping,
-        use_chart_recognition=use_chart_recognition,
-        use_table_orientation_classify=use_table_orientation_classify,
-        use_ocr_results_with_table_cells=use_ocr_results_with_table_cells,
-        text_det_limit_side_len=text_det_limit_side_len,
-        ocr_model=ocr_model,
-        table_dual_pass=table_dual_pass,
-        table_second_engine=table_second_engine,
-    )
-    if not use_eval:
+    prepared_image_path, temp_image_path = _prepare_resized_image_if_needed(image_path, max_long_side=max_long_side)
+    try:
+        print(f"doc_key: {doc_key}")
+        print(f"image: {image_path}")
+        print(f"image_input: {prepared_image_path}")
+        print(f"gt: {gt_path if gt_path else '<disabled>'}")
+        print(f"id: {final_item_id}")
+        ocr_run_all(
+            image_path=str(prepared_image_path),
+            gt_path=str(gt_path) if gt_path else None,
+            item_id=final_item_id,
+            pred_raw_output=str(pred_raw),
+            pred_structured_output=str(pred_structured) if require_gt else None,
+            pred_table_html_output=str(pred_table_html),
+            eval_output=str(eval_summary_json) if require_gt else None,
+            lang=lang,
+            score_threshold=score_threshold,
+            structure_match_threshold=structure_match_threshold,
+            ocr_engine=ocr_engine,
+            ocr_device=ocr_device,
+            ocr_batch_size=ocr_batch_size,
+            use_doc_orientation_classify=use_doc_orientation_classify,
+            use_doc_unwarping=use_doc_unwarping,
+            use_chart_recognition=use_chart_recognition,
+            use_table_orientation_classify=use_table_orientation_classify,
+            use_ocr_results_with_table_cells=use_ocr_results_with_table_cells,
+            text_det_limit_side_len=text_det_limit_side_len,
+            ocr_model=ocr_model,
+            table_dual_pass=table_dual_pass,
+            table_second_engine=table_second_engine,
+            require_gt=require_gt,
+        )
+    finally:
+        if temp_image_path and temp_image_path.exists():
+            temp_image_path.unlink(missing_ok=True)
+    if require_gt and not use_eval:
         print(f"[SKIP_EVAL_SUMMARY] use_eval=false: {final_item_id}")
     return use_eval
 
@@ -1852,6 +1934,8 @@ def ocr_run_batch(
     text_det_limit_side_len: int | None = None,
     table_dual_pass: bool = False,
     table_second_engine: str = "pp_ocrv5",
+    require_gt: bool = True,
+    max_long_side: int | None = 2000,
 ) -> None:
     normalized_engine = _normalize_ocr_engine(ocr_engine)
     shared_model = _build_shared_ocr_model(
@@ -1880,6 +1964,8 @@ def ocr_run_batch(
     skip_image_count = 0
     skip_gt_count = 0
     fail_count = 0
+    skip_image_details: list[dict[str, str]] = []
+    fail_details: list[dict[str, str]] = []
     eval_rows: list[dict[str, object]] = []
     review_queue_rows: list[dict[str, object]] = []
 
@@ -1890,31 +1976,54 @@ def ocr_run_batch(
             doc_image_paths = _list_image_paths(doc_dir)
             print(f"images_in_doc: {len(doc_image_paths)}")
             for path in doc_image_paths:
-                include_in_eval = ocr_run_image(
-                    doc_key=doc_key,
-                    item_id=None,
-                    images_root=images_root,
-                    gt_root=gt_root,
-                    output_root=output_root,
-                    image_name=path.name,
-                    lang=lang,
-                    score_threshold=score_threshold,
-                    structure_match_threshold=structure_match_threshold,
-                    ocr_engine=ocr_engine,
-                    ocr_device=ocr_device,
-                    ocr_batch_size=ocr_batch_size,
-                    use_doc_orientation_classify=use_doc_orientation_classify,
-                    use_doc_unwarping=use_doc_unwarping,
-                    use_chart_recognition=use_chart_recognition,
-                    use_table_orientation_classify=use_table_orientation_classify,
-                    use_ocr_results_with_table_cells=use_ocr_results_with_table_cells,
-                    text_det_limit_side_len=text_det_limit_side_len,
-                    ocr_model=shared_model,
-                    table_dual_pass=table_dual_pass,
-                    table_second_engine=table_second_engine,
-                )
-                ok_count += 1
-                if not include_in_eval:
+                try:
+                    include_in_eval = ocr_run_image(
+                        doc_key=doc_key,
+                        item_id=None,
+                        images_root=images_root,
+                        gt_root=gt_root,
+                        output_root=output_root,
+                        image_name=path.name,
+                        lang=lang,
+                        score_threshold=score_threshold,
+                        structure_match_threshold=structure_match_threshold,
+                        ocr_engine=ocr_engine,
+                        ocr_device=ocr_device,
+                        ocr_batch_size=ocr_batch_size,
+                        use_doc_orientation_classify=use_doc_orientation_classify,
+                        use_doc_unwarping=use_doc_unwarping,
+                        use_chart_recognition=use_chart_recognition,
+                        use_table_orientation_classify=use_table_orientation_classify,
+                        use_ocr_results_with_table_cells=use_ocr_results_with_table_cells,
+                        text_det_limit_side_len=text_det_limit_side_len,
+                        ocr_model=shared_model,
+                        table_dual_pass=table_dual_pass,
+                        table_second_engine=table_second_engine,
+                        require_gt=require_gt,
+                        max_long_side=max_long_side,
+                    )
+                    ok_count += 1
+                    if not include_in_eval:
+                        continue
+                except FileNotFoundError as e:
+                    message = str(e)
+                    if "Image folder not found" in message or "No image files found" in message or "Image not found" in message:
+                        print(f"[SKIP][이미지 없음] {message}")
+                        skip_image_count += 1
+                        skip_image_details.append({"doc_key": doc_key, "image_name": path.name, "reason": message})
+                    elif "GT not found" in message:
+                        print(f"[SKIP][GT 없음] {message}")
+                        skip_gt_count += 1
+                    else:
+                        print(f"[SKIP] {message}")
+                    skip_count += 1
+                    continue
+                except Exception as e:
+                    print(f"[FAIL] {doc_key}/{path.name}: {e}")
+                    fail_count += 1
+                    fail_details.append({"doc_key": doc_key, "image_name": path.name, "reason": str(e)})
+                    if stop_on_error:
+                        raise
                     continue
 
                 eval_path = (
@@ -2049,6 +2158,7 @@ def ocr_run_batch(
             if "Image folder not found" in message or "No image files found" in message or "Image not found" in message:
                 print(f"[SKIP][이미지 없음] {message}")
                 skip_image_count += 1
+                skip_image_details.append({"doc_key": doc_key, "image_name": "-", "reason": message})
             elif "GT not found" in message:
                 print(f"[SKIP][GT 없음] {message}")
                 skip_gt_count += 1
@@ -2058,16 +2168,25 @@ def ocr_run_batch(
         except Exception as e:
             print(f"[FAIL] {doc_key}: {e}")
             fail_count += 1
+            fail_details.append({"doc_key": doc_key, "image_name": "-", "reason": str(e)})
             if stop_on_error:
                 raise
 
     print("\n=== OCR Batch Summary ===")
-    print(f"total_docs: {len(doc_dirs)}")
-    print(f"ok: {ok_count}")
-    print(f"skip: {skip_count}")
-    print(f"skip_image_missing: {skip_image_count}")
-    print(f"skip_gt_missing: {skip_gt_count}")
-    print(f"fail: {fail_count}")
+    print(f"1. total_docs: {len(doc_dirs)}")
+    print(f"2. ok: {ok_count}")
+    print(f"3. skip: {skip_count}")
+    print(f"3-1. skip_image_missing: {skip_image_count}")
+    print(f"3-2. skip_gt_missing: {skip_gt_count}")
+    if skip_image_details:
+        print("3-3. skip_image_missing_details:")
+        for idx, detail in enumerate(skip_image_details, start=1):
+            print(f"  {idx}) doc_key={detail['doc_key']} image={detail['image_name']} reason={detail['reason']}")
+    print(f"4. fail: {fail_count}")
+    if fail_details:
+        print("4-1. fail_details:")
+        for idx, detail in enumerate(fail_details, start=1):
+            print(f"  {idx}) doc_key={detail['doc_key']} image={detail['image_name']} reason={detail['reason']}")
 
     if eval_rows:
         engine_out_root = Path(output_root) / _engine_dir_name(normalized_engine)
@@ -2180,6 +2299,53 @@ def ocr_run_batch(
         else:
             review_queue_path.write_text("", encoding="utf-8")
         print(f"saved_review_queue_jsonl: {review_queue_path}")
+    elif not require_gt:
+        engine_out_root = Path(output_root) / _engine_dir_name(normalized_engine)
+        engine_out_root.mkdir(parents=True, exist_ok=True)
+        inference_summary = {
+            "mode": "inference_only",
+            "engine": normalized_engine,
+            "total_docs": len(doc_dirs),
+            "ok": ok_count,
+            "skip": skip_count,
+            "skip_image_missing": skip_image_count,
+            "skip_gt_missing": skip_gt_count,
+            "fail": fail_count,
+            "skip_image_missing_details": skip_image_details,
+            "fail_details": fail_details,
+            "message": "GT-based eval summaries are skipped.",
+        }
+        summary_json_path = engine_out_root / "ocr_batch_inference_summary.json"
+        summary_txt_path = engine_out_root / "ocr_batch_inference_summary.txt"
+        summary_json_path.write_text(json.dumps(inference_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        txt_lines = [
+            "=== OCR Batch Summary (Inference-Only) ===",
+            f"engine: {normalized_engine}",
+            f"total_docs: {len(doc_dirs)}",
+            f"ok: {ok_count}",
+            f"skip: {skip_count}",
+            f"skip_image_missing: {skip_image_count}",
+            f"skip_gt_missing: {skip_gt_count}",
+            f"fail: {fail_count}",
+            "[SUMMARY] inference-only mode: GT-based eval summaries are skipped.",
+        ]
+        if skip_image_details:
+            txt_lines.append("skip_image_missing_details:")
+            for idx, detail in enumerate(skip_image_details, start=1):
+                txt_lines.append(
+                    f"  {idx}. doc_key={detail['doc_key']} image={detail['image_name']} reason={detail['reason']}"
+                )
+        if fail_details:
+            txt_lines.append("fail_details:")
+            for idx, detail in enumerate(fail_details, start=1):
+                txt_lines.append(f"  {idx}. doc_key={detail['doc_key']} image={detail['image_name']} reason={detail['reason']}")
+        summary_txt_path.write_text("\n".join(txt_lines), encoding="utf-8")
+
+        print("5. mode: inference-only (GT-based eval summaries are skipped)")
+        print("6. output")
+        print(f"6-1. saved_inference_summary_json: {summary_json_path}")
+        print(f"6-2. saved_inference_summary_txt: {summary_txt_path}")
 
 
 def _pipeline_paths_for_input(
@@ -2872,14 +3038,34 @@ def main() -> None:
         default=1200,
         help="Maximum chars for HTML snippet chunk when --include-html-chunk is enabled",
     )
+    ocr_export_parser.add_argument(
+        "--allow-inference-only",
+        action="store_true",
+        help="Allow exporting RAG handoff from inference-only OCR outputs (pred_raw/pred_table_layout) without GT eval files.",
+    )
 
     ocr_parser = subparsers.add_parser(
         "extract-ocr-images",
-        help="Extract embedded images from HWP files for OCR ground-truth preparation",
+        help="Extract embedded images from HWP/PDF files for OCR preparation",
     )
-    ocr_parser.add_argument("--input-dir", required=True, help="Directory containing HWP files")
-    ocr_parser.add_argument("--output-dir", required=True, help="Directory to save extracted images")
+    ocr_parser.add_argument("--input-dir", required=True, help="Directory containing HWP/PDF files")
+    ocr_parser.add_argument(
+        "--output-dir",
+        default="data/v2/ocr_images",
+        help="Directory to save extracted images (default: data/v2/ocr_images)",
+    )
     ocr_parser.add_argument("--limit", type=int, default=0, help="Process first N files only; 0=all")
+    ocr_parser.add_argument(
+        "--source-type",
+        choices=["all", "hwp", "pdf"],
+        default="all",
+        help="Source file types to process",
+    )
+    ocr_parser.add_argument("--recursive", action="store_true", help="Recursively search input-dir")
+    ocr_parser.add_argument("--pdf-min-width", type=int, default=100, help="PDF image min width")
+    ocr_parser.add_argument("--pdf-min-height", type=int, default=40, help="PDF image min height")
+    ocr_parser.add_argument("--pdf-min-area", type=int, default=10_000, help="PDF image min area")
+    ocr_parser.add_argument("--pdf-min-bytes", type=int, default=1_000, help="PDF image min byte size")
 
     build_pred_parser = subparsers.add_parser(
         "build-pred-structured",
@@ -2969,6 +3155,11 @@ def main() -> None:
         choices=["pp_ocrv5", "pp_ocrv5_transformers"],
         help="Second pass OCR engine used when --table-dual-pass is enabled.",
     )
+    ocr_image_parser.add_argument(
+        "--no-gt",
+        action="store_true",
+        help="Run inference-only mode without GT build/eval.",
+    )
 
     ocr_batch_parser = subparsers.add_parser(
         "ocr-run-batch",
@@ -3032,6 +3223,11 @@ def main() -> None:
         default="pp_ocrv5",
         choices=["pp_ocrv5", "pp_ocrv5_transformers"],
         help="Second pass OCR engine used when --table-dual-pass is enabled.",
+    )
+    ocr_batch_parser.add_argument(
+        "--no-gt",
+        action="store_true",
+        help="Run inference-only mode without GT build/eval.",
     )
 
     pipeline_parser = subparsers.add_parser(
@@ -3245,9 +3441,20 @@ def main() -> None:
             include_review_required=not args.exclude_review_required,
             include_html_chunk=args.include_html_chunk,
             html_chunk_max_chars=args.html_chunk_max_chars,
+            allow_inference_only=args.allow_inference_only,
         )
     elif args.command == "extract-ocr-images":
-        extract_ocr_images(input_dir=args.input_dir, output_dir=args.output_dir, limit=args.limit)
+        extract_ocr_images(
+            input_dir=args.input_dir,
+            output_dir=args.output_dir,
+            limit=args.limit,
+            source_type=args.source_type,
+            recursive=args.recursive,
+            pdf_min_width=args.pdf_min_width,
+            pdf_min_height=args.pdf_min_height,
+            pdf_min_area=args.pdf_min_area,
+            pdf_min_bytes=args.pdf_min_bytes,
+        )
     elif args.command == "build-pred-structured":
         build_pred_structured(
             gt_path=args.gt,
@@ -3302,6 +3509,7 @@ def main() -> None:
                     text_det_limit_side_len=args.text_det_limit_side_len,
                     table_dual_pass=args.table_dual_pass,
                     table_second_engine=args.table_second_engine,
+                    require_gt=not args.no_gt,
                 )
             except Exception as exc:
                 failed_engines.append(engine_name)
@@ -3349,6 +3557,7 @@ def main() -> None:
                     text_det_limit_side_len=args.text_det_limit_side_len,
                     table_dual_pass=args.table_dual_pass,
                     table_second_engine=args.table_second_engine,
+                    require_gt=not args.no_gt,
                 )
             except Exception as exc:
                 failed_engines.append(engine_name)

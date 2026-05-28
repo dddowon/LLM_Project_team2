@@ -9,6 +9,16 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
+PIPELINE_START_TS="$(date +%s)"
+
+format_elapsed() {
+  local elapsed="$1"
+  local h=$((elapsed / 3600))
+  local m=$(((elapsed % 3600) / 60))
+  local s=$((elapsed % 60))
+  printf "%02dh %02dm %02ds" "${h}" "${m}" "${s}"
+}
+
 RUN_RAG_STAGE="${RUN_RAG_STAGE:-1}" # 1: OCR 후 RAG까지 실행, 0: OCR만 실행
 
 # OCR stage env/args
@@ -27,8 +37,9 @@ CHUNKS_OUTPUT="${CHUNKS_OUTPUT:-${RAG_HANDOFF_DIR}/ocr_input_chunks.jsonl}"
 EXCLUDE_REVIEW_REQUIRED="${EXCLUDE_REVIEW_REQUIRED:-0}"
 INCLUDE_HTML_CHUNK="${INCLUDE_HTML_CHUNK:-0}"
 HTML_CHUNK_MAX_CHARS="${HTML_CHUNK_MAX_CHARS:-1200}"
-USE_DOC_UNWARPING="${USE_DOC_UNWARPING:-1}"
-TABLE_DUAL_PASS="${TABLE_DUAL_PASS:-1}"
+USE_DOC_UNWARPING="${USE_DOC_UNWARPING:-0}"
+TABLE_DUAL_PASS="${TABLE_DUAL_PASS:-0}"
+OCR_USE_GT="${OCR_USE_GT:-0}"
 
 # RAG stage env/args
 RAG_ENV_NAME="${RAG_ENV_NAME:-llm_team2}"
@@ -60,16 +71,30 @@ INCLUDE_HTML_CHUNK="${INCLUDE_HTML_CHUNK}" \
 HTML_CHUNK_MAX_CHARS="${HTML_CHUNK_MAX_CHARS}" \
 USE_DOC_UNWARPING="${USE_DOC_UNWARPING}" \
 TABLE_DUAL_PASS="${TABLE_DUAL_PASS}" \
+OCR_USE_GT="${OCR_USE_GT}" \
 ./scripts/run_ocr_stage.sh
 
 if [[ "${RUN_RAG_STAGE}" != "1" ]]; then
-  echo "[PIPELINE] RUN_RAG_STAGE=${RUN_RAG_STAGE} -> skip RAG stage"
+  echo "=== Pipeline Summary ==="
+  echo "1. rag_stage: skipped (RUN_RAG_STAGE=${RUN_RAG_STAGE})"
+  PIPELINE_END_TS="$(date +%s)"
+  PIPELINE_ELAPSED_SEC="$((PIPELINE_END_TS - PIPELINE_START_TS))"
+  PIPELINE_TOTAL_LATENCY_MS="$((PIPELINE_ELAPSED_SEC * 1000))"
+  PIPELINE_TOTAL_LATENCY_HMS="$(format_elapsed "${PIPELINE_ELAPSED_SEC}")"
+  echo "2. total_latency_ms: ${PIPELINE_TOTAL_LATENCY_MS}"
+  echo "3. total_latency_hms: ${PIPELINE_TOTAL_LATENCY_HMS}"
   exit 0
 fi
 
 if [[ ! -s "${INPUT_CHUNKS}" ]]; then
-  echo "[PIPELINE] chunks file is missing or empty: ${INPUT_CHUNKS}"
-  echo "[PIPELINE] skip RAG stage"
+  echo "=== Pipeline Summary ==="
+  echo "1. rag_stage: skipped (chunks missing: ${INPUT_CHUNKS})"
+  PIPELINE_END_TS="$(date +%s)"
+  PIPELINE_ELAPSED_SEC="$((PIPELINE_END_TS - PIPELINE_START_TS))"
+  PIPELINE_TOTAL_LATENCY_MS="$((PIPELINE_ELAPSED_SEC * 1000))"
+  PIPELINE_TOTAL_LATENCY_HMS="$(format_elapsed "${PIPELINE_ELAPSED_SEC}")"
+  echo "2. total_latency_ms: ${PIPELINE_TOTAL_LATENCY_MS}"
+  echo "3. total_latency_hms: ${PIPELINE_TOTAL_LATENCY_HMS}"
   exit 0
 fi
 
@@ -82,4 +107,11 @@ BATCH_SIZE="${BATCH_SIZE}" \
 FORCE_REAL="${FORCE_REAL}" \
 ./scripts/run_rag_stage.sh
 
-echo "[PIPELINE DONE]"
+PIPELINE_END_TS="$(date +%s)"
+PIPELINE_ELAPSED_SEC="$((PIPELINE_END_TS - PIPELINE_START_TS))"
+PIPELINE_TOTAL_LATENCY_MS="$((PIPELINE_ELAPSED_SEC * 1000))"
+PIPELINE_TOTAL_LATENCY_HMS="$(format_elapsed "${PIPELINE_ELAPSED_SEC}")"
+echo "=== Pipeline Summary ==="
+echo "1. rag_stage: completed"
+echo "2. total_latency_ms: ${PIPELINE_TOTAL_LATENCY_MS}"
+echo "3. total_latency_hms: ${PIPELINE_TOTAL_LATENCY_HMS}"

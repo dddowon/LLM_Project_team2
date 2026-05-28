@@ -112,6 +112,7 @@ def resolve_doc_id(row: dict[str, Any]) -> str:
         else:
             stem = source_path.stem
             default_from_path = stem[: -len("_chunks")] if stem.endswith("_chunks") else stem
+
     return str(
         row.get("doc_id")
         or metadata.get("doc_id")
@@ -227,16 +228,20 @@ def build_question_generation_prompt(
 ) -> str:
     ocr_chunk_count = sum(1 for chunk in chunks if str(chunk.get("source") or "") == "ocr")
     has_ocr = ocr_chunk_count > 0
-    ocr_min = 1 if has_ocr and questions_per_doc >= 2 else (1 if has_ocr and questions_per_doc == 1 else 0)
+    # OCR 청크가 있으면 "검증용"으로만 소량 포함한다.
+    # - 질문이 2개 이상이면 OCR 질문 1개만 요구 (나머지는 텍스트/표 기반)
+    # - 질문이 1개면 OCR만 강제하지 않는다 (텍스트/표가 있으면 그쪽도 가능)
+    ocr_min = 1 if has_ocr and questions_per_doc >= 2 else 0
+    ocr_max = 1 if has_ocr and questions_per_doc >= 2 else 0
 
     context = json.dumps(chunks, ensure_ascii=False, indent=2)
     ocr_note = ""
     if has_ocr:
         ocr_note = (
-            f"\n\n[OCR/이미지 청크 안내] 이 문서에는 PaddleOCR 등으로 추출한 이미지 청크가 "
+            f"\n\n[이미지 청크 안내] 이 문서에는 PaddleOCR 등으로 추출한 이미지 청크가 "
             f"{ocr_chunk_count}개 포함되어 있습니다(source=ocr, chunk_type=ocr_*). "
-            f"최소 {ocr_min}개 질문은 반드시 OCR 청크만으로 답할 수 있게 만드세요 "
-            f"(스캔 별지·검토결과서·표 이미지의 사업기간·검토의견·서식명·수치 등)."
+            f"이미지(OCR) 성능 확인용 질문은 {ocr_min}~{ocr_max}개만 포함하세요. "
+            f"나머지 질문은 반드시 텍스트/표 청크(source!=ocr)에서 답할 수 있게 만드세요."
         )
 
     return f"""당신은 RAG 성능평가용 질문셋 생성자입니다.
@@ -271,21 +276,20 @@ def build_question_generation_prompt(
 - comparison: 동일 문서 내 두 항목 대조 (근거 둘 다 있을 때만)
 - unanswerable: 제공 청크에 없음 → expected_answer는 "문서에서 확인되지 않음", gold_chunk_ids는 []
 
-[OCR/이미지 성능 검증 질문]
-- source=ocr 또는 chunk_type이 ocr_로 시작하는 청크가 있으면 eval_focus=ocr_image 질문을 최소 {ocr_min}개 포함.
+[이미지(OCR) 성능 검증 질문]
+- source=ocr 또는 chunk_type이 ocr_로 시작하는 청크가 있으면 eval_focus=ocr_image 질문을 {ocr_min}~{ocr_max}개만 포함.
 - 질문은 이미지(스캔)에만 나오는 정보를 묻게 하세요. 예:
-  - "별지 적정 사업기간 산정서에서 종합 검토 결과 적정 사업기간은?"
-  - "영향평가 검토결과서에 기재된 사업기간(일)은?"
-  - "검토항목별 추정 사업기간이 5개월로 적힌 항목은?"
+  - "별지 검토결과서에서 기재된 추정 사업기간은?"
+  - "검토항목 중 '추정 사업기간'이 5개월로 적힌 항목은?"
 - OCR 청크의 image_stem·표 행(검토항목/검토의견/추정 사업기간)을 활용하세요.
-- 일반 HWP 본문 청크와 OCR 청크에 같은 내용이 있으면, OCR 전용 질문은 OCR 청크의 고유 표현(이미지 파일명·OCR 표 행)을 쓰세요.
+- 텍스트/표 청크에 이미 동일 내용이 있으면, 그 질문은 eval_focus=text로 작성하고 gold_chunk_ids도 텍스트/표 청크를 가리키게 하세요.
 
-category 예: 기능 요구사항, 보안, 일정, 예산, 입찰·계약, 부록·양식, OCR/이미지.
+category 예: 기능 요구사항, 보안, 일정, 예산, 입찰·계약, 부록·양식, 이미지.
 expected_answer: 정답 전문이 아닌 검수용 핵심 요지(짧게).
 difficulty: easy(단일 팩트), medium(요약·세부), hard(종합·후속·unanswerable).
 
-[생성 비율 가이드 — OCR 최소 개수 충족 후 나머지]
-- OCR/이미지(eval_focus=ocr_image): 최소 {ocr_min}개
+[생성 비율 가이드 — 이미지 질문은 소량만]
+- 이미지(eval_focus=ocr_image): {ocr_min}~{ocr_max}개
 - fact·requirement_detail: 약 35%
 - summary: 약 25%
 - follow_up: 약 15%

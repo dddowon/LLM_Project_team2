@@ -166,7 +166,9 @@ def _iter_engine_dirs(ocr_eval_root: Path, engine: str | None) -> list[Path]:
     return sorted([path for path in ocr_eval_root.iterdir() if path.is_dir()], key=lambda p: p.name)
 
 
-def _iter_image_dirs(engine_dir: Path, doc_key: str | None) -> list[tuple[str, Path]]:
+def _iter_image_dirs(
+    engine_dir: Path, doc_key: str | None, *, allow_inference_only: bool
+) -> list[tuple[str, Path]]:
     output: list[tuple[str, Path]] = []
     doc_dirs = sorted([path for path in engine_dir.iterdir() if path.is_dir()], key=lambda p: p.name)
     if doc_key:
@@ -176,7 +178,44 @@ def _iter_image_dirs(engine_dir: Path, doc_key: str | None) -> list[tuple[str, P
         for image_dir in image_dirs:
             if (image_dir / "eval" / "gt_pred_structured.json").exists():
                 output.append((one_doc.name, image_dir))
+                continue
+            if allow_inference_only and (image_dir / "inference" / "pred_raw.json").exists():
+                output.append((one_doc.name, image_dir))
     return output
+
+
+def _format_pred_raw_text(pred_raw: dict[str, Any], *, max_lines: int = 160) -> str:
+    """Inference-only fallback: derive readable text from pred_raw.json."""
+    lines: list[str] = []
+
+    ocr_lines = pred_raw.get("ocr_lines")
+    if isinstance(ocr_lines, list):
+        for item in ocr_lines:
+            if len(lines) >= max_lines:
+                break
+            if isinstance(item, dict):
+                text = _normalize_space(item.get("text", ""))
+            else:
+                text = _normalize_space(item)
+            if text:
+                lines.append(text)
+
+    if not lines:
+        for key in ("text", "texts", "markdown", "content", "result", "output", "prediction"):
+            value = pred_raw.get(key)
+            if isinstance(value, list):
+                for item in value[:max_lines]:
+                    text = _normalize_space(item)
+                    if text:
+                        lines.append(text)
+            else:
+                text = _normalize_space(value)
+                if text:
+                    lines.append(text)
+            if lines:
+                break
+
+    return "\n".join(lines).strip()
 
 
 def export_ocr_eval_to_rag_inputs(
@@ -189,6 +228,7 @@ def export_ocr_eval_to_rag_inputs(
     include_review_required: bool = True,
     include_html_chunk: bool = False,
     html_chunk_max_chars: int = 1200,
+    allow_inference_only: bool = False,
 ) -> tuple[int, int]:
     manifest_rows: list[dict[str, Any]] = []
     chunk_rows: list[dict[str, Any]] = []
@@ -197,24 +237,36 @@ def export_ocr_eval_to_rag_inputs(
     global_chunk_index = 0
     for engine_dir in engine_dirs:
         engine_name = engine_dir.name
-        for one_doc_key, image_dir in _iter_image_dirs(engine_dir, doc_key):
+        for one_doc_key, image_dir in _iter_image_dirs(
+            engine_dir, doc_key, allow_inference_only=allow_inference_only
+        ):
             pred_structured_path = image_dir / "eval" / "gt_pred_structured.json"
             pred_table_rows_path = image_dir / "inference" / "pred_table_layout.json"
             pred_table_html_path = image_dir / "inference" / "pred_table_raw.html"
             pred_table_preview_path = image_dir / "inference" / "pred_table_layout.html"
             eval_summary_path = image_dir / "eval" / "gt_eval_summary.json"
+            pred_raw_path = image_dir / "inference" / "pred_raw.json"
 
             pred_structured = _load_json(pred_structured_path)
-            if not pred_structured:
+            is_inference_only = not bool(pred_structured)
+            if is_inference_only and not allow_inference_only:
                 continue
+
+            pred_raw = _load_json(pred_raw_path) if is_inference_only else {}
             table_rows_payload = _load_json(pred_table_rows_path)
             eval_summary = _load_json(eval_summary_path)
 
-            item_id = _normalize_space(pred_structured.get("id")) or f"{one_doc_key}_{image_dir.name}"
+            item_id = (
+                _normalize_space((pred_structured or {}).get("id"))
+                or _normalize_space(pred_raw.get("id"))
+                or f"{one_doc_key}_{image_dir.name}"
+            )
             image_stem = image_dir.name
-            image_type = _normalize_space(pred_structured.get("type", "unknown"))
-            review_required = bool(eval_summary.get("review_required", False))
-            review_reasons = eval_summary.get("review_reasons", [])
+            image_type = _normalize_space((pred_structured or {}).get("type", "")) or _normalize_space(
+                pred_raw.get("type", "unknown")
+            )
+            review_required = False if is_inference_only else bool(eval_summary.get("review_required", False))
+            review_reasons = [] if is_inference_only else eval_summary.get("review_reasons", [])
             if not isinstance(review_reasons, list):
                 review_reasons = []
 
@@ -229,8 +281,10 @@ def export_ocr_eval_to_rag_inputs(
                 "ocr_engine": engine_name,
                 "review_required": review_required,
                 "review_reasons": review_reasons,
+                "inference_only": is_inference_only,
                 "paths": {
                     "pred_structured_path": str(pred_structured_path),
+                    "pred_raw_path": str(pred_raw_path),
                     "pred_table_rows_path": str(pred_table_rows_path),
                     "pred_table_html_path": str(pred_table_html_path),
                     "pred_table_preview_path": str(pred_table_preview_path),
@@ -253,30 +307,50 @@ def export_ocr_eval_to_rag_inputs(
                 "ocr_engine": engine_name,
                 "ocr_type": image_type,
                 "pred_structured_path": str(pred_structured_path),
+                "pred_raw_path": str(pred_raw_path),
                 "pred_table_rows_path": str(pred_table_rows_path),
                 "pred_table_html_path": str(pred_table_html_path),
                 "eval_summary_path": str(eval_summary_path),
                 "review_required": str(review_required),
                 "review_reasons": "|".join(str(reason) for reason in review_reasons),
+                "inference_only": str(is_inference_only),
                 "source": "ocr",
             }
 
-            pred_structure = pred_structured.get("pred_structure", {})
-            if isinstance(pred_structure, dict):
-                structure_text = _format_pred_structure_text(pred_structure)
-                if structure_text:
+            if pred_structured:
+                pred_structure = pred_structured.get("pred_structure", {})
+                if isinstance(pred_structure, dict):
+                    structure_text = _format_pred_structure_text(pred_structure)
+                    if structure_text:
+                        global_chunk_index += 1
+                        seed = f"{item_id}|pred_structure|{engine_name}|{structure_text[:120]}"
+                        chunk_rows.append(
+                            _build_chunk_row(
+                                chunk_id=f"ocr_chunk_{global_chunk_index:08d}_{_stable_hash(seed)}",
+                                doc_id=one_doc_key,
+                                chunk_type="ocr_structured",
+                                chunk_text=(
+                                    f"문서키: {one_doc_key}\n이미지: {image_stem}\nOCR ID: {item_id}\n"
+                                    f"자료유형: {image_type}\n\n[Pred Structure]\n{structure_text}"
+                                ),
+                                metadata={**common_metadata, "chunk_scope": "pred_structure"},
+                            )
+                        )
+            elif pred_raw:
+                raw_text = _format_pred_raw_text(pred_raw)
+                if raw_text:
                     global_chunk_index += 1
-                    seed = f"{item_id}|pred_structure|{engine_name}|{structure_text[:120]}"
+                    seed = f"{item_id}|pred_raw|{engine_name}|{raw_text[:120]}"
                     chunk_rows.append(
                         _build_chunk_row(
                             chunk_id=f"ocr_chunk_{global_chunk_index:08d}_{_stable_hash(seed)}",
                             doc_id=one_doc_key,
-                            chunk_type="ocr_structured",
+                            chunk_type="ocr_raw_text",
                             chunk_text=(
                                 f"문서키: {one_doc_key}\n이미지: {image_stem}\nOCR ID: {item_id}\n"
-                                f"자료유형: {image_type}\n\n[Pred Structure]\n{structure_text}"
+                                f"자료유형: {image_type}\n\n[OCR Raw Text]\n{raw_text}"
                             ),
-                            metadata={**common_metadata, "chunk_scope": "pred_structure"},
+                            metadata={**common_metadata, "chunk_scope": "pred_raw"},
                         )
                     )
 
