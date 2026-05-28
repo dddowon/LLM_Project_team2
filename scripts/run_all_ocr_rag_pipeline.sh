@@ -30,6 +30,7 @@ HTML_CHUNK_MAX_CHARS="${HTML_CHUNK_MAX_CHARS:-1200}"
 USE_DOC_UNWARPING="${USE_DOC_UNWARPING:-0}"
 TABLE_DUAL_PASS="${TABLE_DUAL_PASS:-0}"
 OCR_NO_GT="${OCR_NO_GT:-1}"
+RAG_ALLOW_INFERENCE_ONLY="${RAG_ALLOW_INFERENCE_ONLY:-0}" # 1: OCR_NO_GT=1 이어도 RAG stage 실행 허용
 
 # RAG stage env/args
 RAG_ENV_NAME="${RAG_ENV_NAME:-llm_team2}"
@@ -64,8 +65,8 @@ TABLE_DUAL_PASS="${TABLE_DUAL_PASS}" \
 OCR_NO_GT="${OCR_NO_GT}" \
 ./scripts/run_ocr_stage.sh
 
-if [[ "${OCR_NO_GT}" == "1" ]]; then
-  echo "[PIPELINE] OCR_NO_GT=1 -> skip RAG stage"
+if [[ "${OCR_NO_GT}" == "1" && "${RAG_ALLOW_INFERENCE_ONLY}" != "1" ]]; then
+  echo "[PIPELINE] OCR_NO_GT=1 -> skip RAG stage (set RAG_ALLOW_INFERENCE_ONLY=1 to run RAG stage)"
   exit 0
 fi
 
