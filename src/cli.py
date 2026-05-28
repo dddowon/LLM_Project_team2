@@ -656,11 +656,12 @@ def export_ocr_rag_handoff(
         html_chunk_max_chars=html_chunk_max_chars,
         allow_inference_only=allow_inference_only,
     )
-    print("ocr_export_rag_done")
-    print(f"manifest_rows: {manifest_count}")
-    print(f"chunk_rows: {chunk_count}")
-    print(f"manifest_output: {output_manifest}")
-    print(f"chunks_output: {output_chunks}")
+    print("\n=== OCR Export Summary ===")
+    print("1. status: ocr_export_rag_done")
+    print(f"2. manifest_rows: {manifest_count}")
+    print(f"3. chunk_rows: {chunk_count}")
+    print(f"4. manifest_output: {output_manifest}")
+    print(f"5. chunks_output: {output_chunks}")
 
 
 def extract_ocr_images(
@@ -849,7 +850,7 @@ def _write_ocr_payload(output_path: str, payload: dict) -> None:
     safe_payload = _make_json_safe(payload)
     output.write_text(json.dumps(safe_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"ocr_lines: {len(payload.get('ocr_lines', []))}")
-    print(f"latency_ms: {payload.get('latency_ms')}")
+    print(f"per_image_latency_ms: {payload.get('latency_ms')}")
     print(f"output: {output}")
 
 
@@ -1963,6 +1964,8 @@ def ocr_run_batch(
     skip_image_count = 0
     skip_gt_count = 0
     fail_count = 0
+    skip_image_details: list[dict[str, str]] = []
+    fail_details: list[dict[str, str]] = []
     eval_rows: list[dict[str, object]] = []
     review_queue_rows: list[dict[str, object]] = []
 
@@ -1973,33 +1976,54 @@ def ocr_run_batch(
             doc_image_paths = _list_image_paths(doc_dir)
             print(f"images_in_doc: {len(doc_image_paths)}")
             for path in doc_image_paths:
-                include_in_eval = ocr_run_image(
-                    doc_key=doc_key,
-                    item_id=None,
-                    images_root=images_root,
-                    gt_root=gt_root,
-                    output_root=output_root,
-                    image_name=path.name,
-                    lang=lang,
-                    score_threshold=score_threshold,
-                    structure_match_threshold=structure_match_threshold,
-                    ocr_engine=ocr_engine,
-                    ocr_device=ocr_device,
-                    ocr_batch_size=ocr_batch_size,
-                    use_doc_orientation_classify=use_doc_orientation_classify,
-                    use_doc_unwarping=use_doc_unwarping,
-                    use_chart_recognition=use_chart_recognition,
-                    use_table_orientation_classify=use_table_orientation_classify,
-                    use_ocr_results_with_table_cells=use_ocr_results_with_table_cells,
-                    text_det_limit_side_len=text_det_limit_side_len,
-                    ocr_model=shared_model,
-                    table_dual_pass=table_dual_pass,
-                    table_second_engine=table_second_engine,
-                    require_gt=require_gt,
-                    max_long_side=max_long_side,
-                )
-                ok_count += 1
-                if not include_in_eval:
+                try:
+                    include_in_eval = ocr_run_image(
+                        doc_key=doc_key,
+                        item_id=None,
+                        images_root=images_root,
+                        gt_root=gt_root,
+                        output_root=output_root,
+                        image_name=path.name,
+                        lang=lang,
+                        score_threshold=score_threshold,
+                        structure_match_threshold=structure_match_threshold,
+                        ocr_engine=ocr_engine,
+                        ocr_device=ocr_device,
+                        ocr_batch_size=ocr_batch_size,
+                        use_doc_orientation_classify=use_doc_orientation_classify,
+                        use_doc_unwarping=use_doc_unwarping,
+                        use_chart_recognition=use_chart_recognition,
+                        use_table_orientation_classify=use_table_orientation_classify,
+                        use_ocr_results_with_table_cells=use_ocr_results_with_table_cells,
+                        text_det_limit_side_len=text_det_limit_side_len,
+                        ocr_model=shared_model,
+                        table_dual_pass=table_dual_pass,
+                        table_second_engine=table_second_engine,
+                        require_gt=require_gt,
+                        max_long_side=max_long_side,
+                    )
+                    ok_count += 1
+                    if not include_in_eval:
+                        continue
+                except FileNotFoundError as e:
+                    message = str(e)
+                    if "Image folder not found" in message or "No image files found" in message or "Image not found" in message:
+                        print(f"[SKIP][이미지 없음] {message}")
+                        skip_image_count += 1
+                        skip_image_details.append({"doc_key": doc_key, "image_name": path.name, "reason": message})
+                    elif "GT not found" in message:
+                        print(f"[SKIP][GT 없음] {message}")
+                        skip_gt_count += 1
+                    else:
+                        print(f"[SKIP] {message}")
+                    skip_count += 1
+                    continue
+                except Exception as e:
+                    print(f"[FAIL] {doc_key}/{path.name}: {e}")
+                    fail_count += 1
+                    fail_details.append({"doc_key": doc_key, "image_name": path.name, "reason": str(e)})
+                    if stop_on_error:
+                        raise
                     continue
 
                 eval_path = (
@@ -2134,6 +2158,7 @@ def ocr_run_batch(
             if "Image folder not found" in message or "No image files found" in message or "Image not found" in message:
                 print(f"[SKIP][이미지 없음] {message}")
                 skip_image_count += 1
+                skip_image_details.append({"doc_key": doc_key, "image_name": "-", "reason": message})
             elif "GT not found" in message:
                 print(f"[SKIP][GT 없음] {message}")
                 skip_gt_count += 1
@@ -2143,16 +2168,25 @@ def ocr_run_batch(
         except Exception as e:
             print(f"[FAIL] {doc_key}: {e}")
             fail_count += 1
+            fail_details.append({"doc_key": doc_key, "image_name": "-", "reason": str(e)})
             if stop_on_error:
                 raise
 
     print("\n=== OCR Batch Summary ===")
-    print(f"total_docs: {len(doc_dirs)}")
-    print(f"ok: {ok_count}")
-    print(f"skip: {skip_count}")
-    print(f"skip_image_missing: {skip_image_count}")
-    print(f"skip_gt_missing: {skip_gt_count}")
-    print(f"fail: {fail_count}")
+    print(f"1. total_docs: {len(doc_dirs)}")
+    print(f"2. ok: {ok_count}")
+    print(f"3. skip: {skip_count}")
+    print(f"3-1. skip_image_missing: {skip_image_count}")
+    print(f"3-2. skip_gt_missing: {skip_gt_count}")
+    if skip_image_details:
+        print("3-3. skip_image_missing_details:")
+        for idx, detail in enumerate(skip_image_details, start=1):
+            print(f"  {idx}) doc_key={detail['doc_key']} image={detail['image_name']} reason={detail['reason']}")
+    print(f"4. fail: {fail_count}")
+    if fail_details:
+        print("4-1. fail_details:")
+        for idx, detail in enumerate(fail_details, start=1):
+            print(f"  {idx}) doc_key={detail['doc_key']} image={detail['image_name']} reason={detail['reason']}")
 
     if eval_rows:
         engine_out_root = Path(output_root) / _engine_dir_name(normalized_engine)
@@ -2266,7 +2300,52 @@ def ocr_run_batch(
             review_queue_path.write_text("", encoding="utf-8")
         print(f"saved_review_queue_jsonl: {review_queue_path}")
     elif not require_gt:
-        print("[SUMMARY] inference-only mode: GT-based eval summaries are skipped.")
+        engine_out_root = Path(output_root) / _engine_dir_name(normalized_engine)
+        engine_out_root.mkdir(parents=True, exist_ok=True)
+        inference_summary = {
+            "mode": "inference_only",
+            "engine": normalized_engine,
+            "total_docs": len(doc_dirs),
+            "ok": ok_count,
+            "skip": skip_count,
+            "skip_image_missing": skip_image_count,
+            "skip_gt_missing": skip_gt_count,
+            "fail": fail_count,
+            "skip_image_missing_details": skip_image_details,
+            "fail_details": fail_details,
+            "message": "GT-based eval summaries are skipped.",
+        }
+        summary_json_path = engine_out_root / "ocr_batch_inference_summary.json"
+        summary_txt_path = engine_out_root / "ocr_batch_inference_summary.txt"
+        summary_json_path.write_text(json.dumps(inference_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        txt_lines = [
+            "=== OCR Batch Summary (Inference-Only) ===",
+            f"engine: {normalized_engine}",
+            f"total_docs: {len(doc_dirs)}",
+            f"ok: {ok_count}",
+            f"skip: {skip_count}",
+            f"skip_image_missing: {skip_image_count}",
+            f"skip_gt_missing: {skip_gt_count}",
+            f"fail: {fail_count}",
+            "[SUMMARY] inference-only mode: GT-based eval summaries are skipped.",
+        ]
+        if skip_image_details:
+            txt_lines.append("skip_image_missing_details:")
+            for idx, detail in enumerate(skip_image_details, start=1):
+                txt_lines.append(
+                    f"  {idx}. doc_key={detail['doc_key']} image={detail['image_name']} reason={detail['reason']}"
+                )
+        if fail_details:
+            txt_lines.append("fail_details:")
+            for idx, detail in enumerate(fail_details, start=1):
+                txt_lines.append(f"  {idx}. doc_key={detail['doc_key']} image={detail['image_name']} reason={detail['reason']}")
+        summary_txt_path.write_text("\n".join(txt_lines), encoding="utf-8")
+
+        print("5. mode: inference-only (GT-based eval summaries are skipped)")
+        print("6. output")
+        print(f"6-1. saved_inference_summary_json: {summary_json_path}")
+        print(f"6-2. saved_inference_summary_txt: {summary_txt_path}")
 
 
 def _pipeline_paths_for_input(
