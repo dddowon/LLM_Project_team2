@@ -10,6 +10,16 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
+STAGE_START_TS="$(date +%s)"
+
+format_elapsed() {
+  local elapsed="$1"
+  local h=$((elapsed / 3600))
+  local m=$(((elapsed % 3600) / 60))
+  local s=$((elapsed % 60))
+  printf "%02dh %02dm %02ds" "${h}" "${m}" "${s}"
+}
+
 OCR_ENV_NAME="${OCR_ENV_NAME:-ocr_vl15}"
 OCR_ENGINE="${OCR_ENGINE:-paddleocr_vl}"
 IMAGES_ROOT="${IMAGES_ROOT:-data/v2/ocr_images}"
@@ -28,7 +38,7 @@ INCLUDE_HTML_CHUNK="${INCLUDE_HTML_CHUNK:-0}"
 HTML_CHUNK_MAX_CHARS="${HTML_CHUNK_MAX_CHARS:-1200}"
 USE_DOC_UNWARPING="${USE_DOC_UNWARPING:-1}"
 TABLE_DUAL_PASS="${TABLE_DUAL_PASS:-0}"
-OCR_NO_GT="${OCR_NO_GT:-1}"
+OCR_USE_GT="${OCR_USE_GT:-0}"
 
 echo "[OCR STAGE] root=${ROOT_DIR}"
 echo "[OCR STAGE] env=${OCR_ENV_NAME}"
@@ -57,7 +67,7 @@ fi
 if [[ "${TABLE_DUAL_PASS}" == "1" ]]; then
   OCR_BATCH_ARGS+=(--table-dual-pass)
 fi
-if [[ "${OCR_NO_GT}" == "1" ]]; then
+if [[ "${OCR_USE_GT}" == "0" ]]; then
   OCR_BATCH_ARGS+=(--no-gt)
 fi
 if [[ -n "${DOC_KEY}" ]]; then
@@ -75,7 +85,7 @@ EXPORT_ARGS=(
   --output-manifest "${MANIFEST_OUTPUT}"
   --output-chunks "${CHUNKS_OUTPUT}"
 )
-if [[ "${OCR_NO_GT}" == "1" ]]; then
+if [[ "${OCR_USE_GT}" == "0" ]]; then
   EXPORT_ARGS+=(--allow-inference-only)
 fi
 if [[ "${EXCLUDE_REVIEW_REQUIRED}" == "1" ]]; then
@@ -90,12 +100,63 @@ fi
 
 python "${EXPORT_ARGS[@]}"
 
-echo "[OCR STAGE DONE]"
-echo "ocr_no_gt: ${OCR_NO_GT}"
-echo "exclude_review_required: ${EXCLUDE_REVIEW_REQUIRED}"
-echo "use_doc_unwarping: ${USE_DOC_UNWARPING}"
-echo "table_dual_pass: ${TABLE_DUAL_PASS}"
-echo "include_html_chunk: ${INCLUDE_HTML_CHUNK}"
-echo "html_chunk_max_chars: ${HTML_CHUNK_MAX_CHARS}"
-echo "manifest: ${MANIFEST_OUTPUT}"
-echo "chunks: ${CHUNKS_OUTPUT}"
+STAGE_END_TS="$(date +%s)"
+STAGE_ELAPSED_SEC="$((STAGE_END_TS - STAGE_START_TS))"
+STAGE_TOTAL_LATENCY_MS="$((STAGE_ELAPSED_SEC * 1000))"
+STAGE_TOTAL_LATENCY_HMS="$(format_elapsed "${STAGE_ELAPSED_SEC}")"
+
+ENGINE_SUMMARY_DIR="${OCR_OUTPUT_ROOT}/${OCR_ENGINE}"
+mkdir -p "${ENGINE_SUMMARY_DIR}"
+STAGE_SUMMARY_TXT="${ENGINE_SUMMARY_DIR}/ocr_stage_summary.txt"
+STAGE_SUMMARY_JSON="${ENGINE_SUMMARY_DIR}/ocr_inference_stage_summary.json"
+
+cat <<EOF
+=== OCR Stage Summary ===
+1. stage: done
+2. ocr_use_gt: ${OCR_USE_GT}
+3. exclude_review_required: ${EXCLUDE_REVIEW_REQUIRED}
+4. use_doc_unwarping: ${USE_DOC_UNWARPING}
+5. table_dual_pass: ${TABLE_DUAL_PASS}
+6. include_html_chunk: ${INCLUDE_HTML_CHUNK}
+7. html_chunk_max_chars: ${HTML_CHUNK_MAX_CHARS}
+8. manifest: ${MANIFEST_OUTPUT}
+9. chunks: ${CHUNKS_OUTPUT}
+10. total_latency_ms: ${STAGE_TOTAL_LATENCY_MS}
+11. total_latency_hms: ${STAGE_TOTAL_LATENCY_HMS}
+EOF
+
+cat > "${STAGE_SUMMARY_TXT}" <<EOF
+=== OCR Stage Summary ===
+1. stage: done
+2. ocr_use_gt: ${OCR_USE_GT}
+3. exclude_review_required: ${EXCLUDE_REVIEW_REQUIRED}
+4. use_doc_unwarping: ${USE_DOC_UNWARPING}
+5. table_dual_pass: ${TABLE_DUAL_PASS}
+6. include_html_chunk: ${INCLUDE_HTML_CHUNK}
+7. html_chunk_max_chars: ${HTML_CHUNK_MAX_CHARS}
+8. manifest: ${MANIFEST_OUTPUT}
+9. chunks: ${CHUNKS_OUTPUT}
+10. total_latency_ms: ${STAGE_TOTAL_LATENCY_MS}
+11. total_latency_hms: ${STAGE_TOTAL_LATENCY_HMS}
+EOF
+
+cat > "${STAGE_SUMMARY_JSON}" <<EOF
+{
+  "title": "OCR Stage Summary",
+  "stage": "done",
+  "ocr_use_gt": ${OCR_USE_GT},
+  "exclude_review_required": ${EXCLUDE_REVIEW_REQUIRED},
+  "use_doc_unwarping": ${USE_DOC_UNWARPING},
+  "table_dual_pass": ${TABLE_DUAL_PASS},
+  "include_html_chunk": ${INCLUDE_HTML_CHUNK},
+  "html_chunk_max_chars": ${HTML_CHUNK_MAX_CHARS},
+  "manifest": "${MANIFEST_OUTPUT}",
+  "chunks": "${CHUNKS_OUTPUT}",
+  "total_latency_ms": ${STAGE_TOTAL_LATENCY_MS},
+  "total_latency_hms": "${STAGE_TOTAL_LATENCY_HMS}"
+}
+EOF
+
+echo "12. output"
+echo "12-1. saved_ocr_stage_summary_json: ${STAGE_SUMMARY_JSON}"
+echo "12-2. saved_ocr_stage_summary_txt: ${STAGE_SUMMARY_TXT}"

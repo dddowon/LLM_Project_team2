@@ -580,13 +580,13 @@ OCR과 RAG는 의존성 충돌 방지를 위해 가상환경을 분리해서 실
 ```
 
 기본 동작(중요):
-- `run_ocr_stage.sh`는 기본적으로 GT 없이 추론만 수행합니다.
-  - 기본값: `OCR_NO_GT=1`
-  - 이 기본 모드에서는 `inference/*`만 생성하고 `ocr-export-rag`는 실행하지 않습니다.
-- GT 평가 + RAG handoff까지 수행하려면 `OCR_NO_GT=0`으로 실행하세요.
+- `run_ocr_stage.sh` 기본값은 GT 없이 추론 전용 모드입니다.
+  - 기본값: `OCR_USE_GT=0`
+- GT 없이 추론 전용으로 실행하려면 `OCR_USE_GT=0`으로 실행하세요.
+  - 이 모드에서도 `ocr-export-rag`는 `--allow-inference-only`로 실행되어 handoff 청크를 생성합니다.
   - 기본값: `EXCLUDE_REVIEW_REQUIRED=0`
   - `EXCLUDE_REVIEW_REQUIRED=1`일 때만 `review_required=true` 항목을 제외합니다.
-- `USE_DOC_UNWARPING=1`이 기본값이며, `ocr-run-batch`에 `--use-doc-unwarping`을 전달합니다.
+- `USE_DOC_UNWARPING=0`이 기본값입니다.
 - `INCLUDE_HTML_CHUNK=0`이 기본값입니다. 즉 HTML 스니펫은 RAG 청크에 기본 포함되지 않습니다.
 
 
@@ -625,35 +625,58 @@ HTML 스니펫까지 RAG 청크에 포함하려면(기본 비권장):
 INCLUDE_HTML_CHUNK=1 HTML_CHUNK_MAX_CHARS=1200 ./scripts/run_ocr_stage.sh
 ```
 
-`run_ocr_stage.sh` 기본 산출물 (`OCR_NO_GT=1`):
+`run_ocr_stage.sh` 산출물 (`OCR_USE_GT=0`, 추론 전용):
 - `data/v2/ocr_outputs/<engine>/<doc_key>/<image_stem>/inference/*`
+- `data/v2/ocr_rag/ocr_input_manifest.jsonl`
+- `data/v2/ocr_rag/ocr_input_chunks.jsonl`
 
-GT 모드(`OCR_NO_GT=0`) 산출물:
+GT 모드(`OCR_USE_GT=1`) 산출물:
 - `data/v2/ocr_rag/ocr_input_manifest.jsonl`
 - `data/v2/ocr_rag/ocr_input_chunks.jsonl`
 
 GT 모드 + RAG handoff까지 포함하려면:
 
 ```bash
-OCR_NO_GT=0 ./scripts/run_ocr_stage.sh
+OCR_USE_GT=1 ./scripts/run_ocr_stage.sh
 ```
 
 GT 없이 Stage-1 추론만 실행하려면:
 
 ```bash
-OCR_NO_GT=1 DOC_KEY="한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보" ./scripts/run_ocr_stage.sh
+OCR_USE_GT=0 DOC_KEY="한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보" ./scripts/run_ocr_stage.sh
 ```
 
-- `OCR_NO_GT=1`일 때는 `inference/*`만 생성합니다.
-- 이 모드에서는 `ocr-export-rag`를 자동으로 건너뜁니다.
+- `OCR_USE_GT=0`일 때는 GT 기반 `eval/*` 없이 추론/청크 생성을 수행합니다.
 
 `run_all_ocr_rag_pipeline.sh`에서도 동일:
 
 ```bash
-OCR_NO_GT=1 RUN_RAG_STAGE=0 DOC_KEY="한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보" ./scripts/run_all_ocr_rag_pipeline.sh
+OCR_USE_GT=0 RUN_RAG_STAGE=1 DOC_KEY="한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보" ./scripts/run_all_ocr_rag_pipeline.sh
 ```
 
-- `OCR_NO_GT=1`이면 RAG stage는 자동 스킵됩니다.
+- `OCR_USE_GT=0`이어도 `RUN_RAG_STAGE=1`이고 chunks가 있으면 RAG stage를 실행합니다.
+
+#### 경희대학교 문서 1건 테스트 예시
+
+```bash
+# GT 없이 OCR만 실행
+DOC_KEY="경희대학교_[입찰공고] 산학협력단 정보시스템 운영 용역업체 선정" \
+OCR_USE_GT=0 \
+./scripts/run_ocr_stage.sh
+
+# RAG만 실행 (run_rag_stage.sh는 DOC_KEY를 직접 사용하지 않음)
+./scripts/run_rag_stage.sh
+
+# OCR + RAG 전체 실행 (GT 없이)
+DOC_KEY="경희대학교_[입찰공고] 산학협력단 정보시스템 운영 용역업체 선정" \
+OCR_USE_GT=0 \
+./scripts/run_all_ocr_rag_pipeline.sh
+
+# GT 기반 OCR + RAG 전체 실행
+DOC_KEY="경희대학교_[입찰공고] 산학협력단 정보시스템 운영 용역업체 선정" \
+OCR_USE_GT=1 \
+./scripts/run_all_ocr_rag_pipeline.sh
+```
 
 `run_rag_stage.sh` 기본 산출물:
 - `data/v2/ocr_rag/ocr_input_embedded.jsonl`
