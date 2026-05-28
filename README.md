@@ -103,7 +103,7 @@ LangSmith 하네스 평가(검색·LLM judge·트레이스):
 PYTHONPYCACHEPREFIX=.cache/pycache python3 -m src.cli evaluate-harness --config configs/default.yaml
 ```
 
-결과 JSONL은 `outputs/eval_harness_results.jsonl`, 트레이스는 https://smith.langchain.com 프로젝트에서 확인합니다.
+결과 JSONL은 `outputs/eval_harness_results.jsonl`, 트레이스는 [https://smith.langchain.com](https://smith.langchain.com) 프로젝트에서 확인합니다.
 
 HWP 파일을 처리해야 한다면 VM에서 선택 의존성을 추가로 설치합니다.
 
@@ -160,8 +160,6 @@ PY
 
 ```bash
 source ~/llm_team2/bin/activate
-export PYTHONPYCACHEPREFIX=.cache/pycache
-cd ~/LLM_Project_team2
 
 python -m src.cli run-pipeline \
   --input-dir "data/raw/RFP_file_100" \
@@ -183,7 +181,6 @@ python -m src.cli extract-ocr-images \
 
 ```bash
 conda activate ocr_vl15
-cd ~/LLM_Project_team2
 export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}   # WSL + NVIDIA GPU일 때만
 
 OCR_USE_GT=0 ./scripts/run_ocr_stage.sh
@@ -198,8 +195,6 @@ wc -l data/v2/ocr_rag/ocr_input_chunks.jsonl
 
 ```bash
 source ~/llm_team2/bin/activate
-export PYTHONPYCACHEPREFIX=.cache/pycache
-cd ~/LLM_Project_team2
 
 python -m src.cli embed-jsonl \
   --input data/v2/ocr_rag/ocr_input_chunks.jsonl \
@@ -221,7 +216,7 @@ python -m src.cli --config configs/default.yaml merge-embedded \
 ```
 
 HWP `*_embedded.jsonl`과 `ocr_input_embedded.jsonl`이 함께 병합됩니다.  
-eval/query는 **`checkpoints/chroma_openai`만** 사용합니다 (`ocr_rag/chroma_index` 아님).
+eval/query는 `**checkpoints/chroma_openai`만** 사용합니다 (`ocr_rag/chroma_index` 아님).
 
 ### 4) 질의 테스트
 
@@ -394,8 +389,6 @@ python -m src.cli merge-embedded \
 
 `OPENAI_API_KEY`가 없으면 `mock` 임베딩으로 동작하고, 실 API 강제 검증은 `--force-real` 옵션을 사용합니다.
 
-
-
 ## 실험 포인트
 
 - 청킹: `chunk_size`, `chunk_overlap`, 목차/장절 기반 의미 청킹 비교
@@ -450,8 +443,8 @@ python -m src.cli sampling \
 
 기준 청킹 결과와 overlap을 맞춰야 하는 경우 `chunk-jsonl`에 `--text-overlap 150`을 추가합니다.
 
-
 ## OCR 파이프라인
+
 ### OCR 환경 설치
 
 ```bash
@@ -484,6 +477,7 @@ export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH}
 ```
 
 입력/출력 규칙:
+
 - 이미지 입력: `data/v2/ocr_images/<doc_key>/img_001.jpg`
 - GT 입력: `data/v2/ocr_outputs/incoming_gt/<doc_key>.jsonl` (없으면 `.json` fallback)
 - 결과 출력:
@@ -498,10 +492,12 @@ export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH}
 - `--doc-key`는 파일명이 아니라 `ocr_images` 하위 폴더명입니다.
 
 GT 의존성:
+
 - 기본 모드에서는 GT가 있어야 `eval/*`까지 생성됩니다.
 - `--no-gt`(또는 `OCR_NO_GT=1`)를 쓰면 GT 없이 `inference/*`만 생성하는 추론 전용 모드로 동작합니다.
 
 Threshold 의미:
+
 - `--score-threshold`:
   - OCR 예측 생성 단계의 confidence 하한값입니다.
   - 이 값보다 낮은 인식 결과는 `eval/gt_pred_structured.json` 구성에서 제외됩니다.
@@ -647,6 +643,7 @@ OCR과 RAG는 의존성 충돌 방지를 위해 가상환경을 분리해서 실
 ```
 
 기본 동작(중요):
+
 - `run_ocr_stage.sh` 기본값은 GT 없이 추론 전용 모드입니다.
   - 기본값: `OCR_USE_GT=0`
 - GT 없이 추론 전용으로 실행하려면 `OCR_USE_GT=0`으로 실행하세요.
@@ -655,8 +652,6 @@ OCR과 RAG는 의존성 충돌 방지를 위해 가상환경을 분리해서 실
   - `EXCLUDE_REVIEW_REQUIRED=1`일 때만 `review_required=true` 항목을 제외합니다.
 - `USE_DOC_UNWARPING=0`이 기본값입니다.
 - `INCLUDE_HTML_CHUNK=0`이 기본값입니다. 즉 HTML 스니펫은 RAG 청크에 기본 포함되지 않습니다.
-
-
 
 선택한 일부 폴더만 OCR 수행 후 RAG handoff 파일로 내보내기:
 
@@ -693,11 +688,13 @@ INCLUDE_HTML_CHUNK=1 HTML_CHUNK_MAX_CHARS=1200 ./scripts/run_ocr_stage.sh
 ```
 
 `run_ocr_stage.sh` 산출물 (`OCR_USE_GT=0`, 추론 전용):
+
 - `data/v2/ocr_outputs/<engine>/<doc_key>/<image_stem>/inference/*`
 - `data/v2/ocr_rag/ocr_input_manifest.jsonl`
 - `data/v2/ocr_rag/ocr_input_chunks.jsonl`
 
 GT 모드(`OCR_USE_GT=1`) 산출물:
+
 - `data/v2/ocr_rag/ocr_input_manifest.jsonl`
 - `data/v2/ocr_rag/ocr_input_chunks.jsonl`
 
@@ -746,12 +743,14 @@ OCR_USE_GT=1 \
 ```
 
 `run_rag_stage.sh` 기본 산출물:
+
 - `data/v2/ocr_rag/ocr_input_embedded.jsonl`
 - `data/v2/ocr_rag/chroma_index/`
 
 eval/query에서 OCR을 검색하려면 위 embedded를 **통합 인덱스** 절의 `merge-embedded`로 `checkpoints/chroma_openai`에 병합하세요.
 
 운영 원칙:
+
 - 팀 간 OCR→RAG 인터페이스 파일은 `data/v2/ocr_rag/ocr_input_chunks.jsonl` 단일 파일로 고정합니다.
 - `chroma_index/`는 RAG 임베딩/인덱싱 이후의 런타임 산출물이며 전달 표준 포맷이 아닙니다.
 - `pred_table_layout.html`은 사람 검수용 참고 파일이며, 기본 RAG 입력 계약 포맷이 아닙니다.
@@ -781,3 +780,4 @@ python -m src.cli ocr-export-rag \
   - `structure_micro_recall`, `structure_macro_f1`
   - `structure.aggregate` (`matched`, `gt_total`, `pred_total`, `micro_precision`, `micro_recall`, `micro_f1`, `macro_f1`)
   - `table_html.exists`, `table_rows.exists`
+

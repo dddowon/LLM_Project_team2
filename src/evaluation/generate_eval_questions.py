@@ -231,18 +231,51 @@ def build_question_generation_prompt(
     # OCR 청크가 있으면 "검증용"으로만 소량 포함한다.
     # - 질문이 2개 이상이면 OCR 질문 1개만 요구 (나머지는 텍스트/표 기반)
     # - 질문이 1개면 OCR만 강제하지 않는다 (텍스트/표가 있으면 그쪽도 가능)
+    # - OCR handoff 파일이 없거나 샘플에 이미지 청크가 없으면 이미지 질문 0개 (강제 없음)
     ocr_min = 1 if has_ocr and questions_per_doc >= 2 else 0
     ocr_max = 1 if has_ocr and questions_per_doc >= 2 else 0
 
     context = json.dumps(chunks, ensure_ascii=False, indent=2)
-    ocr_note = ""
+    chunk_context_note = ""
     if has_ocr:
-        ocr_note = (
+        chunk_context_note = (
             f"\n\n[이미지 청크 안내] 이 문서에는 PaddleOCR 등으로 추출한 이미지 청크가 "
             f"{ocr_chunk_count}개 포함되어 있습니다(source=ocr, chunk_type=ocr_*). "
             f"이미지(OCR) 성능 확인용 질문은 {ocr_min}~{ocr_max}개만 포함하세요. "
             f"나머지 질문은 반드시 텍스트/표 청크(source!=ocr)에서 답할 수 있게 만드세요."
         )
+    else:
+        chunk_context_note = (
+            "\n\n[이미지 청크 없음] 이 문서 컨텍스트에는 OCR/스캔 이미지 청크(source=ocr, "
+            "chunk_type=ocr_*)가 없습니다. eval_focus=ocr_image 질문을 만들지 마세요. "
+            "모든 질문은 eval_focus=text이며, gold_chunk_ids도 텍스트/표 청크만 가리켜야 합니다."
+        )
+
+    if has_ocr:
+        eval_focus_field = (
+            '- eval_focus: "text" | "ocr_image" '
+            "(OCR/스캔 이미지 청크 근거면 ocr_image, 일반 본문·표 청크면 text)"
+        )
+        ocr_rules = f"""[이미지(OCR) 성능 검증 질문]
+- eval_focus=ocr_image 질문을 {ocr_min}~{ocr_max}개만 포함.
+- 질문은 이미지(스캔)에만 나오는 정보를 묻게 하세요. 예:
+  - "별지 검토결과서에서 기재된 추정 사업기간은?"
+  - "검토항목 중 '추정 사업기간'이 5개월로 적힌 항목은?"
+- OCR 청크의 image_stem·표 행(검토항목/검토의견/추정 사업기간)을 활용하세요.
+- 텍스트/표 청크에 이미 동일 내용이 있으면, 그 질문은 eval_focus=text로 작성하고 gold_chunk_ids도 텍스트/표 청크를 가리키게 하세요.
+"""
+        ratio_image = f"- 이미지(eval_focus=ocr_image): {ocr_min}~{ocr_max}개\n"
+    else:
+        eval_focus_field = (
+            '- eval_focus: 반드시 "text"만 사용 '
+            "(이 문서 컨텍스트에 OCR/이미지 청크가 없음 — ocr_image 금지)"
+        )
+        ocr_rules = """[이미지(OCR) 청크 없음 — 예외]
+- 제공된 청크 목록에 source=ocr 또는 chunk_type=ocr_* 가 없습니다.
+- eval_focus=ocr_image 질문을 0개로 두세요 (생성하지 마세요).
+- 이미지·스캔·별지 OCR 등을 묻는 질문도 만들지 마세요.
+"""
+        ratio_image = ""
 
     return f"""당신은 RAG 성능평가용 질문셋 생성자입니다.
 아래 문서 청크만 근거로 평가 질문을 생성하세요. (다른 문서·외부 지식·추측 금지)
@@ -252,14 +285,14 @@ def build_question_generation_prompt(
 
 문서 청크:
 {context}
-{ocr_note}
+{chunk_context_note}
 
 총 {questions_per_doc}개의 질문을 생성하세요.
 출력은 반드시 {{"questions": [...]}} 형태의 JSON 객체로만 작성하세요.
 
 각 항목 필수 필드:
 - question, category, question_type, doc_id, expected_answer, ground_truth_keywords, difficulty, gold_chunk_ids
-- eval_focus: "text" | "ocr_image" (OCR/스캔 이미지 청크 근거면 ocr_image, 일반 본문·표 청크면 text)
+- {eval_focus_field}
 
 [엄격 규칙 — 위반 시 무효]
 1. gold_chunk_ids: answerable 질문은 위 청크 목록의 chunk_id만, 최소 1개. unanswerable은 반드시 [] (빈 배열).
@@ -276,21 +309,13 @@ def build_question_generation_prompt(
 - comparison: 동일 문서 내 두 항목 대조 (근거 둘 다 있을 때만)
 - unanswerable: 제공 청크에 없음 → expected_answer는 "문서에서 확인되지 않음", gold_chunk_ids는 []
 
-[이미지(OCR) 성능 검증 질문]
-- source=ocr 또는 chunk_type이 ocr_로 시작하는 청크가 있으면 eval_focus=ocr_image 질문을 {ocr_min}~{ocr_max}개만 포함.
-- 질문은 이미지(스캔)에만 나오는 정보를 묻게 하세요. 예:
-  - "별지 검토결과서에서 기재된 추정 사업기간은?"
-  - "검토항목 중 '추정 사업기간'이 5개월로 적힌 항목은?"
-- OCR 청크의 image_stem·표 행(검토항목/검토의견/추정 사업기간)을 활용하세요.
-- 텍스트/표 청크에 이미 동일 내용이 있으면, 그 질문은 eval_focus=text로 작성하고 gold_chunk_ids도 텍스트/표 청크를 가리키게 하세요.
-
-category 예: 기능 요구사항, 보안, 일정, 예산, 입찰·계약, 부록·양식, 이미지.
+{ocr_rules}
+category 예: 기능 요구사항, 보안, 일정, 예산, 입찰·계약, 부록·양식{", 이미지" if has_ocr else ""}.
 expected_answer: 정답 전문이 아닌 검수용 핵심 요지(짧게).
 difficulty: easy(단일 팩트), medium(요약·세부), hard(종합·후속·unanswerable).
 
-[생성 비율 가이드 — 이미지 질문은 소량만]
-- 이미지(eval_focus=ocr_image): {ocr_min}~{ocr_max}개
-- fact·requirement_detail: 약 35%
+[생성 비율 가이드{"" if has_ocr else " — 텍스트/표만"}]
+{ratio_image}- fact·requirement_detail: 약 35%
 - summary: 약 25%
 - follow_up: 약 15%
 - unanswerable: 약 10%
@@ -422,6 +447,11 @@ def generate_questions_with_openai(
             if isinstance(chunk, dict) and chunk.get("chunk_id"):
                 chunk_by_id[str(chunk["chunk_id"])] = chunk
         valid_chunk_ids = set(chunk_by_id)
+        has_ocr_in_context = any(
+            str(chunk.get("source") or "") == "ocr"
+            for chunk in chunks_for_row
+            if isinstance(chunk, dict)
+        )
         doc_id = str(row.get("doc_id") or "").strip()
         if doc_id:
             progress.set_postfix_str(doc_id[:40] + ("…" if len(doc_id) > 40 else ""), refresh=False)
@@ -448,10 +478,14 @@ def generate_questions_with_openai(
             if not question.get("eval_focus"):
                 if is_unanswerable:
                     question["eval_focus"] = "text"
-                elif any(str(chunk_by_id[cid].get("source") or "") == "ocr" for cid in gold_ids):
+                elif has_ocr_in_context and any(
+                    str(chunk_by_id[cid].get("source") or "") == "ocr" for cid in gold_ids
+                ):
                     question["eval_focus"] = "ocr_image"
                 else:
                     question["eval_focus"] = "text"
+            elif not has_ocr_in_context and question.get("eval_focus") == "ocr_image":
+                question["eval_focus"] = "text"
             output_rows.append(question)
 
     write_jsonl(output_path, output_rows)
