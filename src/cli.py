@@ -641,6 +641,7 @@ def export_ocr_rag_handoff(
     include_review_required: bool,
     include_html_chunk: bool,
     html_chunk_max_chars: int,
+    allow_inference_only: bool,
 ) -> None:
     from src.pipeline.ocr_rag_bridge import export_ocr_eval_to_rag_inputs
 
@@ -653,6 +654,7 @@ def export_ocr_rag_handoff(
         include_review_required=include_review_required,
         include_html_chunk=include_html_chunk,
         html_chunk_max_chars=html_chunk_max_chars,
+        allow_inference_only=allow_inference_only,
     )
     print("ocr_export_rag_done")
     print(f"manifest_rows: {manifest_count}")
@@ -2957,6 +2959,11 @@ def main() -> None:
         default=1200,
         help="Maximum chars for HTML snippet chunk when --include-html-chunk is enabled",
     )
+    ocr_export_parser.add_argument(
+        "--allow-inference-only",
+        action="store_true",
+        help="Allow exporting RAG handoff from inference-only OCR outputs (pred_raw/pred_table_layout) without GT eval files.",
+    )
 
     ocr_parser = subparsers.add_parser(
         "extract-ocr-images",
@@ -3355,6 +3362,7 @@ def main() -> None:
             include_review_required=not args.exclude_review_required,
             include_html_chunk=args.include_html_chunk,
             html_chunk_max_chars=args.html_chunk_max_chars,
+            allow_inference_only=args.allow_inference_only,
         )
     elif args.command == "extract-ocr-images":
         extract_ocr_images(
