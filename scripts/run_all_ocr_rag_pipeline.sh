@@ -40,6 +40,7 @@ HTML_CHUNK_MAX_CHARS="${HTML_CHUNK_MAX_CHARS:-1200}"
 USE_DOC_UNWARPING="${USE_DOC_UNWARPING:-0}"
 TABLE_DUAL_PASS="${TABLE_DUAL_PASS:-0}"
 OCR_USE_GT="${OCR_USE_GT:-0}"
+RAG_ALLOW_INFERENCE_ONLY="${RAG_ALLOW_INFERENCE_ONLY:-0}" # 1: OCR_USE_GT=0 이어도 RAG stage 실행 허용
 
 # RAG stage env/args
 RAG_ENV_NAME="${RAG_ENV_NAME:-llm_team2}"
@@ -73,6 +74,19 @@ USE_DOC_UNWARPING="${USE_DOC_UNWARPING}" \
 TABLE_DUAL_PASS="${TABLE_DUAL_PASS}" \
 OCR_USE_GT="${OCR_USE_GT}" \
 ./scripts/run_ocr_stage.sh
+
+if [[ "${OCR_USE_GT}" == "0" && "${RAG_ALLOW_INFERENCE_ONLY}" != "1" ]]; then
+  echo "[PIPELINE] OCR_USE_GT=0 -> skip RAG stage (set RAG_ALLOW_INFERENCE_ONLY=1 to run RAG stage)"
+  PIPELINE_END_TS="$(date +%s)"
+  PIPELINE_ELAPSED_SEC="$((PIPELINE_END_TS - PIPELINE_START_TS))"
+  PIPELINE_TOTAL_LATENCY_MS="$((PIPELINE_ELAPSED_SEC * 1000))"
+  PIPELINE_TOTAL_LATENCY_HMS="$(format_elapsed "${PIPELINE_ELAPSED_SEC}")"
+  echo "=== Pipeline Summary ==="
+  echo "1. rag_stage: skipped (inference-only OCR)"
+  echo "2. total_latency_ms: ${PIPELINE_TOTAL_LATENCY_MS}"
+  echo "3. total_latency_hms: ${PIPELINE_TOTAL_LATENCY_HMS}"
+  exit 0
+fi
 
 if [[ "${RUN_RAG_STAGE}" != "1" ]]; then
   echo "=== Pipeline Summary ==="
