@@ -777,6 +777,10 @@ python -m src.cli ocr-export-rag \
   - `review_required`, `review_reasons`
   - `type`, `status`, `latency_ms`
   - `text.char_similarity_pct`, `text.cer`, `text.wer`, `text.exact_match`
+ 
+
+
+
   - `structure_micro_recall`, `structure_macro_f1`
   - `structure.aggregate` (`matched`, `gt_total`, `pred_total`, `micro_precision`, `micro_recall`, `micro_f1`, `macro_f1`)
   - `table_html.exists`, `table_rows.exists`
