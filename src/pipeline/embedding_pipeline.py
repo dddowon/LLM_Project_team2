@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from src.utils.embedding_text import truncate_text_for_embedding
 from src.utils.jsonl import read_jsonl, write_jsonl
 
 
@@ -28,27 +29,47 @@ def embed_prechunked_jsonl(
         raise RuntimeError(f"입력 JSONL이 비어있습니다: {input_path}")
 
     _validate_chunk_rows(rows)
-    texts = [_extract_text(row) for row in rows]
+    embed_texts: list[str] = []
+    truncation_flags: list[bool] = []
+    original_lengths: list[int] = []
+    for row in rows:
+        raw_text = _extract_text(row)
+        prepared, truncated = truncate_text_for_embedding(raw_text, model=model)
+        embed_texts.append(prepared)
+        truncation_flags.append(truncated)
+        original_lengths.append(len(raw_text))
     has_key = bool(os.getenv("OPENAI_API_KEY"))
     if force_real and not has_key:
         raise RuntimeError("force_real=True 인데 OPENAI_API_KEY가 없습니다.")
     use_mock = not has_key and not force_real
 
     if use_mock:
-        embeddings = [_mock_embedding(text) for text in texts]
+        embeddings = [_mock_embedding(text) for text in embed_texts]
         embedding_source = "mock"
     else:
         from src.models.openai_client import OpenAIModelClient
 
         client = OpenAIModelClient()
-        embeddings = client.embed_texts(texts=texts, model=model, batch_size=batch_size)
+        embeddings = client.embed_texts(texts=embed_texts, model=model, batch_size=batch_size)
         embedding_source = "openai"
 
+    truncated_count = sum(1 for flag in truncation_flags if flag)
+    if truncated_count:
+        print(
+            f"embedding_truncated: {truncated_count}/{len(rows)} chunks "
+            f"(OpenAI limit {8192} tokens per input; truncated for embedding only)"
+        )
+
     output_rows = []
-    for row, embedding in zip(rows, embeddings, strict=False):
+    for row, embedding, truncated, original_len in zip(
+        rows, embeddings, truncation_flags, original_lengths, strict=False
+    ):
         out = dict(row)
         metadata = dict(out["metadata"])
         metadata["embedding_source"] = embedding_source
+        if truncated:
+            metadata["embedding_truncated"] = "true"
+            metadata["embedding_original_chars"] = str(original_len)
         out["metadata"] = metadata
         out["embedding"] = embedding
         output_rows.append(out)

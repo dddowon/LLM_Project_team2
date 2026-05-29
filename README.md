@@ -103,7 +103,7 @@ LangSmith 하네스 평가(검색·LLM judge·트레이스):
 PYTHONPYCACHEPREFIX=.cache/pycache python3 -m src.cli evaluate-harness --config configs/default.yaml
 ```
 
-결과 JSONL은 `outputs/eval_harness_results.jsonl`, 트레이스는 https://smith.langchain.com 프로젝트에서 확인합니다.
+결과 JSONL은 `outputs/eval_harness_results.jsonl`, 트레이스는 [https://smith.langchain.com](https://smith.langchain.com) 프로젝트에서 확인합니다.
 
 HWP 파일을 처리해야 한다면 VM에서 선택 의존성을 추가로 설치합니다.
 
@@ -113,62 +113,110 @@ pip install -e ".[hwp]"
 
 ## 운영 파이프라인 (HWP + OCR 전체)
 
-RFP 96건 기준 **HWP 본문 + 문서 내 이미지(OCR)** 를 모두 RAG·평가에 넣는 표준 순서입니다.
-`myenv`(RAG/eval)와 `ocr_vl15`(OCR 추론) 두 환경을 사용합니다.
+**RFP 100건**(`data/raw/RFP_file_100`) 기준으로 **HWP/PDF 본문 + 문서 내 이미지(OCR)** 를 RAG·평가에 넣는 표준 순서입니다.
 
-### 0) 환경·폴더
+- RAG/평가: `~/llm_team2` (또는 팀 venv)
+- OCR 추론: `conda activate ocr_vl15` ([OCR 파이프라인](#ocr-파이프라인) 절, `requirements_ocr_vl15.txt`)
+
+**새 터미널마다** 프로젝트 루트에서:
 
 ```bash
-python3 -m venv ~/myenv
-source ~/myenv/bin/activate
-pip install -U pip
-pip install -e ".[dev,hwp]"
-cp .env.example .env   # OPENAI_API_KEY 등
-
-mkdir -p outputs checkpoints data/raw data/v2 \
-  data/v2/ocr_images data/v2/ocr_outputs data/v2/ocr_rag \
-  .cache/pycache
+cd ~/LLM_Project_team2
+source ~/llm_team2/bin/activate
 export PYTHONPYCACHEPREFIX=.cache/pycache
 ```
 
-OCR env는 README [OCR 파이프라인](#ocr-파이프라인) 절대로 `ocr_vl15` + `requirements_ocr_vl15.txt` 설치.
+### 0) 환경·폴더·원본
+
+```bash
+cd ~/LLM_Project_team2
+pip install -e ".[dev,hwp]"   # 최초 1회
+cp .env.example .env         # OPENAI_API_KEY 등
+
+mkdir -p outputs logs checkpoints data/raw data/v2 \
+  data/v2/ocr_images data/v2/ocr_outputs data/v2/ocr_rag \
+  .cache/pycache
+```
+
+원본 zip (`unzip` 없으면 Python):
+
+```bash
+python - <<'PY'
+import zipfile
+from pathlib import Path
+z = Path("data/raw/RFP_file_100.zip")
+d = Path("data/raw/RFP_file_100")
+d.mkdir(parents=True, exist_ok=True)
+with zipfile.ZipFile(z) as f:
+    f.extractall(d)
+print("done:", d)
+PY
+```
 
 이미지 입력 규칙: `data/v2/ocr_images/<doc_key>/img_001.jpg` …  
 `<doc_key>`는 HWP 산출 폴더명(`data/v2/<sanitize된_파일명>/`)과 **동일**하게 맞춥니다.
 
-### 1) HWP 파이프라인 (`myenv`)
+### 1) 텍스트 파이프라인 (`llm_team2`)
 
 ```bash
+source ~/llm_team2/bin/activate
+
 python -m src.cli run-pipeline \
-  --input-dir "data/raw/RFP_file_96" \
+  --input-dir "data/raw/RFP_file_100" \
   --output-dir "data/v2" \
+  --recursive \
   --force-real
 ```
 
-### 2) OCR 파이프라인 (`ocr_vl15` → `myenv`)
+### 1.5) OCR용 이미지 추출 (`llm_team2`)
 
 ```bash
-# ocr_vl15 — 전체 또는 DOC_KEY=... ./scripts/run_ocr_stage.sh
-./scripts/run_ocr_stage.sh
-
-# myenv — handoff 임베딩
-source ~/myenv/bin/activate
-./scripts/run_rag_stage.sh
+python -m src.cli extract-ocr-images \
+  --input-dir "data/raw/RFP_file_100" \
+  --output-dir "data/v2/ocr_images" \
+  --recursive
 ```
 
-산출: `data/v2/ocr_rag/ocr_input_chunks.jsonl`, `data/v2/ocr_rag/ocr_input_embedded.jsonl`
-
-### 3) 통합 Chroma (`myenv`) — query·eval 공용
+### 2) OCR — GT 없이 추론 + chunk export (`ocr_vl15`)
 
 ```bash
-python -m src.cli merge-embedded \
-  --config configs/default.yaml \
+conda activate ocr_vl15
+export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}   # WSL + NVIDIA GPU일 때만
+
+OCR_USE_GT=0 ./scripts/run_ocr_stage.sh
+
+wc -l data/v2/ocr_rag/ocr_input_chunks.jsonl
+```
+
+- `OCR_USE_GT=0` → GT 없이 `inference/*` 생성 + `ocr-export-rag --allow-inference-only`
+- 산출: `data/v2/ocr_outputs/.../inference/*`, `data/v2/ocr_rag/ocr_input_chunks.jsonl`
+
+### 2.5) OCR 임베딩 + OCR 전용 Chroma (`llm_team2`)
+
+```bash
+source ~/llm_team2/bin/activate
+
+python -m src.cli embed-jsonl \
+  --input data/v2/ocr_rag/ocr_input_chunks.jsonl \
+  --output data/v2/ocr_rag/ocr_input_embedded.jsonl \
+  --force-real
+
+python -m src.cli build-chroma \
+  --input data/v2/ocr_rag/ocr_input_embedded.jsonl \
+  --index-dir data/v2/ocr_rag/chroma_index
+```
+
+### 3) 통합 Chroma (`llm_team2`) — query·eval 공용
+
+```bash
+python -m src.cli --config configs/default.yaml merge-embedded \
   --input-dir data/v2 \
+  --pattern "*embedded*.jsonl" \
   --index-dir checkpoints/chroma_openai
 ```
 
 HWP `*_embedded.jsonl`과 `ocr_input_embedded.jsonl`이 함께 병합됩니다.  
-eval/query는 **`checkpoints/chroma_openai`만** 사용합니다 (`ocr_rag/chroma_index` 아님).
+eval/query는 `**checkpoints/chroma_openai`만** 사용합니다 (`ocr_rag/chroma_index` 아님).
 
 ### 4) 질의 테스트
 
@@ -177,32 +225,45 @@ python -m src.cli --config configs/default.yaml query \
   "BIFF 온라인서비스 재개발 사업의 주요 과업 범위는 뭐야?"
 ```
 
-### 5) (선택) 청킹 샘플링
+### 6) 평가 질문 입력 (`llm_team2`)
 
-```bash
-python -m src.cli sampling \
-  --input-dir data/v2 \
-  --pattern "*_chunks.jsonl" \
-  --output data/v2/eval_sample_chunks.jsonl
-```
-
-### 6~8) 평가 질문셋 · harness · 리포트
+`sampling` 없이 `data/v2` 하위 `*_chunks.jsonl`과 `ocr_input_chunks.jsonl`을 함께 읽습니다.
 
 ```bash
 python -m src.evaluation.generate_eval_questions \
   --input-dir data/v2 \
-  --max-docs 5 --max-chunks-per-doc 12 --questions-per-doc 5 \
-  --output data/v2/eval_question_generation_inputs.jsonl --overwrite
+  --max-docs 100 \
+  --max-chunks-per-doc 12 \
+  --questions-per-doc 5 \
+  --output data/v2/eval_question_generation_inputs.jsonl \
+  --overwrite
+```
 
+### 7) OpenAI 질문셋
+
+```bash
 python -m src.evaluation.generate_eval_questions \
   --call-openai \
   --generation-input data/v2/eval_question_generation_inputs.jsonl \
   --eval-output data/v2/eval_questions.jsonl \
-  --model gpt-5-mini --overwrite
+  --model gpt-5-mini \
+  --overwrite
+```
 
+### 8) harness
+
+```bash
 python -m src.cli --config configs/default.yaml evaluate-harness \
-  --output outputs/eval_harness_results.jsonl --judge-model gpt-5-mini
+  --output outputs/eval_harness_results.jsonl \
+  --judge-model gpt-5-mini \
+  --no-langsmith-feedback
+```
 
+`--no-langsmith-feedback`: 로컬 jsonl·리포트에는 영향 없음. LangSmith feedback API에 `total_latency_ms` 등을 보낼 때 score 범위 초과(422)를 피하기 위함. trace는 별도 설정 시 남을 수 있음.
+
+### 9) 리포트 (점수·오답노트)
+
+```bash
 python -m src.evaluation.build_eval_report \
   --input outputs/eval_harness_results.jsonl \
   --html-output outputs/eval_report.html \
@@ -211,8 +272,9 @@ python -m src.evaluation.build_eval_report \
   --top-n 500
 ```
 
-6번은 HWP `*_chunks.jsonl`과 `ocr_input_chunks.jsonl`을 **항상** 함께 읽습니다.  
-리포트 HTML에 `eval_focus`(본문 vs OCR 이미지) 구간이 포함됩니다.
+리포트 HTML에 `eval_focus`(본문 vs OCR 이미지) 구간이 포함됩니다. **점수·오답 분석은 이 HTML/CSV가 본체**입니다.
+
+긴 단계는 `nohup ... > logs/단계명.log 2>&1 &` 로 백그라운드 실행을 권장합니다. 디스크 여유 **10GB+** 권장 (`df -h`).
 
 ## HWP 파싱/청킹/임베딩 파이프라인
 
@@ -327,8 +389,6 @@ python -m src.cli merge-embedded \
 
 `OPENAI_API_KEY`가 없으면 `mock` 임베딩으로 동작하고, 실 API 강제 검증은 `--force-real` 옵션을 사용합니다.
 
-
-
 ## 실험 포인트
 
 - 청킹: `chunk_size`, `chunk_overlap`, 목차/장절 기반 의미 청킹 비교
@@ -383,8 +443,8 @@ python -m src.cli sampling \
 
 기준 청킹 결과와 overlap을 맞춰야 하는 경우 `chunk-jsonl`에 `--text-overlap 150`을 추가합니다.
 
-
 ## OCR 파이프라인
+
 ### OCR 환경 설치
 
 ```bash
@@ -417,6 +477,7 @@ export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH}
 ```
 
 입력/출력 규칙:
+
 - 이미지 입력: `data/v2/ocr_images/<doc_key>/img_001.jpg`
 - GT 입력: `data/v2/ocr_outputs/incoming_gt/<doc_key>.jsonl` (없으면 `.json` fallback)
 - 결과 출력:
@@ -431,10 +492,12 @@ export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH}
 - `--doc-key`는 파일명이 아니라 `ocr_images` 하위 폴더명입니다.
 
 GT 의존성:
+
 - 기본 모드에서는 GT가 있어야 `eval/*`까지 생성됩니다.
 - `--no-gt`(또는 `OCR_NO_GT=1`)를 쓰면 GT 없이 `inference/*`만 생성하는 추론 전용 모드로 동작합니다.
 
 Threshold 의미:
+
 - `--score-threshold`:
   - OCR 예측 생성 단계의 confidence 하한값입니다.
   - 이 값보다 낮은 인식 결과는 `eval/gt_pred_structured.json` 구성에서 제외됩니다.
@@ -580,6 +643,7 @@ OCR과 RAG는 의존성 충돌 방지를 위해 가상환경을 분리해서 실
 ```
 
 기본 동작(중요):
+
 - `run_ocr_stage.sh` 기본값은 GT 없이 추론 전용 모드입니다.
   - 기본값: `OCR_USE_GT=0`
 - GT 없이 추론 전용으로 실행하려면 `OCR_USE_GT=0`으로 실행하세요.
@@ -588,8 +652,6 @@ OCR과 RAG는 의존성 충돌 방지를 위해 가상환경을 분리해서 실
   - `EXCLUDE_REVIEW_REQUIRED=1`일 때만 `review_required=true` 항목을 제외합니다.
 - `USE_DOC_UNWARPING=0`이 기본값입니다.
 - `INCLUDE_HTML_CHUNK=0`이 기본값입니다. 즉 HTML 스니펫은 RAG 청크에 기본 포함되지 않습니다.
-
-
 
 선택한 일부 폴더만 OCR 수행 후 RAG handoff 파일로 내보내기:
 
@@ -626,11 +688,13 @@ INCLUDE_HTML_CHUNK=1 HTML_CHUNK_MAX_CHARS=1200 ./scripts/run_ocr_stage.sh
 ```
 
 `run_ocr_stage.sh` 산출물 (`OCR_USE_GT=0`, 추론 전용):
+
 - `data/v2/ocr_outputs/<engine>/<doc_key>/<image_stem>/inference/*`
 - `data/v2/ocr_rag/ocr_input_manifest.jsonl`
 - `data/v2/ocr_rag/ocr_input_chunks.jsonl`
 
 GT 모드(`OCR_USE_GT=1`) 산출물:
+
 - `data/v2/ocr_rag/ocr_input_manifest.jsonl`
 - `data/v2/ocr_rag/ocr_input_chunks.jsonl`
 
@@ -679,12 +743,14 @@ OCR_USE_GT=1 \
 ```
 
 `run_rag_stage.sh` 기본 산출물:
+
 - `data/v2/ocr_rag/ocr_input_embedded.jsonl`
 - `data/v2/ocr_rag/chroma_index/`
 
 eval/query에서 OCR을 검색하려면 위 embedded를 **통합 인덱스** 절의 `merge-embedded`로 `checkpoints/chroma_openai`에 병합하세요.
 
 운영 원칙:
+
 - 팀 간 OCR→RAG 인터페이스 파일은 `data/v2/ocr_rag/ocr_input_chunks.jsonl` 단일 파일로 고정합니다.
 - `chroma_index/`는 RAG 임베딩/인덱싱 이후의 런타임 산출물이며 전달 표준 포맷이 아닙니다.
 - `pred_table_layout.html`은 사람 검수용 참고 파일이며, 기본 RAG 입력 계약 포맷이 아닙니다.
@@ -714,3 +780,4 @@ python -m src.cli ocr-export-rag \
   - `structure_micro_recall`, `structure_macro_f1`
   - `structure.aggregate` (`matched`, `gt_total`, `pred_total`, `micro_precision`, `micro_recall`, `micro_f1`, `macro_f1`)
   - `table_html.exists`, `table_rows.exists`
+
