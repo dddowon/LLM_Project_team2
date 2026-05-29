@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class PathConfig(BaseModel):
@@ -33,9 +33,25 @@ class ChunkingConfig(BaseModel):
     min_chunk_chars: int = 80
 
 
+class HybridRetrievalConfig(BaseModel):
+    enabled: bool = False
+    dense_top_k: int = 40
+    bm25_top_k: int = 40
+    rrf_k: int = 60
+
+
+class RerankerConfig(BaseModel):
+    enabled: bool = False
+    model: str = "BAAI/bge-reranker-v2-m3"
+    top_k: int = 20
+    device: str = "auto"
+
+
 class RetrievalConfig(BaseModel):
     top_k: int = 5
     score_threshold: float = 0.0
+    hybrid: HybridRetrievalConfig = Field(default_factory=HybridRetrievalConfig)
+    reranker: RerankerConfig = Field(default_factory=RerankerConfig)
 
 
 class GenerationConfig(BaseModel):
