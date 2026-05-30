@@ -124,7 +124,14 @@ def evaluate(config_path: str) -> None:
     for item in tqdm(questions, desc="Evaluating"):
         question = item["question"]
         doc_id = str(item.get("doc_id") or "").strip() or None
-        result = engine.answer(question, doc_id=doc_id)
+        question_type = str(item.get("question_type") or "").strip() or None
+        category = str(item.get("category") or "").strip() or None
+        result = engine.answer(
+            question,
+            doc_id=doc_id,
+            question_type=question_type,
+            category=category,
+        )
         rows.append({**item, **result})
     write_jsonl(config.paths.evaluation_output, rows)
     print(f"Wrote evaluation results -> {config.paths.evaluation_output}")
@@ -134,6 +141,7 @@ def evaluate_harness(
     config_path: str,
     *,
     output_path: str | None,
+    evaluation_set: str | None,
     judge_model: str,
     no_llm_judge: bool,
     no_correctness_judge: bool,
@@ -143,6 +151,7 @@ def evaluate_harness(
 
     out, summary = run_eval_harness(
         config_path,
+        evaluation_set=Path(evaluation_set) if evaluation_set else None,
         output_path=Path(output_path) if output_path else None,
         judge_model=judge_model,
         run_llm_judge=not no_llm_judge,
@@ -2713,6 +2722,11 @@ def main() -> None:
         help="Output JSONL path (default: outputs/eval_harness_results.jsonl)",
     )
     harness_parser.add_argument(
+        "--evaluation-set",
+        default=None,
+        help="Eval questions JSONL (default: paths.evaluation_set in config)",
+    )
+    harness_parser.add_argument(
         "--judge-model",
         default="gpt-5-mini",
         help="OpenAI chat model for faithfulness/relevance scoring",
@@ -3301,6 +3315,7 @@ def main() -> None:
         evaluate_harness(
             args.config,
             output_path=args.output,
+            evaluation_set=args.evaluation_set,
             judge_model=args.judge_model,
             no_llm_judge=args.no_llm_judge,
             no_correctness_judge=args.no_correctness_judge,

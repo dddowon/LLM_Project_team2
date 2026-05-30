@@ -10,6 +10,10 @@ from typing import Any
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from src.engine.question_taxonomy import (
+    COVER_FORM_CATEGORY,
+    is_cover_form_metadata_question,
+)
 from src.models.openai_client import supports_chat_temperature
 from src.utils.jsonl import read_jsonl, write_jsonl
 
@@ -256,58 +260,6 @@ SINGLE_ANSWER_GENERATION_RULES = """[단일 정답 — answerable 질문 공통]
 - summary 타입이라도 **열거·개수·단일 팩트**가 아니면 만들지 마세요.
   summary는 2~3개 bullet 요지를 expected에 적되, 질문은 "주요 목적을 요약"처럼 **고정 서술**만 허용합니다.
 - comparison은 A·B 각각 **한 필드**만 묻거나, 차이/공통 **한 가지**만 묻세요."""
-
-COVER_FORM_CATEGORY = "부록·양식"
-
-COVER_FORM_TOPIC_PHRASES: tuple[str, ...] = (
-    "이메일",
-    "e-mail",
-    "e mail",
-    "연락처",
-    "전화번호",
-    "전화 번호",
-    "휴대폰",
-    "휴대전화",
-    "성명",
-    "담당자",
-    "사업책임자",
-    "작성 연월",
-    "작성연월",
-    "작성 연도",
-    "작성연도",
-    "연도 및 월",
-    "연월",
-)
-
-COVER_FORM_CONTEXT_PATTERN = re.compile(
-    r"표지|제안요청서\s*\(?\s*표지|목차|서약서|양식|표\s*상단",
-    re.I,
-)
-
-COVER_FORM_DATE_PATTERN = re.compile(
-    r"작성\s*(?:연월|연도)|(?:연도|년도)\s*(?:및|/)?\s*월|연월",
-    re.I,
-)
-
-
-def is_cover_form_metadata_question(question: str) -> bool:
-    """표지·양식 메타(연락처·성명·이메일·작성연월 등) 질문 여부."""
-    q = str(question or "").strip()
-    if not q:
-        return False
-    q_cf = q.casefold()
-
-    if "@" in q or any(p.casefold() in q_cf for p in COVER_FORM_TOPIC_PHRASES):
-        return True
-    if COVER_FORM_DATE_PATTERN.search(q):
-        return True
-    if COVER_FORM_CONTEXT_PATTERN.search(q) and re.search(
-        r"연락|전화|이메일|성명|담당|연월|연도|작성",
-        q,
-        re.I,
-    ):
-        return True
-    return False
 
 
 def normalize_eval_row_category(row: dict[str, Any]) -> dict[str, Any]:
