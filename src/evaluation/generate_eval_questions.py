@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import warnings
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,131 @@ from src.utils.jsonl import read_jsonl, write_jsonl
 
 _GENERIC_DOC_PARENT_NAMES = frozenset({"data", "v2", "raw", "processed", "outputs", "ocr_rag"})
 DEFAULT_OCR_CHUNKS_REL = Path("ocr_rag/ocr_input_chunks.jsonl")
+
+# unanswerable 질문이 문서 주제(예산·기간·요구사항 등)와 겹치면 RAG가 관련 청크를 가져와 거절 평가가 깨짐.
+UNANSWERABLE_FORBIDDEN_PHRASES: tuple[str, ...] = (
+    "총 사업비",
+    "총 계약",
+    "총액",
+    "총 사업",
+    "사업비",
+    "계약금",
+    "소요예산",
+    "입찰보증",
+    "사업기간",
+    "개발기간",
+    "용역기간",
+    "계약 기간",
+    "주관기관",
+    "발주기관",
+    "수요기관",
+    "이 사업",
+    "본 사업",
+    "해당 사업",
+    "본 제안",
+    "이 문서",
+    "본 문서",
+    "제안요청서",
+    "별지 제",
+    "요구사항 명칭",
+    "요구사항 번호",
+)
+
+UNANSWERABLE_DOC_SCOPED_PATTERN = re.compile(
+    r"(이|본|해당)\s*(사업|문서|제안|계약|용역|공고|과업|사업의)",
+    re.I,
+)
+
+UNANSWERABLE_REQUIREMENT_ID_PATTERN = re.compile(
+    r"\b(?:SFR|PMR|DAR|ECR|SER|TER|MPR|PER|QMR)-\s*\d+",
+    re.I,
+)
+
+_UNANSWERABLE_QUESTION_TOKEN_PATTERN = re.compile(r"[가-힣]{3,}|[A-Za-z]{4,}")
+
+_UNANSWERABLE_TOKEN_STOPWORDS = frozenset(
+    {
+        "무엇",
+        "어떻게",
+        "얼마",
+        "있는",
+        "있나",
+        "있습",
+        "되어",
+        "대한",
+        "관련",
+        "문서",
+        "확인",
+        "기재",
+        "명시",
+        "제공",
+        "해당",
+        "경우",
+        "여부",
+        "내용",
+        "항목",
+        "질문",
+        "답변",
+        "가능",
+    }
+)
+
+
+def corpus_text_blob(chunks: list[dict[str, Any]]) -> str:
+    return "\n".join(str(chunk.get("text") or "") for chunk in chunks if isinstance(chunk, dict)).casefold()
+
+
+def unanswerable_filter_reason(
+    question: str,
+    chunks: list[dict[str, Any]],
+) -> str | None:
+    """unanswerable 후보가 문서 주제와 겹치면 제외 사유를 반환. 통과 시 None."""
+    q = str(question or "").strip()
+    if not q:
+        return "empty_question"
+    q_cf = q.casefold()
+
+    for phrase in UNANSWERABLE_FORBIDDEN_PHRASES:
+        if phrase.casefold() in q_cf:
+            return f"forbidden_phrase:{phrase}"
+
+    if UNANSWERABLE_DOC_SCOPED_PATTERN.search(q):
+        return "doc_scoped_wording"
+
+    if UNANSWERABLE_REQUIREMENT_ID_PATTERN.search(q):
+        return "requirement_id_in_question"
+
+    blob = corpus_text_blob(chunks)
+    if not blob:
+        return None
+
+    tokens = [
+        t
+        for t in _UNANSWERABLE_QUESTION_TOKEN_PATTERN.findall(q)
+        if t.casefold() not in _UNANSWERABLE_TOKEN_STOPWORDS
+    ]
+    if len(tokens) >= 2:
+        hits = sum(1 for t in tokens if t.casefold() in blob)
+        if hits >= 2 or (len(tokens) <= 3 and hits == len(tokens)):
+            return "corpus_keyword_overlap"
+
+    return None
+
+
+UNANSWERABLE_GENERATION_RULES = """[unanswerable 전용 — 다른 모든 지침보다 우선]
+- 질문 주제는 아래 "문서 청크"와 **완전히 무관**한 외부 사실만 다루세요.
+- 이 문서·이 사업·본 제안·요구사항 번호(SFR/PMR 등)·총 사업비/계약금/사업기간/주관기관처럼
+  RFP 본문에 자주 나오는 표현으로 질문하지 마세요. (검색에 걸려 거절 평가가 무의미해짐)
+- 좋은 예 (주제가 문서와 분리됨):
+  - "국토교통부 스마트시티 관련 국가 예산 규모는?" (본 HWP와 무관한 타 부처)
+  - "AWS GovCloud의 FedRAMP 인증 범위는?" (본문에 없는 외부 클라우드)
+  - "EU MDR 전체 인증 절차 단계는?" (본문에 조문 전문이 없을 때)
+- 나쁜 예 (금지 → fact로 만들거나 unanswerable로 두지 말 것):
+  - "이 사업의 총 사업비는?"
+  - "요구사항 SFR-005의 명칭은?"
+  - "주관기관은 어디인가?"
+- expected_answer: "문서에서 확인되지 않음" (또는 동의어), gold_chunk_ids: []
+"""
 
 
 def is_ocr_handoff_chunk_file(path: Path) -> bool:
@@ -277,6 +403,8 @@ def build_question_generation_prompt(
 """
         ratio_image = ""
 
+    unanswerable_rules = UNANSWERABLE_GENERATION_RULES
+
     return f"""당신은 RAG 성능평가용 질문셋 생성자입니다.
 아래 문서 청크만 근거로 평가 질문을 생성하세요. (다른 문서·외부 지식·추측 금지)
 
@@ -299,15 +427,17 @@ def build_question_generation_prompt(
 2. expected_answer의 핵심 수치·고유명사는 gold_chunk_ids가 가리키는 청크 text에 실제로 있어야 함 (unanswerable 제외).
 3. ground_truth_keywords는 해당 청크 text에 그대로 등장하는 단어·숫자만 (2~5개).
 4. comparison은 A·B 모두가 청크에 있을 때만. 없으면 fact/summary로 바꾸거나 unanswerable.
-5. unanswerable은 "이 문서 청크 어디에도 없는" 내용만. 타 기관·타 사업·외부 정책 등.
+5. unanswerable은 "이 문서 청크 어디에도 없는" **외부 주제**만. 타 기관·타 사업·미언급 법령·타 제품 등.
 6. doc_id는 항상 "{doc_id}".
+
+{unanswerable_rules}
 
 [평가 관점 — question_type]
 - fact, requirement_detail: 단일 사실·요구사항
 - summary: 여러 청크 종합
 - follow_up: 같은 문서 안 선행 맥락 1문장 전제
 - comparison: 동일 문서 내 두 항목 대조 (근거 둘 다 있을 때만)
-- unanswerable: 제공 청크에 없음 → expected_answer는 "문서에서 확인되지 않음", gold_chunk_ids는 []
+- unanswerable: 제공 청크와 주제가 분리됨 → expected_answer는 "문서에서 확인되지 않음", gold_chunk_ids는 []
 
 {ocr_rules}
 category 예: 기능 요구사항, 보안, 일정, 예산, 입찰·계약, 부록·양식{", 이미지" if has_ocr else ""}.
@@ -434,6 +564,7 @@ def generate_questions_with_openai(
     from tqdm.auto import tqdm
 
     output_rows: list[dict[str, Any]] = []
+    dropped_unanswerable = 0
     progress = tqdm(rows, desc="Generating eval questions", unit="doc")
     for row in progress:
         prompt = str(row.get("prompt", "")).strip()
@@ -470,6 +601,13 @@ def generate_questions_with_openai(
                 if gold_ids:
                     # 모델이 잘못 청크를 붙인 unanswerable은 제외 (답 가능 질문으로 오염 방지)
                     continue
+                reject = unanswerable_filter_reason(
+                    str(question.get("question") or ""),
+                    chunks_for_row,
+                )
+                if reject:
+                    dropped_unanswerable += 1
+                    continue
                 question["gold_chunk_ids"] = []
             elif not gold_ids:
                 continue
@@ -491,6 +629,8 @@ def generate_questions_with_openai(
     write_jsonl(output_path, output_rows)
     print(f"wrote_eval_questions: {output_path}")
     print(f"questions: {len(output_rows)}")
+    if dropped_unanswerable:
+        print(f"dropped_unanswerable (topic overlap filter): {dropped_unanswerable}")
 
 
 def main() -> None:
