@@ -127,6 +127,208 @@ def unanswerable_filter_reason(
     return None
 
 
+# 「중 하나」「모두 나열」 등은 expected 한 줄 채점과 맞지 않아 fact 단일 정답으로 유도한다.
+OPEN_ENDED_QUESTION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"중\s*하나", re.I),
+    re.compile(r"하나(?:를|만)?\s*(?:적|쓰|골라|고르|말)", re.I),
+    re.compile(r"모두\s*나열", re.I),
+    re.compile(r"전부\s*나열", re.I),
+    re.compile(r"(?:세|3)\s*가지(?:를)?\s*적", re.I),
+    re.compile(r"몇\s*가지(?:를)?\s*적", re.I),
+    re.compile(r"(?:예시|항목).{0,12}중\s*(?:하나|일부)", re.I),
+)
+
+_REQUIREMENT_ID_IN_QUESTION = re.compile(
+    r"((?:SFR|PMR|DAR|ECR|SER|TER|MPR|PER|QMR|COR|SOR)-\s*\d+(?:-\d+)?)",
+    re.I,
+)
+
+
+def open_ended_question_filter_reason(question: str) -> str | None:
+    """열거형·다중 정답 질문이면 제외 사유 반환. 통과 시 None."""
+    q = str(question or "").strip()
+    if not q:
+        return "empty_question"
+    for pattern in OPEN_ENDED_QUESTION_PATTERNS:
+        if pattern.search(q):
+            return "open_ended_wording"
+    return None
+
+
+def _first_expected_item(expected_answer: str) -> str:
+    text = str(expected_answer or "").strip()
+    if not text:
+        return ""
+    for sep in (";", " / ", " · ", " 및 "):
+        if sep in text:
+            text = text.split(sep, 1)[0]
+    for sep in (",", "，"):
+        if sep in text:
+            text = text.split(sep, 1)[0]
+    return text.strip(" .)")
+
+
+def _count_cor_ids(keywords: list[str], expected_answer: str) -> int:
+    cor_ids = {
+        token
+        for token in keywords
+        if re.fullmatch(r"COR-\d+", str(token).strip(), flags=re.I)
+    }
+    if cor_ids:
+        return len(cor_ids)
+    found = _REQUIREMENT_ID_IN_QUESTION.findall(expected_answer)
+    cor_ids = {item.upper().replace(" ", "") for item in found if item.upper().startswith("COR-")}
+    return len(cor_ids)
+
+
+def rewrite_open_ended_eval_row(row: dict[str, Any]) -> dict[str, Any]:
+    """기존 eval 행의 열거형 질문을 단일 정답 fact 형태로 변환."""
+    question = str(row.get("question") or "").strip()
+    if not open_ended_question_filter_reason(question):
+        return row
+
+    out = dict(row)
+    expected = str(row.get("expected_answer") or "").strip()
+    keywords = [str(k) for k in (row.get("ground_truth_keywords") or []) if str(k).strip()]
+    gold_ids = [str(g) for g in (row.get("gold_chunk_ids") or []) if str(g).strip()]
+    q_cf = question.casefold()
+
+    if "모두 나열" in q_cf or "전부 나열" in q_cf:
+        if "cor" in q_cf or any(k.upper().startswith("COR-") for k in keywords):
+            count = _count_cor_ids(keywords, expected) or 4
+            out.update(
+                {
+                    "question": "제약사항(COR) 고유번호는 해당 목록에 총 몇 개가 명시되어 있는가?",
+                    "question_type": "fact",
+                    "expected_answer": f"{count}개",
+                    "ground_truth_keywords": keywords[:5] if keywords else [],
+                    "gold_chunk_ids": gold_ids[:1],
+                    "difficulty": "easy",
+                }
+            )
+            return out
+
+    if re.search(r"중\s*하나", question, re.I):
+        item = _first_expected_item(expected)
+        req_match = _REQUIREMENT_ID_IN_QUESTION.search(question)
+        req_id = req_match.group(1) if req_match else "해당 요구사항"
+        if item:
+            out.update(
+                {
+                    "question": f"{req_id} 산출정보에 '{item}'가 명시되어 있는가?",
+                    "question_type": "fact",
+                    "expected_answer": f"예 ({item})",
+                    "ground_truth_keywords": [w for w in [req_id.replace(" ", ""), item] if w],
+                    "gold_chunk_ids": gold_ids[:1],
+                    "difficulty": "easy",
+                }
+            )
+            return out
+
+    if re.search(r"(?:세|3)\s*가지(?:를)?\s*적", question, re.I):
+        item = keywords[0] if keywords else _first_expected_item(expected)
+        if item:
+            out.update(
+                {
+                    "question": f"문서 산출정보(예시)에 '{item}'이 명시되어 있는가?",
+                    "question_type": "fact",
+                    "expected_answer": f"예 ({item})",
+                    "ground_truth_keywords": [item],
+                    "gold_chunk_ids": gold_ids[:1],
+                    "difficulty": "easy",
+                }
+            )
+            return out
+
+    return row
+
+
+SINGLE_ANSWER_GENERATION_RULES = """[단일 정답 — answerable 질문 공통]
+- expected_answer는 **하나의 짧은 정답**(단어·숫자·한 문장)만 적으세요. 채점은 이 한 줄과 비교합니다.
+- 금지 표현 (이런 질문은 만들지 말 것):
+  - "중 하나", "하나만 적으세요", "예시 중", "일부", "몇 가지를 적"
+  - "모두 나열", "전부 나열", "전체 ID 나열"
+- 대신 fact / requirement_detail 로 **구체 항목 하나**만 묻세요.
+- 좋은 예:
+  - "DAR-004 산출정보에 '데이터 주제영역 정의서'가 명시되어 있는가?" → expected: "예 (데이터 주제영역 정의서)"
+  - "COR-005의 제약 내용은?" → expected: (해당 COR-005 문장 요지)
+  - "제약사항(COR) 고유번호는 목록에 총 몇 개인가?" → expected: "4개"
+- summary 타입이라도 **열거·개수·단일 팩트**가 아니면 만들지 마세요.
+  summary는 2~3개 bullet 요지를 expected에 적되, 질문은 "주요 목적을 요약"처럼 **고정 서술**만 허용합니다.
+- comparison은 A·B 각각 **한 필드**만 묻거나, 차이/공통 **한 가지**만 묻세요."""
+
+COVER_FORM_CATEGORY = "부록·양식"
+
+COVER_FORM_TOPIC_PHRASES: tuple[str, ...] = (
+    "이메일",
+    "e-mail",
+    "e mail",
+    "연락처",
+    "전화번호",
+    "전화 번호",
+    "휴대폰",
+    "휴대전화",
+    "성명",
+    "담당자",
+    "사업책임자",
+    "작성 연월",
+    "작성연월",
+    "작성 연도",
+    "작성연도",
+    "연도 및 월",
+    "연월",
+)
+
+COVER_FORM_CONTEXT_PATTERN = re.compile(
+    r"표지|제안요청서\s*\(?\s*표지|목차|서약서|양식|표\s*상단",
+    re.I,
+)
+
+COVER_FORM_DATE_PATTERN = re.compile(
+    r"작성\s*(?:연월|연도)|(?:연도|년도)\s*(?:및|/)?\s*월|연월",
+    re.I,
+)
+
+
+def is_cover_form_metadata_question(question: str) -> bool:
+    """표지·양식 메타(연락처·성명·이메일·작성연월 등) 질문 여부."""
+    q = str(question or "").strip()
+    if not q:
+        return False
+    q_cf = q.casefold()
+
+    if "@" in q or any(p.casefold() in q_cf for p in COVER_FORM_TOPIC_PHRASES):
+        return True
+    if COVER_FORM_DATE_PATTERN.search(q):
+        return True
+    if COVER_FORM_CONTEXT_PATTERN.search(q) and re.search(
+        r"연락|전화|이메일|성명|담당|연월|연도|작성",
+        q,
+        re.I,
+    ):
+        return True
+    return False
+
+
+def normalize_eval_row_category(row: dict[str, Any]) -> dict[str, Any]:
+    if not is_cover_form_metadata_question(str(row.get("question") or "")):
+        return row
+    out = dict(row)
+    out["category"] = COVER_FORM_CATEGORY
+    return out
+
+
+COVER_FORM_CATEGORY_RULES = f"""[category — 표지·양식 메타 ({COVER_FORM_CATEGORY})]
+- 질문이 아래 **표지/양식 메타**를 묻으면 category는 반드시 "{COVER_FORM_CATEGORY}" 로 지정하세요.
+  (입찰·계약, 연락처 등 다른 category 사용 금지)
+- 해당 주제: 담당자·사업책임자 **성명**, **연락처/전화번호**, **이메일**, **작성 연월·연도**, 표지/제안요청서(표지)/목차 상단 연월
+- 좋은 예:
+  - "제안서 표지의 작성 연월은?" → category: {COVER_FORM_CATEGORY}
+  - "담당자 이메일은?" → category: {COVER_FORM_CATEGORY}
+  - "사업책임자 성명은?" → category: {COVER_FORM_CATEGORY}
+- 요구사항 ID·기능·예산·일정 본문은 {COVER_FORM_CATEGORY}가 아닙니다."""
+
+
 UNANSWERABLE_GENERATION_RULES = """[unanswerable 전용 — 다른 모든 지침보다 우선]
 - 질문 주제는 아래 "문서 청크"와 **완전히 무관**한 외부 사실만 다루세요.
 - 이 문서·이 사업·본 제안·요구사항 번호(SFR/PMR 등)·총 사업비/계약금/사업기간/주관기관처럼
@@ -404,6 +606,8 @@ def build_question_generation_prompt(
         ratio_image = ""
 
     unanswerable_rules = UNANSWERABLE_GENERATION_RULES
+    single_answer_rules = SINGLE_ANSWER_GENERATION_RULES
+    cover_form_rules = COVER_FORM_CATEGORY_RULES
 
     return f"""당신은 RAG 성능평가용 질문셋 생성자입니다.
 아래 문서 청크만 근거로 평가 질문을 생성하세요. (다른 문서·외부 지식·추측 금지)
@@ -429,6 +633,10 @@ def build_question_generation_prompt(
 4. comparison은 A·B 모두가 청크에 있을 때만. 없으면 fact/summary로 바꾸거나 unanswerable.
 5. unanswerable은 "이 문서 청크 어디에도 없는" **외부 주제**만. 타 기관·타 사업·미언급 법령·타 제품 등.
 6. doc_id는 항상 "{doc_id}".
+
+{single_answer_rules}
+
+{cover_form_rules}
 
 {unanswerable_rules}
 
@@ -565,6 +773,7 @@ def generate_questions_with_openai(
 
     output_rows: list[dict[str, Any]] = []
     dropped_unanswerable = 0
+    dropped_open_ended = 0
     progress = tqdm(rows, desc="Generating eval questions", unit="doc")
     for row in progress:
         prompt = str(row.get("prompt", "")).strip()
@@ -613,6 +822,10 @@ def generate_questions_with_openai(
                 continue
             else:
                 question["gold_chunk_ids"] = gold_ids
+                reject_open = open_ended_question_filter_reason(str(question.get("question") or ""))
+                if reject_open:
+                    dropped_open_ended += 1
+                    continue
             if not question.get("eval_focus"):
                 if is_unanswerable:
                     question["eval_focus"] = "text"
@@ -624,6 +837,7 @@ def generate_questions_with_openai(
                     question["eval_focus"] = "text"
             elif not has_ocr_in_context and question.get("eval_focus") == "ocr_image":
                 question["eval_focus"] = "text"
+            question = normalize_eval_row_category(question)
             output_rows.append(question)
 
     write_jsonl(output_path, output_rows)
@@ -631,6 +845,29 @@ def generate_questions_with_openai(
     print(f"questions: {len(output_rows)}")
     if dropped_unanswerable:
         print(f"dropped_unanswerable (topic overlap filter): {dropped_unanswerable}")
+    if dropped_open_ended:
+        print(f"dropped_open_ended (single-answer filter): {dropped_open_ended}")
+
+
+def rewrite_eval_questions_jsonl(path: Path) -> tuple[int, int, int]:
+    """JSONL eval 질문셋 정규화(열거형→단일 정답, 표지·양식 category)."""
+    rows = read_jsonl(path)
+    if not rows:
+        return 0, 0, 0
+    open_ended_rewritten = 0
+    category_rewritten = 0
+    output: list[dict[str, Any]] = []
+    for row in rows:
+        updated = rewrite_open_ended_eval_row(row)
+        if updated != row:
+            open_ended_rewritten += 1
+        before_category = updated.get("category")
+        updated = normalize_eval_row_category(updated)
+        if updated.get("category") != before_category:
+            category_rewritten += 1
+        output.append(updated)
+    write_jsonl(path, output)
+    return len(output), open_ended_rewritten, category_rewritten
 
 
 def main() -> None:
@@ -676,9 +913,21 @@ def main() -> None:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--call-openai", action="store_true")
+    parser.add_argument(
+        "--rewrite-open-ended",
+        action="store_true",
+        help="eval JSONL 정규화(열거형→단일 정답, 표지·양식 category) (--eval-output 경로 사용)",
+    )
     args = parser.parse_args()
 
     load_dotenv()
+
+    if args.rewrite_open_ended:
+        target = Path(args.eval_output)
+        total, open_ended_rewritten, category_rewritten = rewrite_eval_questions_jsonl(target)
+        print(f"rewrote_eval_questions: {target}")
+        print(f"rows: {total}, open_ended_rewritten: {open_ended_rewritten}, category_rewritten: {category_rewritten}")
+        return
 
     if args.call_openai:
         generate_questions_with_openai(
