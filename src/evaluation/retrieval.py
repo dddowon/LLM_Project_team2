@@ -111,7 +111,7 @@ def evaluate_retrieval_metrics(row: dict[str, Any], contexts: list[Any]) -> dict
     doc_hit = evaluate_doc_hit(str(row.get("doc_id") or ""), contexts)
     keyword_hit = evaluate_keyword_hit(contexts, keywords)
     precision = evaluate_context_precision(contexts, keywords)
-    recall_at_5 = evaluate_recall_at_k(contexts, gold_chunk_ids, k=5)
+    recall_at_5 = evaluate_recall_at_k(contexts, gold_chunk_ids, k=10)
     mrr = evaluate_mrr(contexts, gold_chunk_ids)
 
     return {
