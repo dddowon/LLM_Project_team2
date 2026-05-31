@@ -159,6 +159,51 @@ def open_ended_question_filter_reason(question: str) -> str | None:
     return None
 
 
+# img_001, OCR ID, chunk_id 등은 사용자 질문이 아니라 파이프라인 내부 식별자.
+OCR_INTERNAL_ID_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"img_\d+", re.I),
+    re.compile(r"image_stem", re.I),
+    re.compile(r"ocr\s*id\s*[:=]", re.I),
+    re.compile(r"ocr_chunk_", re.I),
+    re.compile(r"slim_chunk_", re.I),
+)
+
+
+def ocr_internal_id_filter_reason(question: str) -> str | None:
+    """OCR/청크 내부 식별자가 질문에 노출되면 제외 사유 반환. 통과 시 None."""
+    q = str(question or "").strip()
+    if not q:
+        return "empty_question"
+    for pattern in OCR_INTERNAL_ID_PATTERNS:
+        if pattern.search(q):
+            return "ocr_internal_id"
+    return None
+
+
+def rewrite_ocr_internal_id_eval_row(row: dict[str, Any]) -> dict[str, Any]:
+    """img_* 등 내부 ID를 질문에서 제거하고 표/별지 표현으로 치환."""
+    question = str(row.get("question") or "").strip()
+    if not ocr_internal_id_filter_reason(question):
+        return row
+
+    cleaned = question
+    cleaned = re.sub(r"OCR\s*이미지\s*\(\s*img_\d+\s*\)", "표", cleaned, flags=re.I)
+    cleaned = re.sub(r"이미지\s*\(\s*img_\d+\s*\)", "표", cleaned, flags=re.I)
+    cleaned = re.sub(r"이미지\s*\(\s*OCR\s*\)", "표", cleaned, flags=re.I)
+    cleaned = re.sub(r"이미지\s+img_\d+", "표", cleaned, flags=re.I)
+    cleaned = re.sub(r"이미지\s+청크\s*\(\s*img_\d+\s*\)", "표", cleaned, flags=re.I)
+    cleaned = re.sub(r"img_\d+", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\(\s*\)", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,·")
+
+    if not cleaned or ocr_internal_id_filter_reason(cleaned):
+        return row
+
+    out = dict(row)
+    out["question"] = cleaned
+    return out
+
+
 def _first_expected_item(expected_answer: str) -> str:
     text = str(expected_answer or "").strip()
     if not text:
@@ -540,8 +585,13 @@ def build_question_generation_prompt(
 - eval_focus=ocr_image 질문을 {ocr_min}~{ocr_max}개만 포함.
 - 질문은 이미지(스캔)에만 나오는 정보를 묻게 하세요. 예:
   - "별지 검토결과서에서 기재된 추정 사업기간은?"
+  - "검토항목 중 '① 기능점수(FP) 기반 SW사업 적정 개발기간 산정표'의 추정 사업기간은?"
   - "검토항목 중 '추정 사업기간'이 5개월로 적힌 항목은?"
-- OCR 청크의 image_stem·표 행(검토항목/검토의견/추정 사업기간)을 활용하세요.
+- 질문 본문에 img_001, img_004, image_stem, OCR ID, chunk_id, ocr_chunk_* 등
+  **내부 식별자를 절대 쓰지 마세요.** (금지)
+  사용자는 파일명을 모릅니다. **별지·양식명, 표 제목, 검토항목, 열 이름**으로만 물으세요.
+- OCR 청크 text의 표/별지 **제목·검토항목·열 이름**(검토항목/검토의견/추정 사업기간)을 활용하세요.
+  image_stem은 gold_chunk_ids 매칭용 메타일 뿐, 질문 문장에 노출하지 마세요.
 - 텍스트/표 청크에 이미 동일 내용이 있으면, 그 질문은 eval_focus=text로 작성하고 gold_chunk_ids도 텍스트/표 청크를 가리키게 하세요.
 """
         ratio_image = f"- 이미지(eval_focus=ocr_image): {ocr_min}~{ocr_max}개\n"
@@ -726,6 +776,7 @@ def generate_questions_with_openai(
     output_rows: list[dict[str, Any]] = []
     dropped_unanswerable = 0
     dropped_open_ended = 0
+    dropped_ocr_internal_id = 0
     progress = tqdm(rows, desc="Generating eval questions", unit="doc")
     for row in progress:
         prompt = str(row.get("prompt", "")).strip()
@@ -778,6 +829,10 @@ def generate_questions_with_openai(
                 if reject_open:
                     dropped_open_ended += 1
                     continue
+                reject_ocr_id = ocr_internal_id_filter_reason(str(question.get("question") or ""))
+                if reject_ocr_id:
+                    dropped_ocr_internal_id += 1
+                    continue
             if not question.get("eval_focus"):
                 if is_unanswerable:
                     question["eval_focus"] = "text"
@@ -799,27 +854,34 @@ def generate_questions_with_openai(
         print(f"dropped_unanswerable (topic overlap filter): {dropped_unanswerable}")
     if dropped_open_ended:
         print(f"dropped_open_ended (single-answer filter): {dropped_open_ended}")
+    if dropped_ocr_internal_id:
+        print(f"dropped_ocr_internal_id (img_* / chunk id filter): {dropped_ocr_internal_id}")
 
 
-def rewrite_eval_questions_jsonl(path: Path) -> tuple[int, int, int]:
-    """JSONL eval 질문셋 정규화(열거형→단일 정답, 표지·양식 category)."""
+def rewrite_eval_questions_jsonl(path: Path) -> tuple[int, int, int, int]:
+    """JSONL eval 질문셋 정규화(열거형→단일 정답, OCR img_* 제거, 표지·양식 category)."""
     rows = read_jsonl(path)
     if not rows:
-        return 0, 0, 0
+        return 0, 0, 0, 0
     open_ended_rewritten = 0
+    ocr_id_rewritten = 0
     category_rewritten = 0
     output: list[dict[str, Any]] = []
     for row in rows:
         updated = rewrite_open_ended_eval_row(row)
         if updated != row:
             open_ended_rewritten += 1
+        before_ocr = updated.get("question")
+        updated = rewrite_ocr_internal_id_eval_row(updated)
+        if updated.get("question") != before_ocr:
+            ocr_id_rewritten += 1
         before_category = updated.get("category")
         updated = normalize_eval_row_category(updated)
         if updated.get("category") != before_category:
             category_rewritten += 1
         output.append(updated)
     write_jsonl(path, output)
-    return len(output), open_ended_rewritten, category_rewritten
+    return len(output), open_ended_rewritten, ocr_id_rewritten, category_rewritten
 
 
 def main() -> None:
@@ -868,7 +930,7 @@ def main() -> None:
     parser.add_argument(
         "--rewrite-open-ended",
         action="store_true",
-        help="eval JSONL 정규화(열거형→단일 정답, 표지·양식 category) (--eval-output 경로 사용)",
+        help="eval JSONL 정규화(열거형→단일 정답, img_* 제거, 표지·양식 category) (--eval-output 경로 사용)",
     )
     args = parser.parse_args()
 
@@ -876,9 +938,14 @@ def main() -> None:
 
     if args.rewrite_open_ended:
         target = Path(args.eval_output)
-        total, open_ended_rewritten, category_rewritten = rewrite_eval_questions_jsonl(target)
+        total, open_ended_rewritten, ocr_id_rewritten, category_rewritten = rewrite_eval_questions_jsonl(
+            target
+        )
         print(f"rewrote_eval_questions: {target}")
-        print(f"rows: {total}, open_ended_rewritten: {open_ended_rewritten}, category_rewritten: {category_rewritten}")
+        print(
+            f"rows: {total}, open_ended_rewritten: {open_ended_rewritten}, "
+            f"ocr_id_rewritten: {ocr_id_rewritten}, category_rewritten: {category_rewritten}"
+        )
         return
 
     if args.call_openai:

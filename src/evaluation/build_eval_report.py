@@ -464,8 +464,19 @@ def _binary_metric_is_zero(row: dict[str, Any], key: str) -> bool:
     return as_number(row.get(key)) == 0.0
 
 
+def row_correctness_pass(row: dict[str, Any]) -> bool | None:
+    if row.get("correctness_pass") is not None:
+        return bool(row.get("correctness_pass"))
+    score = row.get("correctness_score")
+    if isinstance(score, int):
+        return score_pass(score)
+    return None
+
+
 def is_hallucination_candidate(row: dict[str, Any]) -> bool:
     if row_is_full_refusal(row):
+        return False
+    if row_correctness_pass(row) is True:
         return False
     if _score_below(row, "f_score"):
         return True
@@ -512,10 +523,6 @@ def should_include_in_failures(row: dict[str, Any]) -> bool:
     if row_appropriate_refusal_success(row):
         return False
     if row.get("task_success") is True:
-        if is_hallucination_candidate(row):
-            return True
-        if row_wrong_refusal(row):
-            return True
         return False
     if row.get("failure_reason") or row_wrong_refusal(row):
         return True
