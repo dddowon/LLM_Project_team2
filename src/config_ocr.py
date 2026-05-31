@@ -21,8 +21,16 @@ class OCRConfig(BaseModel):
     batch_size: int = 1
 
 
+class OCRPathConfig(BaseModel):
+    # [Design Intent] Keep OCR I/O paths in one config source for reproducible runs.
+    images_root: str = "data/v2/ocr_images/v4_table_filtered_260531"
+    gt_root: str = "data/v2/ocr_outputs/incoming_gt"
+    output_root: str = "data/v2/ocr_outputs"
+
+
 class OCRAppConfig(BaseModel):
     ocr: OCRConfig = OCRConfig()
+    paths: OCRPathConfig = OCRPathConfig()
 
 
 def load_ocr_config(path: str | Path = "configs/ocr_default.yaml") -> OCRAppConfig:

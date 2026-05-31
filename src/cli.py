@@ -642,6 +642,7 @@ def export_ocr_rag_handoff(
     include_html_chunk: bool,
     html_chunk_max_chars: int,
     allow_inference_only: bool,
+    images_tag: str | None,
 ) -> None:
     from src.pipeline.ocr_rag_bridge import export_ocr_eval_to_rag_inputs
 
@@ -655,6 +656,7 @@ def export_ocr_rag_handoff(
         include_html_chunk=include_html_chunk,
         html_chunk_max_chars=html_chunk_max_chars,
         allow_inference_only=allow_inference_only,
+        images_tag=images_tag,
     )
     print("\n=== OCR Export Summary ===")
     print("1. status: ocr_export_rag_done")
@@ -1705,6 +1707,25 @@ def _resolve_gt_path(gt_root: str, doc_key: str) -> Path:
     return jsonl_path
 
 
+def _infer_ocr_images_tag(images_root: str) -> str:
+    """Infer dataset/version tag from paths like .../ocr_images/<tag>/... ."""
+    parts = Path(images_root).parts
+    for idx, part in enumerate(parts):
+        if part == "ocr_images" and idx + 1 < len(parts):
+            candidate = str(parts[idx + 1]).strip()
+            if candidate:
+                return candidate
+    return ""
+
+
+def _resolve_ocr_engine_output_root(*, output_root: str, ocr_engine: str, images_root: str) -> Path:
+    engine_root = Path(output_root) / _engine_dir_name(ocr_engine)
+    images_tag = _infer_ocr_images_tag(images_root)
+    if images_tag:
+        return engine_root / images_tag
+    return engine_root
+
+
 def _resolve_ocr_doc_paths(
     *,
     doc_key: str,
@@ -1717,9 +1738,12 @@ def _resolve_ocr_doc_paths(
     normalized_engine = _normalize_ocr_engine(ocr_engine)
     image_path = Path(images_root) / doc_key / image_name
     gt_path = _resolve_gt_path(gt_root, doc_key)
-    engine_dir_name = _engine_dir_name(normalized_engine)
     image_stem = Path(image_name).stem
-    out_dir = Path(output_root) / engine_dir_name / doc_key / image_stem
+    out_dir = _resolve_ocr_engine_output_root(
+        output_root=output_root,
+        ocr_engine=normalized_engine,
+        images_root=images_root,
+    ) / doc_key / image_stem
     inference_dir = out_dir / "inference"
     eval_dir = out_dir / "eval"
     pred_raw = inference_dir / "pred_raw.json"
@@ -1938,6 +1962,12 @@ def ocr_run_batch(
     max_long_side: int | None = 2000,
 ) -> None:
     normalized_engine = _normalize_ocr_engine(ocr_engine)
+    engine_out_root = _resolve_ocr_engine_output_root(
+        output_root=output_root,
+        ocr_engine=normalized_engine,
+        images_root=images_root,
+    )
+    images_tag = _infer_ocr_images_tag(images_root)
     shared_model = _build_shared_ocr_model(
         ocr_engine=normalized_engine,
         lang=lang,
@@ -2027,12 +2057,7 @@ def ocr_run_batch(
                     continue
 
                 eval_path = (
-                    Path(output_root)
-                    / _engine_dir_name(normalized_engine)
-                    / doc_key
-                    / Path(path.name).stem
-                    / "eval"
-                    / "gt_eval_summary.json"
+                    engine_out_root / doc_key / Path(path.name).stem / "eval" / "gt_eval_summary.json"
                 )
                 if eval_path.exists():
                     result = json.loads(eval_path.read_text(encoding="utf-8"))
@@ -2178,8 +2203,12 @@ def ocr_run_batch(
     print(f"3. skip: {skip_count}")
     print(f"3-1. skip_image_missing: {skip_image_count}")
     print(f"3-2. skip_gt_missing: {skip_gt_count}")
+    print(f"3-3. images_root: {images_root}")
+    print(f"3-4. output_root: {engine_out_root}")
+    if images_tag:
+        print(f"3-5. images_tag: {images_tag}")
     if skip_image_details:
-        print("3-3. skip_image_missing_details:")
+        print("3-6. skip_image_missing_details:")
         for idx, detail in enumerate(skip_image_details, start=1):
             print(f"  {idx}) doc_key={detail['doc_key']} image={detail['image_name']} reason={detail['reason']}")
     print(f"4. fail: {fail_count}")
@@ -2189,7 +2218,6 @@ def ocr_run_batch(
             print(f"  {idx}) doc_key={detail['doc_key']} image={detail['image_name']} reason={detail['reason']}")
 
     if eval_rows:
-        engine_out_root = Path(output_root) / _engine_dir_name(normalized_engine)
         engine_out_root.mkdir(parents=True, exist_ok=True)
 
         summary_csv_path = engine_out_root / "ocr_eval_summary.csv"
@@ -2300,11 +2328,13 @@ def ocr_run_batch(
             review_queue_path.write_text("", encoding="utf-8")
         print(f"saved_review_queue_jsonl: {review_queue_path}")
     elif not require_gt:
-        engine_out_root = Path(output_root) / _engine_dir_name(normalized_engine)
         engine_out_root.mkdir(parents=True, exist_ok=True)
         inference_summary = {
             "mode": "inference_only",
             "engine": normalized_engine,
+            "images_root": images_root,
+            "images_tag": images_tag,
+            "engine_output_root": str(engine_out_root),
             "total_docs": len(doc_dirs),
             "ok": ok_count,
             "skip": skip_count,
@@ -3043,6 +3073,11 @@ def main() -> None:
         action="store_true",
         help="Allow exporting RAG handoff from inference-only OCR outputs (pred_raw/pred_table_layout) without GT eval files.",
     )
+    ocr_export_parser.add_argument(
+        "--images-tag",
+        default=None,
+        help="Optional OCR images version tag filter (e.g. v4_table_filtered_260531).",
+    )
 
     ocr_parser = subparsers.add_parser(
         "extract-ocr-images",
@@ -3101,19 +3136,16 @@ def main() -> None:
         "ocr-run-image",
         help="Run OCR/eval for one image with doc_key-based path resolution",
     )
-    ocr_image_parser.add_argument("--doc-key", required=True, help="Document key (folder name under ocr_images)")
+    ocr_image_parser.add_argument(
+        "--doc-key",
+        required=True,
+        help="Document key (folder name under paths.images_root from ocr-config)",
+    )
     ocr_image_parser.add_argument(
         "--id",
         default=None,
         help="Target item id. If omitted, auto-detected from GT JSON when unique.",
     )
-    ocr_image_parser.add_argument("--images-root", default="data/v2/ocr_images", help="Root folder of OCR images")
-    ocr_image_parser.add_argument(
-        "--gt-root",
-        default="data/v2/ocr_outputs/incoming_gt",
-        help="Root folder of GT files (.jsonl preferred, .json supported)",
-    )
-    ocr_image_parser.add_argument("--output-root", default="data/v2/ocr_outputs", help="Root folder of OCR outputs")
     ocr_image_parser.add_argument("--image-name", default="img_001.jpg", help="Image filename inside doc folder")
     ocr_image_parser.add_argument("--lang", default="korean", help="PaddleOCR language fallback")
     ocr_image_parser.add_argument(
@@ -3165,17 +3197,10 @@ def main() -> None:
         "ocr-run-batch",
         help="Run OCR/eval for all doc folders under ocr_images",
     )
-    ocr_batch_parser.add_argument("--images-root", default="data/v2/ocr_images", help="Root folder of OCR images")
-    ocr_batch_parser.add_argument(
-        "--gt-root",
-        default="data/v2/ocr_outputs/incoming_gt",
-        help="Root folder of GT files (.jsonl preferred, .json supported)",
-    )
-    ocr_batch_parser.add_argument("--output-root", default="data/v2/ocr_outputs", help="Root folder of OCR outputs")
     ocr_batch_parser.add_argument(
         "--doc-key",
         default=None,
-        help="Run batch only for one document key folder under images-root",
+        help="Run batch only for one document key folder under paths.images_root from ocr-config",
     )
     ocr_batch_parser.add_argument("--image-name", default="img_001.jpg", help="Image filename inside doc folder")
     ocr_batch_parser.add_argument("--limit", type=int, default=0, help="Process first N doc folders only; 0=all")
@@ -3442,6 +3467,7 @@ def main() -> None:
             include_html_chunk=args.include_html_chunk,
             html_chunk_max_chars=args.html_chunk_max_chars,
             allow_inference_only=args.allow_inference_only,
+            images_tag=args.images_tag,
         )
     elif args.command == "extract-ocr-images":
         extract_ocr_images(
@@ -3474,7 +3500,9 @@ def main() -> None:
     elif args.command == "ocr-run-image":
         from src.config_ocr import load_ocr_config
 
-        ocr_cfg = load_ocr_config(args.ocr_config).ocr
+        ocr_app_cfg = load_ocr_config(args.ocr_config)
+        ocr_cfg = ocr_app_cfg.ocr
+        ocr_paths = ocr_app_cfg.paths
         effective_score_threshold = (
             args.score_threshold if args.score_threshold is not None else ocr_cfg.score_threshold
         )
@@ -3483,6 +3511,9 @@ def main() -> None:
             if args.structure_threshold is not None
             else ocr_cfg.structure_match_threshold
         )
+        print(f"[OCR CONFIG] images_root={ocr_paths.images_root}")
+        print(f"[OCR CONFIG] gt_root={ocr_paths.gt_root}")
+        print(f"[OCR CONFIG] output_root={ocr_paths.output_root}")
         engines = list(DEFAULT_OCR_ENGINE_MATRIX) if args.all_engines else [_normalize_ocr_engine(ocr_cfg.engine)]
         failed_engines: list[str] = []
         for engine_name in engines:
@@ -3491,9 +3522,9 @@ def main() -> None:
                 ocr_run_image(
                     doc_key=args.doc_key,
                     item_id=args.id,
-                    images_root=args.images_root,
-                    gt_root=args.gt_root,
-                    output_root=args.output_root,
+                    images_root=ocr_paths.images_root,
+                    gt_root=ocr_paths.gt_root,
+                    output_root=ocr_paths.output_root,
                     image_name=args.image_name,
                     lang=ocr_cfg.lang or args.lang,
                     score_threshold=effective_score_threshold,
@@ -3521,7 +3552,9 @@ def main() -> None:
     elif args.command == "ocr-run-batch":
         from src.config_ocr import load_ocr_config
 
-        ocr_cfg = load_ocr_config(args.ocr_config).ocr
+        ocr_app_cfg = load_ocr_config(args.ocr_config)
+        ocr_cfg = ocr_app_cfg.ocr
+        ocr_paths = ocr_app_cfg.paths
         effective_score_threshold = (
             args.score_threshold if args.score_threshold is not None else ocr_cfg.score_threshold
         )
@@ -3530,15 +3563,18 @@ def main() -> None:
             if args.structure_threshold is not None
             else ocr_cfg.structure_match_threshold
         )
+        print(f"[OCR CONFIG] images_root={ocr_paths.images_root}")
+        print(f"[OCR CONFIG] gt_root={ocr_paths.gt_root}")
+        print(f"[OCR CONFIG] output_root={ocr_paths.output_root}")
         engines = list(DEFAULT_OCR_ENGINE_MATRIX) if args.all_engines else [_normalize_ocr_engine(ocr_cfg.engine)]
         failed_engines: list[str] = []
         for engine_name in engines:
             print(f"\n=== OCR Batch Engine: {engine_name} ===")
             try:
                 ocr_run_batch(
-                    images_root=args.images_root,
-                    gt_root=args.gt_root,
-                    output_root=args.output_root,
+                    images_root=ocr_paths.images_root,
+                    gt_root=ocr_paths.gt_root,
+                    output_root=ocr_paths.output_root,
                     image_name=args.image_name,
                     doc_key=args.doc_key,
                     limit=args.limit,

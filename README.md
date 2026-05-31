@@ -542,22 +542,16 @@ python -m src.cli ocr-run-image \
   --structure-threshold 0.65
 ```
 
-실제 경로를 명시하려면:
+경로는 `--ocr-config`의 `paths` 섹션에서만 관리합니다(스크립트/CLI 경로 오버라이드 미사용).
+
+예시:
 
 ```bash
 cd /home/imella0707/personal/LLM_Project_team2
 conda activate ocr_vl15
 export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH}   # WSL + NVIDIA GPU일 때만
 
-python -m src.cli ocr-run-image \
-  --doc-key "한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보" \
-  --image-name "img_001.jpg" \
-  --images-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_images" \
-  --gt-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_outputs/incoming_gt" \
-  --output-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_outputs" \
-  --ocr-config "/home/imella0707/personal/LLM_Project_team2/configs/ocr_default.yaml" \
-  --score-threshold 0.0 \
-  --structure-threshold 0.65
+sed -n '1,80p' /home/imella0707/personal/LLM_Project_team2/configs/ocr_default.yaml
 ```
 
 GT JSON에 `id`가 여러 개면 `--id`를 함께 지정하세요.
@@ -610,7 +604,7 @@ python -m src.cli ocr-run-batch \
   --all-engines
 ```
 
-실제 경로를 명시하려면:
+경로 변경은 `configs/ocr_default.yaml`의 `paths`만 수정하세요:
 
 ```bash
 cd /home/imella0707/personal/LLM_Project_team2
@@ -618,15 +612,34 @@ conda activate ocr_vl15
 export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH}   # WSL + NVIDIA GPU일 때만
 
 python -m src.cli ocr-run-batch \
-  --images-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_images" \
-  --gt-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_outputs/incoming_gt" \
-  --output-root "/home/imella0707/personal/LLM_Project_team2/data/v2/ocr_outputs" \
   --ocr-config "/home/imella0707/personal/LLM_Project_team2/configs/ocr_default.yaml" \
   --score-threshold 0.0 \
   --structure-threshold 0.65
 ```
 
+`configs/ocr_default.yaml` 예시:
+
+```yaml
+ocr:
+  engine: paddleocr_vl
+  device: gpu:0
+  lang: korean
+  score_threshold: 0.0
+  structure_match_threshold: 0.65
+  batch_size: 1
+
+paths:
+  images_root: data/v2/ocr_images/v4_table_filtered_260531
+  gt_root: data/v2/ocr_outputs/incoming_gt
+  output_root: data/v2/ocr_outputs
+```
+
 ### OCR → RAG Stage 스크립트 (권장)
+
+용어 정리 (`OCR→RAG handoff`):
+
+- `ocr_input_manifest.jsonl`: OCR 이미지 단위 메타데이터 목록(문서키, 이미지 스템, 타입, 경로, 리뷰 플래그 등)
+- `ocr_input_chunks.jsonl`: RAG 임베딩 대상으로 넘기는 실제 텍스트 청크 목록
 
 개발/운영은 아래 3개 엔트리포인트로 분리합니다.
 OCR과 RAG는 의존성 충돌 방지를 위해 가상환경을 분리해서 실행합니다.
@@ -646,6 +659,7 @@ OCR과 RAG는 의존성 충돌 방지를 위해 가상환경을 분리해서 실
 
 - `run_ocr_stage.sh` 기본값은 GT 없이 추론 전용 모드입니다.
   - 기본값: `OCR_USE_GT=0`
+- OCR 데이터 경로(`images_root`, `gt_root`, `output_root`)는 `configs/ocr_default.yaml`의 `paths`에서만 읽습니다.
 - GT 없이 추론 전용으로 실행하려면 `OCR_USE_GT=0`으로 실행하세요.
   - 이 모드에서도 `ocr-export-rag`는 `--allow-inference-only`로 실행되어 handoff 청크를 생성합니다.
   - 기본값: `EXCLUDE_REVIEW_REQUIRED=0`
@@ -658,12 +672,10 @@ OCR과 RAG는 의존성 충돌 방지를 위해 가상환경을 분리해서 실
 ```bash
 # 예시 1) 특정 doc_key 1개만 처리
 DOC_KEY="인천광역시_도시계획위원회 통합관리시스템 구축용역" \
-RAG_HANDOFF_DIR="data/v2/ocr_rag" \
 ./scripts/run_ocr_stage.sh
 
 # 예시 2) 다른 doc_key로 재실행
 DOC_KEY="한국생산기술연구원_EIP3.0 고압가스 안전관리 시스템 구축 용역" \
-RAG_HANDOFF_DIR="data/v2/ocr_rag" \
 ./scripts/run_ocr_stage.sh
 ```
 
@@ -687,16 +699,20 @@ HTML 스니펫까지 RAG 청크에 포함하려면(기본 비권장):
 INCLUDE_HTML_CHUNK=1 HTML_CHUNK_MAX_CHARS=1200 ./scripts/run_ocr_stage.sh
 ```
 
-`run_ocr_stage.sh` 산출물 (`OCR_USE_GT=0`, 추론 전용):
+`run_ocr_stage.sh` 산출물:
 
-- `data/v2/ocr_outputs/<engine>/<doc_key>/<image_stem>/inference/*`
-- `data/v2/ocr_rag/ocr_input_manifest.jsonl`
-- `data/v2/ocr_rag/ocr_input_chunks.jsonl`
+- 공통 (`OCR_USE_GT=0` / `OCR_USE_GT=1` 모두 생성)
+  - `data/v2/ocr_rag/<engine>/<images_tag>/ocr_input_manifest.jsonl`
+  - `data/v2/ocr_rag/<engine>/<images_tag>/ocr_input_chunks.jsonl`
+  - `paths.images_root`가 `.../ocr_images` 루트면 `images_tag` 없이 `data/v2/ocr_rag/<engine>/...`로 생성
+- `OCR_USE_GT=0` 추론 산출 경로
+  - `paths.images_root`가 `.../ocr_images/<images_tag>`일 때:
+    `data/v2/ocr_outputs/<engine>/<images_tag>/<doc_key>/<image_stem>/inference/*`
+  - `paths.images_root`가 `.../ocr_images` 루트일 때(태그 없음):
+    `data/v2/ocr_outputs/<engine>/<doc_key>/<image_stem>/inference/*`
 
-GT 모드(`OCR_USE_GT=1`) 산출물:
-
-- `data/v2/ocr_rag/ocr_input_manifest.jsonl`
-- `data/v2/ocr_rag/ocr_input_chunks.jsonl`
+- `OCR_USE_GT=1` GT 평가 산출 경로
+  - `OCR_USE_GT=0` 경로에 더해 `eval/*`(예: `gt_eval_summary.json`, `gt_pred_structured.json`) 생성
 
 GT 모드 + RAG handoff까지 포함하려면:
 
@@ -718,7 +734,7 @@ OCR_USE_GT=0 DOC_KEY="한영대학_한영대학교 특성화 맞춤형 교육환
 OCR_USE_GT=0 RUN_RAG_STAGE=1 DOC_KEY="한영대학_한영대학교 특성화 맞춤형 교육환경 구축 - 트랙운영 학사정보" ./scripts/run_all_ocr_rag_pipeline.sh
 ```
 
-- `OCR_USE_GT=0`이어도 `RUN_RAG_STAGE=1`이고 chunks가 있으면 RAG stage를 실행합니다.
+- `OCR_USE_GT=0`이어도 `RUN_RAG_STAGE=1`이면 RAG stage를 실행합니다.
 
 #### 경희대학교 문서 1건 테스트 예시
 
@@ -744,8 +760,10 @@ OCR_USE_GT=1 \
 
 `run_rag_stage.sh` 기본 산출물:
 
-- `data/v2/ocr_rag/ocr_input_embedded.jsonl`
-- `data/v2/ocr_rag/chroma_index/`
+- `ocr_default.yaml`의 `ocr.engine`, `paths.images_root` 기준:
+  - `data/v2/ocr_rag/<engine>/<images_tag>/ocr_input_embedded.jsonl`
+  - `data/v2/ocr_rag/<engine>/<images_tag>/chroma_index/`
+- `paths.images_root`가 `.../ocr_images` 루트면 `images_tag` 없이 `data/v2/ocr_rag/<engine>/...`로 생성
 
 eval/query에서 OCR을 검색하려면 위 embedded를 **통합 인덱스** 절의 `merge-embedded`로 `checkpoints/chroma_openai`에 병합하세요.
 
@@ -761,9 +779,13 @@ eval/query에서 OCR을 검색하려면 위 embedded를 **통합 인덱스** 절
 python -m src.cli ocr-export-rag \
   --ocr-eval-root "data/v2/ocr_outputs" \
   --engine "paddleocr_vl" \
+  --images-tag "v4_table_filtered_260531" \
   --output-manifest "data/v2/ocr_rag/ocr_input_manifest.jsonl" \
   --output-chunks "data/v2/ocr_rag/ocr_input_chunks.jsonl"
 ```
+
+- 같은 `doc_key`가 여러 버전 태그(`v1_*`, `v4_*`)에 공존하면 `--images-tag`를 지정해서 현재 실험 태그만 export하세요.
+- `scripts/run_ocr_stage.sh`는 `ocr_default.yaml`의 `paths.images_root`에서 추출한 `images_tag`를 자동으로 `ocr-export-rag`에 전달합니다.
 
 ### 결과 확인 위치
 
@@ -780,4 +802,3 @@ python -m src.cli ocr-export-rag \
   - `structure_micro_recall`, `structure_macro_f1`
   - `structure.aggregate` (`matched`, `gt_total`, `pred_total`, `micro_precision`, `micro_recall`, `micro_f1`, `macro_f1`)
   - `table_html.exists`, `table_rows.exists`
-

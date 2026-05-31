@@ -20,29 +20,53 @@ format_elapsed() {
   printf "%02dh %02dm %02ds" "${h}" "${m}" "${s}"
 }
 
+infer_images_tag() {
+  local images_root="$1"
+  local marker="ocr_images/"
+  local suffix=""
+  local tag=""
+
+  if [[ "${images_root}" == *"${marker}"* ]]; then
+    suffix="${images_root#*"${marker}"}"
+    tag="${suffix%%/*}"
+  fi
+  printf "%s" "${tag}"
+}
+
+load_ocr_runtime_from_config() {
+  local config_path="$1"
+  python - "${config_path}" <<'PY'
+import shlex
+import sys
+from src.config_ocr import load_ocr_config
+
+cfg = load_ocr_config(sys.argv[1])
+pairs = {
+    "OCR_ENGINE": cfg.ocr.engine,
+    "IMAGES_ROOT": cfg.paths.images_root,
+    "GT_ROOT": cfg.paths.gt_root,
+    "OCR_OUTPUT_ROOT": cfg.paths.output_root,
+    "SCORE_THRESHOLD": cfg.ocr.score_threshold,
+    "STRUCTURE_THRESHOLD": cfg.ocr.structure_match_threshold,
+}
+for key, value in pairs.items():
+    print(f"{key}={shlex.quote(str(value))}")
+PY
+}
+
 OCR_ENV_NAME="${OCR_ENV_NAME:-ocr_vl15}"
-OCR_ENGINE="${OCR_ENGINE:-paddleocr_vl}"
-IMAGES_ROOT="${IMAGES_ROOT:-data/v2/ocr_images}"
-GT_ROOT="${GT_ROOT:-data/v2/ocr_outputs/incoming_gt}"
-OCR_OUTPUT_ROOT="${OCR_OUTPUT_ROOT:-data/v2/ocr_outputs}"
 OCR_CONFIG_PATH="${OCR_CONFIG_PATH:-configs/ocr_default.yaml}"
-SCORE_THRESHOLD="${SCORE_THRESHOLD:-0.0}"
-STRUCTURE_THRESHOLD="${STRUCTURE_THRESHOLD:-0.65}"
 DOC_KEY="${DOC_KEY:-}"
 
-RAG_HANDOFF_DIR="${RAG_HANDOFF_DIR:-data/v2/ocr_rag}"
-MANIFEST_OUTPUT="${MANIFEST_OUTPUT:-${RAG_HANDOFF_DIR}/ocr_input_manifest.jsonl}"
-CHUNKS_OUTPUT="${CHUNKS_OUTPUT:-${RAG_HANDOFF_DIR}/ocr_input_chunks.jsonl}"
+RAG_HANDOFF_DIR="${RAG_HANDOFF_DIR:-}"
+MANIFEST_OUTPUT="${MANIFEST_OUTPUT:-}"
+CHUNKS_OUTPUT="${CHUNKS_OUTPUT:-}"
 EXCLUDE_REVIEW_REQUIRED="${EXCLUDE_REVIEW_REQUIRED:-0}"
 INCLUDE_HTML_CHUNK="${INCLUDE_HTML_CHUNK:-0}"
 HTML_CHUNK_MAX_CHARS="${HTML_CHUNK_MAX_CHARS:-1200}"
 USE_DOC_UNWARPING="${USE_DOC_UNWARPING:-1}"
 TABLE_DUAL_PASS="${TABLE_DUAL_PASS:-0}"
 OCR_USE_GT="${OCR_USE_GT:-0}"
-
-echo "[OCR STAGE] root=${ROOT_DIR}"
-echo "[OCR STAGE] env=${OCR_ENV_NAME}"
-echo "[OCR STAGE] engine=${OCR_ENGINE}"
 
 if ! command -v conda >/dev/null 2>&1; then
   echo "[ERROR] conda not found. Activate '${OCR_ENV_NAME}' manually and rerun."
@@ -52,11 +76,28 @@ fi
 eval "$(conda shell.bash hook)"
 conda activate "${OCR_ENV_NAME}"
 
+eval "$(load_ocr_runtime_from_config "${OCR_CONFIG_PATH}")"
+OCR_IMAGES_TAG="$(infer_images_tag "${IMAGES_ROOT}")"
+RAG_HANDOFF_DIR="${RAG_HANDOFF_DIR:-data/v2/ocr_rag/${OCR_ENGINE}}"
+if [[ -n "${OCR_IMAGES_TAG}" ]]; then
+  RAG_HANDOFF_DIR="${RAG_HANDOFF_DIR}/${OCR_IMAGES_TAG}"
+fi
+MANIFEST_OUTPUT="${MANIFEST_OUTPUT:-${RAG_HANDOFF_DIR}/ocr_input_manifest.jsonl}"
+CHUNKS_OUTPUT="${CHUNKS_OUTPUT:-${RAG_HANDOFF_DIR}/ocr_input_chunks.jsonl}"
+
+echo "[OCR STAGE] root=${ROOT_DIR}"
+echo "[OCR STAGE] env=${OCR_ENV_NAME}"
+echo "[OCR STAGE] ocr_config=${OCR_CONFIG_PATH}"
+echo "[OCR STAGE] engine=${OCR_ENGINE}"
+echo "[OCR STAGE] images_root=${IMAGES_ROOT}"
+echo "[OCR STAGE] gt_root=${GT_ROOT}"
+echo "[OCR STAGE] output_root=${OCR_OUTPUT_ROOT}"
+if [[ -n "${OCR_IMAGES_TAG}" ]]; then
+  echo "[OCR STAGE] images_tag=${OCR_IMAGES_TAG}"
+fi
+
 OCR_BATCH_ARGS=(
   -m src.cli ocr-run-batch
-  --images-root "${IMAGES_ROOT}"
-  --gt-root "${GT_ROOT}"
-  --output-root "${OCR_OUTPUT_ROOT}"
   --ocr-config "${OCR_CONFIG_PATH}"
   --score-threshold "${SCORE_THRESHOLD}"
   --structure-threshold "${STRUCTURE_THRESHOLD}"
@@ -88,6 +129,9 @@ EXPORT_ARGS=(
 if [[ "${OCR_USE_GT}" == "0" ]]; then
   EXPORT_ARGS+=(--allow-inference-only)
 fi
+if [[ -n "${OCR_IMAGES_TAG}" ]]; then
+  EXPORT_ARGS+=(--images-tag "${OCR_IMAGES_TAG}")
+fi
 if [[ "${EXCLUDE_REVIEW_REQUIRED}" == "1" ]]; then
   EXPORT_ARGS+=(--exclude-review-required)
 fi
@@ -106,6 +150,9 @@ STAGE_TOTAL_LATENCY_MS="$((STAGE_ELAPSED_SEC * 1000))"
 STAGE_TOTAL_LATENCY_HMS="$(format_elapsed "${STAGE_ELAPSED_SEC}")"
 
 ENGINE_SUMMARY_DIR="${OCR_OUTPUT_ROOT}/${OCR_ENGINE}"
+if [[ -n "${OCR_IMAGES_TAG}" ]]; then
+  ENGINE_SUMMARY_DIR="${ENGINE_SUMMARY_DIR}/${OCR_IMAGES_TAG}"
+fi
 mkdir -p "${ENGINE_SUMMARY_DIR}"
 STAGE_SUMMARY_TXT="${ENGINE_SUMMARY_DIR}/ocr_stage_summary.txt"
 STAGE_SUMMARY_JSON="${ENGINE_SUMMARY_DIR}/ocr_inference_stage_summary.json"
@@ -119,10 +166,12 @@ cat <<EOF
 5. table_dual_pass: ${TABLE_DUAL_PASS}
 6. include_html_chunk: ${INCLUDE_HTML_CHUNK}
 7. html_chunk_max_chars: ${HTML_CHUNK_MAX_CHARS}
-8. manifest: ${MANIFEST_OUTPUT}
-9. chunks: ${CHUNKS_OUTPUT}
-10. total_latency_ms: ${STAGE_TOTAL_LATENCY_MS}
-11. total_latency_hms: ${STAGE_TOTAL_LATENCY_HMS}
+8. images_root: ${IMAGES_ROOT}
+9. images_tag: ${OCR_IMAGES_TAG:-<none>}
+10. manifest: ${MANIFEST_OUTPUT}
+11. chunks: ${CHUNKS_OUTPUT}
+12. total_latency_ms: ${STAGE_TOTAL_LATENCY_MS}
+13. total_latency_hms: ${STAGE_TOTAL_LATENCY_HMS}
 EOF
 
 cat > "${STAGE_SUMMARY_TXT}" <<EOF
@@ -134,10 +183,12 @@ cat > "${STAGE_SUMMARY_TXT}" <<EOF
 5. table_dual_pass: ${TABLE_DUAL_PASS}
 6. include_html_chunk: ${INCLUDE_HTML_CHUNK}
 7. html_chunk_max_chars: ${HTML_CHUNK_MAX_CHARS}
-8. manifest: ${MANIFEST_OUTPUT}
-9. chunks: ${CHUNKS_OUTPUT}
-10. total_latency_ms: ${STAGE_TOTAL_LATENCY_MS}
-11. total_latency_hms: ${STAGE_TOTAL_LATENCY_HMS}
+8. images_root: ${IMAGES_ROOT}
+9. images_tag: ${OCR_IMAGES_TAG:-<none>}
+10. manifest: ${MANIFEST_OUTPUT}
+11. chunks: ${CHUNKS_OUTPUT}
+12. total_latency_ms: ${STAGE_TOTAL_LATENCY_MS}
+13. total_latency_hms: ${STAGE_TOTAL_LATENCY_HMS}
 EOF
 
 cat > "${STAGE_SUMMARY_JSON}" <<EOF
@@ -150,6 +201,8 @@ cat > "${STAGE_SUMMARY_JSON}" <<EOF
   "table_dual_pass": ${TABLE_DUAL_PASS},
   "include_html_chunk": ${INCLUDE_HTML_CHUNK},
   "html_chunk_max_chars": ${HTML_CHUNK_MAX_CHARS},
+  "images_root": "${IMAGES_ROOT}",
+  "images_tag": "${OCR_IMAGES_TAG}",
   "manifest": "${MANIFEST_OUTPUT}",
   "chunks": "${CHUNKS_OUTPUT}",
   "total_latency_ms": ${STAGE_TOTAL_LATENCY_MS},
