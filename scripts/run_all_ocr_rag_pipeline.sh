@@ -23,46 +23,34 @@ RUN_RAG_STAGE="${RUN_RAG_STAGE:-1}" # 1: OCR 후 RAG까지 실행, 0: OCR만 실
 
 # OCR stage env/args
 OCR_ENV_NAME="${OCR_ENV_NAME:-ocr_vl15}"
-OCR_ENGINE="${OCR_ENGINE:-paddleocr_vl}"
-IMAGES_ROOT="${IMAGES_ROOT:-data/v2/ocr_images}"
-GT_ROOT="${GT_ROOT:-data/v2/ocr_outputs/incoming_gt}"
-OCR_OUTPUT_ROOT="${OCR_OUTPUT_ROOT:-data/v2/ocr_outputs}"
 OCR_CONFIG_PATH="${OCR_CONFIG_PATH:-configs/ocr_default.yaml}"
-SCORE_THRESHOLD="${SCORE_THRESHOLD:-0.0}"
-STRUCTURE_THRESHOLD="${STRUCTURE_THRESHOLD:-0.65}"
 DOC_KEY="${DOC_KEY:-}"
-RAG_HANDOFF_DIR="${RAG_HANDOFF_DIR:-data/v2/ocr_rag}"
-MANIFEST_OUTPUT="${MANIFEST_OUTPUT:-${RAG_HANDOFF_DIR}/ocr_input_manifest.jsonl}"
-CHUNKS_OUTPUT="${CHUNKS_OUTPUT:-${RAG_HANDOFF_DIR}/ocr_input_chunks.jsonl}"
+RAG_HANDOFF_DIR="${RAG_HANDOFF_DIR:-}"
+MANIFEST_OUTPUT="${MANIFEST_OUTPUT:-}"
+CHUNKS_OUTPUT="${CHUNKS_OUTPUT:-}"
 EXCLUDE_REVIEW_REQUIRED="${EXCLUDE_REVIEW_REQUIRED:-0}"
 INCLUDE_HTML_CHUNK="${INCLUDE_HTML_CHUNK:-0}"
 HTML_CHUNK_MAX_CHARS="${HTML_CHUNK_MAX_CHARS:-1200}"
 USE_DOC_UNWARPING="${USE_DOC_UNWARPING:-0}"
 TABLE_DUAL_PASS="${TABLE_DUAL_PASS:-0}"
 OCR_USE_GT="${OCR_USE_GT:-0}"
-RAG_ALLOW_INFERENCE_ONLY="${RAG_ALLOW_INFERENCE_ONLY:-0}" # 1: OCR_USE_GT=0 이어도 RAG stage 실행 허용
 
 # RAG stage env/args
 RAG_ENV_NAME="${RAG_ENV_NAME:-llm_team2}"
-INPUT_CHUNKS="${INPUT_CHUNKS:-${CHUNKS_OUTPUT}}"
-OUTPUT_EMBEDDED="${OUTPUT_EMBEDDED:-data/v2/ocr_rag/ocr_input_embedded.jsonl}"
-INDEX_DIR="${INDEX_DIR:-data/v2/ocr_rag/chroma_index}"
+INPUT_CHUNKS="${INPUT_CHUNKS:-}"
+OUTPUT_EMBEDDED="${OUTPUT_EMBEDDED:-}"
+INDEX_DIR="${INDEX_DIR:-}"
 EMBED_MODEL="${EMBED_MODEL:-text-embedding-3-small}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 FORCE_REAL="${FORCE_REAL:-0}"
 
 echo "[PIPELINE] root=${ROOT_DIR}"
 echo "[PIPELINE] run_rag_stage=${RUN_RAG_STAGE}"
+echo "[PIPELINE] ocr_config=${OCR_CONFIG_PATH}"
 echo "[PIPELINE] doc_key=${DOC_KEY:-<all>}"
 
 OCR_ENV_NAME="${OCR_ENV_NAME}" \
-OCR_ENGINE="${OCR_ENGINE}" \
-IMAGES_ROOT="${IMAGES_ROOT}" \
-GT_ROOT="${GT_ROOT}" \
-OCR_OUTPUT_ROOT="${OCR_OUTPUT_ROOT}" \
 OCR_CONFIG_PATH="${OCR_CONFIG_PATH}" \
-SCORE_THRESHOLD="${SCORE_THRESHOLD}" \
-STRUCTURE_THRESHOLD="${STRUCTURE_THRESHOLD}" \
 DOC_KEY="${DOC_KEY}" \
 RAG_HANDOFF_DIR="${RAG_HANDOFF_DIR}" \
 MANIFEST_OUTPUT="${MANIFEST_OUTPUT}" \
@@ -75,19 +63,6 @@ TABLE_DUAL_PASS="${TABLE_DUAL_PASS}" \
 OCR_USE_GT="${OCR_USE_GT}" \
 ./scripts/run_ocr_stage.sh
 
-if [[ "${OCR_USE_GT}" == "0" && "${RAG_ALLOW_INFERENCE_ONLY}" != "1" ]]; then
-  echo "[PIPELINE] OCR_USE_GT=0 -> skip RAG stage (set RAG_ALLOW_INFERENCE_ONLY=1 to run RAG stage)"
-  PIPELINE_END_TS="$(date +%s)"
-  PIPELINE_ELAPSED_SEC="$((PIPELINE_END_TS - PIPELINE_START_TS))"
-  PIPELINE_TOTAL_LATENCY_MS="$((PIPELINE_ELAPSED_SEC * 1000))"
-  PIPELINE_TOTAL_LATENCY_HMS="$(format_elapsed "${PIPELINE_ELAPSED_SEC}")"
-  echo "=== Pipeline Summary ==="
-  echo "1. rag_stage: skipped (inference-only OCR)"
-  echo "2. total_latency_ms: ${PIPELINE_TOTAL_LATENCY_MS}"
-  echo "3. total_latency_hms: ${PIPELINE_TOTAL_LATENCY_HMS}"
-  exit 0
-fi
-
 if [[ "${RUN_RAG_STAGE}" != "1" ]]; then
   echo "=== Pipeline Summary ==="
   echo "1. rag_stage: skipped (RUN_RAG_STAGE=${RUN_RAG_STAGE})"
@@ -98,6 +73,10 @@ if [[ "${RUN_RAG_STAGE}" != "1" ]]; then
   echo "2. total_latency_ms: ${PIPELINE_TOTAL_LATENCY_MS}"
   echo "3. total_latency_hms: ${PIPELINE_TOTAL_LATENCY_HMS}"
   exit 0
+fi
+
+if [[ -z "${INPUT_CHUNKS}" ]]; then
+  INPUT_CHUNKS="${CHUNKS_OUTPUT}"
 fi
 
 if [[ ! -s "${INPUT_CHUNKS}" ]]; then
@@ -113,6 +92,7 @@ if [[ ! -s "${INPUT_CHUNKS}" ]]; then
 fi
 
 RAG_ENV_NAME="${RAG_ENV_NAME}" \
+OCR_CONFIG_PATH="${OCR_CONFIG_PATH}" \
 INPUT_CHUNKS="${INPUT_CHUNKS}" \
 OUTPUT_EMBEDDED="${OUTPUT_EMBEDDED}" \
 INDEX_DIR="${INDEX_DIR}" \
