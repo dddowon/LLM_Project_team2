@@ -5,3 +5,8 @@ ocr:
   score_threshold: 0.0
   structure_match_threshold: 0.65
   batch_size: 1
+
+paths:
+  images_root: data/v2/ocr_images/v4_table_filtered_260531
+  gt_root: data/v2/ocr_outputs/incoming_gt
+  output_root: data/v2/ocr_outputs

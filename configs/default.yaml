@@ -24,8 +24,18 @@ chunking:
   min_chunk_chars: 80
 
 retrieval:
-  top_k: 8
-  score_threshold: 0.25
+  top_k: 10
+  score_threshold: 0.0
+  hybrid:
+    enabled: true
+    dense_top_k: 40
+    bm25_top_k: 40
+    rrf_k: 60
+  reranker:
+    enabled: true
+    model: dragonkue/bge-reranker-v2-m3-ko
+    top_k: 10
+    device: auto
 
 generation:
   max_context_chars: 12000

@@ -74,6 +74,7 @@ def _eval_one_row(
     question = row["question"]
     doc_id = str(row.get("doc_id") or "").strip() or None
     question_type = str(row.get("question_type") or "").strip() or None
+    category = str(row.get("category") or "").strip() or None
 
     start = time.perf_counter()
     result = engine.answer(
@@ -81,6 +82,7 @@ def _eval_one_row(
         include_source_text=True,
         doc_id=doc_id,
         question_type=question_type,
+        category=category,
     )
     total_latency_ms = round((time.perf_counter() - start) * 1000, 2)
     contexts: list[Any] = list(result.get("sources") or [])

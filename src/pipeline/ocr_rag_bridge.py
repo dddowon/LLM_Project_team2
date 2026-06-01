@@ -166,21 +166,53 @@ def _iter_engine_dirs(ocr_eval_root: Path, engine: str | None) -> list[Path]:
     return sorted([path for path in ocr_eval_root.iterdir() if path.is_dir()], key=lambda p: p.name)
 
 
+def _is_ocr_image_dir(image_dir: Path, *, allow_inference_only: bool) -> bool:
+    if (image_dir / "eval" / "gt_pred_structured.json").exists():
+        return True
+    if allow_inference_only and (image_dir / "inference" / "pred_raw.json").exists():
+        return True
+    return False
+
+
+def _is_doc_dir(doc_dir: Path, *, allow_inference_only: bool) -> bool:
+    image_dirs = [path for path in doc_dir.iterdir() if path.is_dir()]
+    return any(_is_ocr_image_dir(path, allow_inference_only=allow_inference_only) for path in image_dirs)
+
+
 def _iter_image_dirs(
-    engine_dir: Path, doc_key: str | None, *, allow_inference_only: bool
+    engine_dir: Path,
+    doc_key: str | None,
+    *,
+    allow_inference_only: bool,
+    images_tag: str | None = None,
 ) -> list[tuple[str, Path]]:
     output: list[tuple[str, Path]] = []
-    doc_dirs = sorted([path for path in engine_dir.iterdir() if path.is_dir()], key=lambda p: p.name)
-    if doc_key:
-        doc_dirs = [path for path in doc_dirs if path.name == doc_key]
-    for one_doc in doc_dirs:
+
+    def collect_from_doc_dir(one_doc: Path) -> None:
+        if doc_key and one_doc.name != doc_key:
+            return
         image_dirs = sorted([path for path in one_doc.iterdir() if path.is_dir()], key=lambda p: p.name)
         for image_dir in image_dirs:
-            if (image_dir / "eval" / "gt_pred_structured.json").exists():
+            if _is_ocr_image_dir(image_dir, allow_inference_only=allow_inference_only):
                 output.append((one_doc.name, image_dir))
+
+    first_level_dirs = sorted([path for path in engine_dir.iterdir() if path.is_dir()], key=lambda p: p.name)
+    for first_level in first_level_dirs:
+        if _is_doc_dir(first_level, allow_inference_only=allow_inference_only):
+            # Legacy layout: <engine>/<doc_key>/<image_stem>/...
+            # When images_tag is explicitly requested, skip legacy layout to avoid mixing tags.
+            if images_tag:
                 continue
-            if allow_inference_only and (image_dir / "inference" / "pred_raw.json").exists():
-                output.append((one_doc.name, image_dir))
+            collect_from_doc_dir(first_level)
+            continue
+
+        # Versioned layout: <engine>/<images_tag>/<doc_key>/<image_stem>/...
+        if images_tag and first_level.name != images_tag:
+            continue
+        second_level_dirs = sorted([path for path in first_level.iterdir() if path.is_dir()], key=lambda p: p.name)
+        for second_level in second_level_dirs:
+            if _is_doc_dir(second_level, allow_inference_only=allow_inference_only):
+                collect_from_doc_dir(second_level)
     return output
 
 
@@ -229,6 +261,7 @@ def export_ocr_eval_to_rag_inputs(
     include_html_chunk: bool = False,
     html_chunk_max_chars: int = 1200,
     allow_inference_only: bool = False,
+    images_tag: str | None = None,
 ) -> tuple[int, int]:
     manifest_rows: list[dict[str, Any]] = []
     chunk_rows: list[dict[str, Any]] = []
@@ -238,7 +271,10 @@ def export_ocr_eval_to_rag_inputs(
     for engine_dir in engine_dirs:
         engine_name = engine_dir.name
         for one_doc_key, image_dir in _iter_image_dirs(
-            engine_dir, doc_key, allow_inference_only=allow_inference_only
+            engine_dir,
+            doc_key,
+            allow_inference_only=allow_inference_only,
+            images_tag=images_tag,
         ):
             pred_structured_path = image_dir / "eval" / "gt_pred_structured.json"
             pred_table_rows_path = image_dir / "inference" / "pred_table_layout.json"

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from src.dataset.schema import Chunk
-
+from src.engine.question_taxonomy import should_apply_cover_form_answer_hint
 SYSTEM_POLICY = """당신은 공공입찰 RFP 분석을 돕는 입찰메이트 사내 RAG 어시스턴트입니다.
 
 [근거]
@@ -60,6 +60,17 @@ QUESTION_TYPE_HINTS: dict[str, str] = {
 - 질문에 직접 대응하는 답이 컨텍스트에 없으면 **"문서에서 확인되지 않습니다."** 한 줄만 출력하세요.""",
 }
 
+COVER_FORM_ANSWER_HINT = """[표지·양식 메타 — 읽기 규칙]
+- 표지·제안요청서(표지)·목차 상단·서약서 등 **양식/표지** 영역을 우선 확인하세요.
+  컨텍스트에 "자료유형: 표지"가 있으면 그 청크를 우선합니다.
+- **작성 연월·연도**는 "작성연월:" 같은 라벨 없이 `2024.02`, `2024. 03.`, `2025. 2.`처럼
+  **숫자·연.월 형식만** 있는 경우가 많습니다. 질문이 작성 연월/연도를 물으면 이 형식을 답으로 사용하세요.
+- **성명·연락처·이메일**은 표 한 줄에
+  `성명 연락처 이메일 홍길동 010-1234-5678 user@example.com`처럼
+  **헤더(열 이름) 바로 뒤에 값**이 이어지는 경우가 많습니다. 헤더 순서에 맞춰 값을 매칭하세요.
+- `@`가 포함된 토큰은 이메일, `010-`, `02-`, `031-` 등은 전화번호로 해석할 수 있습니다.
+- 컨텍스트에 질문 항목에 해당하는 값이 있으면 **전면 거절하지 말고** 그 값만 짧게 답하세요."""
+
 
 def normalize_question_type(question_type: str | None) -> str:
     return str(question_type or "").strip().lower()
@@ -73,6 +84,12 @@ def system_policy_for(question_type: str | None) -> str:
 
 def question_type_addon(question_type: str | None) -> str:
     return QUESTION_TYPE_HINTS.get(normalize_question_type(question_type), "")
+
+
+def cover_form_hint_block(question: str, *, category: str | None = None) -> str:
+    if should_apply_cover_form_answer_hint(question, category=category):
+        return f"\n{COVER_FORM_ANSWER_HINT}\n"
+    return ""
 
 
 def format_context(results: list[tuple[Chunk, float]], max_context_chars: int) -> str:
@@ -98,6 +115,7 @@ def build_rag_prompt(
     chat_history: list[dict[str, str]] | None = None,
     *,
     question_type: str | None = None,
+    category: str | None = None,
 ) -> str:
     history_text = ""
     if chat_history:
@@ -107,13 +125,14 @@ def build_rag_prompt(
     policy = system_policy_for(question_type)
     type_hint = question_type_addon(question_type)
     type_block = f"\n{type_hint}\n" if type_hint else ""
+    cover_block = cover_form_hint_block(question, category=category)
     closing = (
         "위 [근거 — 문서 외/확인 불가]를 따르고, 답이 없으면 한 줄 거절만 출력하세요."
         if normalize_question_type(question_type) == "unanswerable"
         else "위 지침을 따르되, 면책·서두 문구 없이 본문으로 바로 답하세요."
     )
 
-    return f"""{policy}{type_block}
+    return f"""{policy}{type_block}{cover_block}
 
 대화 기록:
 {history_text or "(없음)"}

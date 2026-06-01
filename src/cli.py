@@ -124,7 +124,14 @@ def evaluate(config_path: str) -> None:
     for item in tqdm(questions, desc="Evaluating"):
         question = item["question"]
         doc_id = str(item.get("doc_id") or "").strip() or None
-        result = engine.answer(question, doc_id=doc_id)
+        question_type = str(item.get("question_type") or "").strip() or None
+        category = str(item.get("category") or "").strip() or None
+        result = engine.answer(
+            question,
+            doc_id=doc_id,
+            question_type=question_type,
+            category=category,
+        )
         rows.append({**item, **result})
     write_jsonl(config.paths.evaluation_output, rows)
     print(f"Wrote evaluation results -> {config.paths.evaluation_output}")
@@ -134,6 +141,7 @@ def evaluate_harness(
     config_path: str,
     *,
     output_path: str | None,
+    evaluation_set: str | None,
     judge_model: str,
     no_llm_judge: bool,
     no_correctness_judge: bool,
@@ -143,6 +151,7 @@ def evaluate_harness(
 
     out, summary = run_eval_harness(
         config_path,
+        evaluation_set=Path(evaluation_set) if evaluation_set else None,
         output_path=Path(output_path) if output_path else None,
         judge_model=judge_model,
         run_llm_judge=not no_llm_judge,
@@ -642,6 +651,7 @@ def export_ocr_rag_handoff(
     include_html_chunk: bool,
     html_chunk_max_chars: int,
     allow_inference_only: bool,
+    images_tag: str | None,
 ) -> None:
     from src.pipeline.ocr_rag_bridge import export_ocr_eval_to_rag_inputs
 
@@ -655,6 +665,7 @@ def export_ocr_rag_handoff(
         include_html_chunk=include_html_chunk,
         html_chunk_max_chars=html_chunk_max_chars,
         allow_inference_only=allow_inference_only,
+        images_tag=images_tag,
     )
     print("\n=== OCR Export Summary ===")
     print("1. status: ocr_export_rag_done")
@@ -1444,6 +1455,26 @@ def _has_table_label_in_vl_raw(vl_raw_path: str) -> bool:
                 return True
     return False
 
+
+def _ocr_batch_log(message: str, *, quiet: bool) -> None:
+    if not quiet:
+        print(message)
+
+
+def _collect_ocr_batch_image_jobs(
+    doc_dirs: list[Path],
+) -> tuple[list[tuple[str, Path]], list[dict[str, str]]]:
+    jobs: list[tuple[str, Path]] = []
+    skip_details: list[dict[str, str]] = []
+    for doc_dir in doc_dirs:
+        try:
+            for path in _list_image_paths(doc_dir):
+                jobs.append((doc_dir.name, path))
+        except FileNotFoundError as exc:
+            skip_details.append({"doc_key": doc_dir.name, "image_name": "-", "reason": str(exc)})
+    return jobs, skip_details
+
+
 def ocr_run_all(
     image_path: str,
     gt_path: str | None,
@@ -1468,9 +1499,10 @@ def ocr_run_all(
     table_dual_pass: bool = False,
     table_second_engine: str = "pp_ocrv5",
     require_gt: bool = True,
+    quiet: bool = False,
 ) -> None:
     normalized_engine = _normalize_ocr_engine(ocr_engine)
-    print("[1/4] run-ocr")
+    _ocr_batch_log("[1/4] run-ocr", quiet=quiet)
     if normalized_engine == "pp_structurev3":
         run_pp_structurev3_ocr(
             image_path=image_path,
@@ -1548,7 +1580,7 @@ def ocr_run_all(
     if require_gt:
         if not gt_path or not item_id or not pred_structured_output or not eval_output:
             raise ValueError("GT mode requires gt_path, item_id, pred_structured_output, and eval_output.")
-        print("[2/4] build-pred-structured")
+        _ocr_batch_log("[2/4] build-pred-structured", quiet=quiet)
         build_pred_structured(
             gt_path=gt_path,
             pred_raw_path=pred_raw_output,
@@ -1557,20 +1589,20 @@ def ocr_run_all(
             score_threshold=score_threshold,
         )
     else:
-        print("[2/4] skip-gt-structured (inference-only)")
+        _ocr_batch_log("[2/4] skip-gt-structured (inference-only)", quiet=quiet)
 
-    print("[3/4] extract-table-html")
+    _ocr_batch_log("[3/4] extract-table-html", quiet=quiet)
     table_outputs = _save_pred_table_html(
         pred_raw_path=pred_raw_output,
         output_path=pred_table_html_output,
     )
     has_table_html = bool(table_outputs.get("saved", False))
-    print(f"table_html_saved: {has_table_html}")
+    _ocr_batch_log(f"table_html_saved: {has_table_html}", quiet=quiet)
     if table_outputs.get("pred_table_rows_path"):
-        print(f"pred_table_rows_path: {table_outputs.get('pred_table_rows_path')}")
+        _ocr_batch_log(f"pred_table_rows_path: {table_outputs.get('pred_table_rows_path')}", quiet=quiet)
 
     if require_gt:
-        print("[4/4] eval-pred-structured")
+        _ocr_batch_log("[4/4] eval-pred-structured", quiet=quiet)
         eval_pred_structured_vs_gt(
             gt_path=gt_path,
             pred_structured_path=pred_structured_output,
@@ -1581,8 +1613,8 @@ def ocr_run_all(
             table_rows_path=table_outputs.get("pred_table_rows_path"),
         )
     else:
-        print("[4/4] skip-gt-eval (inference-only)")
-    print("ocr_run_all_done")
+        _ocr_batch_log("[4/4] skip-gt-eval (inference-only)", quiet=quiet)
+    _ocr_batch_log("ocr_run_all_done", quiet=quiet)
 
 
 def _infer_item_id_from_gt(gt_path: Path, image_name: str | None = None) -> str:
@@ -1705,6 +1737,25 @@ def _resolve_gt_path(gt_root: str, doc_key: str) -> Path:
     return jsonl_path
 
 
+def _infer_ocr_images_tag(images_root: str) -> str:
+    """Infer dataset/version tag from paths like .../ocr_images/<tag>/... ."""
+    parts = Path(images_root).parts
+    for idx, part in enumerate(parts):
+        if part == "ocr_images" and idx + 1 < len(parts):
+            candidate = str(parts[idx + 1]).strip()
+            if candidate:
+                return candidate
+    return ""
+
+
+def _resolve_ocr_engine_output_root(*, output_root: str, ocr_engine: str, images_root: str) -> Path:
+    engine_root = Path(output_root) / _engine_dir_name(ocr_engine)
+    images_tag = _infer_ocr_images_tag(images_root)
+    if images_tag:
+        return engine_root / images_tag
+    return engine_root
+
+
 def _resolve_ocr_doc_paths(
     *,
     doc_key: str,
@@ -1717,9 +1768,12 @@ def _resolve_ocr_doc_paths(
     normalized_engine = _normalize_ocr_engine(ocr_engine)
     image_path = Path(images_root) / doc_key / image_name
     gt_path = _resolve_gt_path(gt_root, doc_key)
-    engine_dir_name = _engine_dir_name(normalized_engine)
     image_stem = Path(image_name).stem
-    out_dir = Path(output_root) / engine_dir_name / doc_key / image_stem
+    out_dir = _resolve_ocr_engine_output_root(
+        output_root=output_root,
+        ocr_engine=normalized_engine,
+        images_root=images_root,
+    ) / doc_key / image_stem
     inference_dir = out_dir / "inference"
     eval_dir = out_dir / "eval"
     pred_raw = inference_dir / "pred_raw.json"
@@ -1781,7 +1835,7 @@ def _list_image_paths(doc_dir: Path) -> list[Path]:
     return image_files
 
 
-def _prepare_resized_image_if_needed(image_path: Path, max_long_side: int | None) -> tuple[Path, Path | None]:
+def _prepare_resized_image_if_needed(image_path: Path, max_long_side: int | None, *, quiet: bool = False) -> tuple[Path, Path | None]:
     # [Design Intent]
     # OOM 완화를 위해 긴 변 기준으로만 비율 유지 축소한다.
     # 원본은 유지하고 필요 시 임시 파일로만 추론한다.
@@ -1806,7 +1860,10 @@ def _prepare_resized_image_if_needed(image_path: Path, max_long_side: int | None
         temp_path = Path(tmp.name)
     if not cv2.imwrite(str(temp_path), resized):
         raise RuntimeError(f"Failed to write resized temp image: {temp_path}")
-    print(f"resize_applied: {width}x{height} -> {resized.shape[1]}x{resized.shape[0]} (max_long_side={max_long_side})")
+    _ocr_batch_log(
+        f"resize_applied: {width}x{height} -> {resized.shape[1]}x{resized.shape[0]} (max_long_side={max_long_side})",
+        quiet=quiet,
+    )
     return temp_path, temp_path
 
 
@@ -1835,6 +1892,7 @@ def ocr_run_image(
     table_second_engine: str = "pp_ocrv5",
     require_gt: bool = True,
     max_long_side: int | None = 2000,
+    quiet: bool = False,
 ) -> bool:
     (
         image_path,
@@ -1871,13 +1929,15 @@ def ocr_run_image(
         use_eval = False
 
     pred_raw.parent.mkdir(parents=True, exist_ok=True)
-    prepared_image_path, temp_image_path = _prepare_resized_image_if_needed(image_path, max_long_side=max_long_side)
+    prepared_image_path, temp_image_path = _prepare_resized_image_if_needed(
+        image_path, max_long_side=max_long_side, quiet=quiet
+    )
     try:
-        print(f"doc_key: {doc_key}")
-        print(f"image: {image_path}")
-        print(f"image_input: {prepared_image_path}")
-        print(f"gt: {gt_path if gt_path else '<disabled>'}")
-        print(f"id: {final_item_id}")
+        _ocr_batch_log(f"doc_key: {doc_key}", quiet=quiet)
+        _ocr_batch_log(f"image: {image_path}", quiet=quiet)
+        _ocr_batch_log(f"image_input: {prepared_image_path}", quiet=quiet)
+        _ocr_batch_log(f"gt: {gt_path if gt_path else '<disabled>'}", quiet=quiet)
+        _ocr_batch_log(f"id: {final_item_id}", quiet=quiet)
         ocr_run_all(
             image_path=str(prepared_image_path),
             gt_path=str(gt_path) if gt_path else None,
@@ -1902,12 +1962,13 @@ def ocr_run_image(
             table_dual_pass=table_dual_pass,
             table_second_engine=table_second_engine,
             require_gt=require_gt,
+            quiet=quiet,
         )
     finally:
         if temp_image_path and temp_image_path.exists():
             temp_image_path.unlink(missing_ok=True)
     if require_gt and not use_eval:
-        print(f"[SKIP_EVAL_SUMMARY] use_eval=false: {final_item_id}")
+        _ocr_batch_log(f"[SKIP_EVAL_SUMMARY] use_eval=false: {final_item_id}", quiet=quiet)
     return use_eval
 
 
@@ -1936,8 +1997,16 @@ def ocr_run_batch(
     table_second_engine: str = "pp_ocrv5",
     require_gt: bool = True,
     max_long_side: int | None = 2000,
+    quiet: bool = True,
+    show_progress: bool = True,
 ) -> None:
     normalized_engine = _normalize_ocr_engine(ocr_engine)
+    engine_out_root = _resolve_ocr_engine_output_root(
+        output_root=output_root,
+        ocr_engine=normalized_engine,
+        images_root=images_root,
+    )
+    images_tag = _infer_ocr_images_tag(images_root)
     shared_model = _build_shared_ocr_model(
         ocr_engine=normalized_engine,
         lang=lang,
@@ -1969,163 +2038,192 @@ def ocr_run_batch(
     eval_rows: list[dict[str, object]] = []
     review_queue_rows: list[dict[str, object]] = []
 
-    for doc_dir in doc_dirs:
-        doc_key = doc_dir.name
-        print(f"\n=== OCR Batch: {doc_key} ===")
-        try:
-            doc_image_paths = _list_image_paths(doc_dir)
-            print(f"images_in_doc: {len(doc_image_paths)}")
-            for path in doc_image_paths:
-                try:
-                    include_in_eval = ocr_run_image(
-                        doc_key=doc_key,
-                        item_id=None,
-                        images_root=images_root,
-                        gt_root=gt_root,
-                        output_root=output_root,
-                        image_name=path.name,
-                        lang=lang,
-                        score_threshold=score_threshold,
-                        structure_match_threshold=structure_match_threshold,
-                        ocr_engine=ocr_engine,
-                        ocr_device=ocr_device,
-                        ocr_batch_size=ocr_batch_size,
-                        use_doc_orientation_classify=use_doc_orientation_classify,
-                        use_doc_unwarping=use_doc_unwarping,
-                        use_chart_recognition=use_chart_recognition,
-                        use_table_orientation_classify=use_table_orientation_classify,
-                        use_ocr_results_with_table_cells=use_ocr_results_with_table_cells,
-                        text_det_limit_side_len=text_det_limit_side_len,
-                        ocr_model=shared_model,
-                        table_dual_pass=table_dual_pass,
-                        table_second_engine=table_second_engine,
-                        require_gt=require_gt,
-                        max_long_side=max_long_side,
-                    )
-                    ok_count += 1
-                    if not include_in_eval:
-                        continue
-                except FileNotFoundError as e:
-                    message = str(e)
-                    if "Image folder not found" in message or "No image files found" in message or "Image not found" in message:
-                        print(f"[SKIP][이미지 없음] {message}")
-                        skip_image_count += 1
-                        skip_image_details.append({"doc_key": doc_key, "image_name": path.name, "reason": message})
-                    elif "GT not found" in message:
-                        print(f"[SKIP][GT 없음] {message}")
-                        skip_gt_count += 1
-                    else:
-                        print(f"[SKIP] {message}")
-                    skip_count += 1
-                    continue
-                except Exception as e:
-                    print(f"[FAIL] {doc_key}/{path.name}: {e}")
-                    fail_count += 1
-                    fail_details.append({"doc_key": doc_key, "image_name": path.name, "reason": str(e)})
-                    if stop_on_error:
-                        raise
-                    continue
+    def _notice(message: str) -> None:
+        if quiet:
+            if show_progress:
+                from tqdm import tqdm
 
-                eval_path = (
-                    Path(output_root)
-                    / _engine_dir_name(normalized_engine)
-                    / doc_key
-                    / Path(path.name).stem
-                    / "eval"
-                    / "gt_eval_summary.json"
+                tqdm.write(message)
+            return
+        print(message)
+
+    jobs, pre_skip_details = _collect_ocr_batch_image_jobs(doc_dirs)
+    skip_image_details.extend(pre_skip_details)
+    skip_count += len(pre_skip_details)
+    skip_image_count += len(pre_skip_details)
+
+    if not quiet:
+        print(f"ocr_batch_images: {len(jobs)} across {len(doc_dirs)} docs")
+
+    progress_bar = None
+    job_iter: object = jobs
+    if show_progress and jobs:
+        from tqdm import tqdm
+
+        mininterval = 0.3 if sys.stderr.isatty() else 10.0
+        progress_bar = tqdm(
+            jobs,
+            desc="OCR",
+            unit="img",
+            file=sys.stderr,
+            mininterval=mininterval,
+            dynamic_ncols=sys.stderr.isatty(),
+        )
+        job_iter = progress_bar
+
+    try:
+        for doc_key, path in job_iter:
+            try:
+                include_in_eval = ocr_run_image(
+                    doc_key=doc_key,
+                    item_id=None,
+                    images_root=images_root,
+                    gt_root=gt_root,
+                    output_root=output_root,
+                    image_name=path.name,
+                    lang=lang,
+                    score_threshold=score_threshold,
+                    structure_match_threshold=structure_match_threshold,
+                    ocr_engine=ocr_engine,
+                    ocr_device=ocr_device,
+                    ocr_batch_size=ocr_batch_size,
+                    use_doc_orientation_classify=use_doc_orientation_classify,
+                    use_doc_unwarping=use_doc_unwarping,
+                    use_chart_recognition=use_chart_recognition,
+                    use_table_orientation_classify=use_table_orientation_classify,
+                    use_ocr_results_with_table_cells=use_ocr_results_with_table_cells,
+                    text_det_limit_side_len=text_det_limit_side_len,
+                    ocr_model=shared_model,
+                    table_dual_pass=table_dual_pass,
+                    table_second_engine=table_second_engine,
+                    require_gt=require_gt,
+                    max_long_side=max_long_side,
+                    quiet=quiet,
                 )
-                if eval_path.exists():
-                    result = json.loads(eval_path.read_text(encoding="utf-8"))
-                    text_metrics = result.get("text", {}) if isinstance(result, dict) else {}
-                    structure = result.get("structure", {}) if isinstance(result, dict) else {}
-                    structure_aggregate = structure.get("aggregate", {}) if isinstance(structure, dict) else {}
-                    field_metrics = structure.get("field_metrics", []) if isinstance(structure, dict) else []
-                    char_similarity_pct = text_metrics.get("char_similarity_pct")
-                    similarity_ratio = (
-                        float(char_similarity_pct) / 100.0 if char_similarity_pct is not None else None
+                ok_count += 1
+                if not include_in_eval:
+                    if progress_bar is not None:
+                        progress_bar.set_postfix(ok=ok_count, fail=fail_count, skip=skip_count, refresh=False)
+                    continue
+            except FileNotFoundError as e:
+                message = str(e)
+                if "Image folder not found" in message or "No image files found" in message or "Image not found" in message:
+                    _notice(f"[SKIP][이미지 없음] {doc_key}/{path.name}: {message}")
+                    skip_image_count += 1
+                    skip_image_details.append({"doc_key": doc_key, "image_name": path.name, "reason": message})
+                elif "GT not found" in message:
+                    _notice(f"[SKIP][GT 없음] {doc_key}/{path.name}: {message}")
+                    skip_gt_count += 1
+                else:
+                    _notice(f"[SKIP] {doc_key}/{path.name}: {message}")
+                skip_count += 1
+                if progress_bar is not None:
+                    progress_bar.set_postfix(ok=ok_count, fail=fail_count, skip=skip_count, refresh=False)
+                continue
+            except Exception as e:
+                _notice(f"[FAIL] {doc_key}/{path.name}: {e}")
+                fail_count += 1
+                fail_details.append({"doc_key": doc_key, "image_name": path.name, "reason": str(e)})
+                if progress_bar is not None:
+                    progress_bar.set_postfix(ok=ok_count, fail=fail_count, skip=skip_count, refresh=False)
+                if stop_on_error:
+                    raise
+                continue
+
+            eval_path = engine_out_root / doc_key / Path(path.name).stem / "eval" / "gt_eval_summary.json"
+            if eval_path.exists():
+                result = json.loads(eval_path.read_text(encoding="utf-8"))
+                text_metrics = result.get("text", {}) if isinstance(result, dict) else {}
+                structure = result.get("structure", {}) if isinstance(result, dict) else {}
+                structure_aggregate = structure.get("aggregate", {}) if isinstance(structure, dict) else {}
+                field_metrics = structure.get("field_metrics", []) if isinstance(structure, dict) else []
+                char_similarity_pct = text_metrics.get("char_similarity_pct")
+                similarity_ratio = (
+                    float(char_similarity_pct) / 100.0 if char_similarity_pct is not None else None
+                )
+                structure_micro_recall = result.get("structure_micro_recall")
+                structure_macro_f1 = result.get("structure_macro_f1")
+                matched_fields = structure_aggregate.get("matched")
+                total_fields = structure_aggregate.get("gt_total")
+                table_html_info = result.get("table_html", {}) if isinstance(result, dict) else {}
+                table_html_exists = bool(table_html_info.get("exists", False))
+                table_rows_info = result.get("table_rows", {}) if isinstance(result, dict) else {}
+                table_rows_exists = bool(table_rows_info.get("exists", False))
+
+                required_fields = result.get("required_fields", [])
+                if not isinstance(required_fields, list):
+                    required_fields = []
+                per_field = {
+                    str(metric.get("field_path", "")): metric
+                    for metric in field_metrics
+                    if isinstance(metric, dict)
+                }
+
+                missing_required_fields = result.get("missing_required_fields", [])
+                if not isinstance(missing_required_fields, list):
+                    missing_required_fields = []
+                if not missing_required_fields and required_fields and per_field:
+                    for field_name in required_fields:
+                        metric = per_field.get(str(field_name))
+                        if not metric:
+                            missing_required_fields.append(str(field_name))
+                            continue
+                        if int(metric.get("matched", 0)) <= 0:
+                            missing_required_fields.append(str(field_name))
+
+                review_reasons = result.get("review_reasons", [])
+                if not isinstance(review_reasons, list):
+                    review_reasons = []
+                if not review_reasons:
+                    if structure_micro_recall is not None and float(structure_micro_recall) < 0.8:
+                        review_reasons.append("structure_micro_recall<0.8")
+                    if missing_required_fields:
+                        review_reasons.append("required_field_missing")
+                    if str(result.get("type", "")).lower() == "table" and not table_html_exists:
+                        review_reasons.append("table_html_missing")
+                    if str(result.get("type", "")).lower() == "table" and not table_rows_exists:
+                        review_reasons.append("table_rows_missing")
+
+                review_required = bool(result.get("review_required", bool(review_reasons)))
+                row = {
+                    "id": result.get("id"),
+                    "doc_key": doc_key,
+                    "type": result.get("type"),
+                    "status": result.get("status"),
+                    "text_similarity": similarity_ratio,
+                    "cer": text_metrics.get("cer"),
+                    "wer": text_metrics.get("wer"),
+                    "structure_micro_recall": structure_micro_recall,
+                    "structure_macro_f1": structure_macro_f1,
+                    "matched_fields": matched_fields,
+                    "total_fields": total_fields,
+                    "table_html_exists": table_html_exists,
+                    "table_rows_exists": table_rows_exists,
+                    "review_required": review_required,
+                    "review_reasons": "|".join(review_reasons),
+                    "missing_required_fields": "|".join(missing_required_fields),
+                    "latency_ms": result.get("latency_ms"),
+                }
+                eval_rows.append(row)
+                if review_required:
+                    review_queue_rows.append(
+                        {
+                            "id": result.get("id"),
+                            "doc_key": doc_key,
+                            "image_name": path.name,
+                            "type": result.get("type"),
+                            "review_reasons": review_reasons,
+                            "missing_required_fields": missing_required_fields,
+                            "structure_micro_recall": structure_micro_recall,
+                            "structure_macro_f1": structure_macro_f1,
+                            "eval_path": str(eval_path),
+                            "pred_structured_path": str(eval_path.parent / "gt_pred_structured.json"),
+                            "pred_table_html_path": str(eval_path.parent.parent / "inference" / "pred_table_raw.html"),
+                            "pred_table_rows_path": str(eval_path.parent.parent / "inference" / "pred_table_layout.json"),
+                        }
                     )
-                    structure_micro_recall = result.get("structure_micro_recall")
-                    structure_macro_f1 = result.get("structure_macro_f1")
-                    matched_fields = structure_aggregate.get("matched")
-                    total_fields = structure_aggregate.get("gt_total")
-                    table_html_info = result.get("table_html", {}) if isinstance(result, dict) else {}
-                    table_html_exists = bool(table_html_info.get("exists", False))
-                    table_rows_info = result.get("table_rows", {}) if isinstance(result, dict) else {}
-                    table_rows_exists = bool(table_rows_info.get("exists", False))
 
-                    required_fields = result.get("required_fields", [])
-                    if not isinstance(required_fields, list):
-                        required_fields = []
-                    per_field = {
-                        str(metric.get("field_path", "")): metric
-                        for metric in field_metrics
-                        if isinstance(metric, dict)
-                    }
-
-                    missing_required_fields = result.get("missing_required_fields", [])
-                    if not isinstance(missing_required_fields, list):
-                        missing_required_fields = []
-                    if not missing_required_fields and required_fields and per_field:
-                        for field_name in required_fields:
-                            metric = per_field.get(str(field_name))
-                            if not metric:
-                                missing_required_fields.append(str(field_name))
-                                continue
-                            if int(metric.get("matched", 0)) <= 0:
-                                missing_required_fields.append(str(field_name))
-
-                    review_reasons = result.get("review_reasons", [])
-                    if not isinstance(review_reasons, list):
-                        review_reasons = []
-                    if not review_reasons:
-                        if structure_micro_recall is not None and float(structure_micro_recall) < 0.8:
-                            review_reasons.append("structure_micro_recall<0.8")
-                        if missing_required_fields:
-                            review_reasons.append("required_field_missing")
-                        if str(result.get("type", "")).lower() == "table" and not table_html_exists:
-                            review_reasons.append("table_html_missing")
-                        if str(result.get("type", "")).lower() == "table" and not table_rows_exists:
-                            review_reasons.append("table_rows_missing")
-
-                    review_required = bool(result.get("review_required", bool(review_reasons)))
-                    row = {
-                        "id": result.get("id"),
-                        "doc_key": doc_key,
-                        "type": result.get("type"),
-                        "status": result.get("status"),
-                        "text_similarity": similarity_ratio,
-                        "cer": text_metrics.get("cer"),
-                        "wer": text_metrics.get("wer"),
-                        "structure_micro_recall": structure_micro_recall,
-                        "structure_macro_f1": structure_macro_f1,
-                        "matched_fields": matched_fields,
-                        "total_fields": total_fields,
-                        "table_html_exists": table_html_exists,
-                        "table_rows_exists": table_rows_exists,
-                        "review_required": review_required,
-                        "review_reasons": "|".join(review_reasons),
-                        "missing_required_fields": "|".join(missing_required_fields),
-                        "latency_ms": result.get("latency_ms"),
-                    }
-                    eval_rows.append(row)
-                    if review_required:
-                        review_queue_rows.append(
-                            {
-                                "id": result.get("id"),
-                                "doc_key": doc_key,
-                                "image_name": path.name,
-                                "type": result.get("type"),
-                                "review_reasons": review_reasons,
-                                "missing_required_fields": missing_required_fields,
-                                "structure_micro_recall": structure_micro_recall,
-                                "structure_macro_f1": structure_macro_f1,
-                                "eval_path": str(eval_path),
-                                "pred_structured_path": str(eval_path.parent / "gt_pred_structured.json"),
-                                "pred_table_html_path": str(eval_path.parent.parent / "inference" / "pred_table_raw.html"),
-                                "pred_table_rows_path": str(eval_path.parent.parent / "inference" / "pred_table_layout.json"),
-                            }
-                        )
-
+                if not quiet:
                     similarity_pct = (
                         float(row["text_similarity"]) * 100.0 if row.get("text_similarity") is not None else 0.0
                     )
@@ -2153,33 +2251,26 @@ def ocr_run_batch(
                             f"missing_required={row.get('missing_required_fields')}"
                         )
                     print(f"latency_ms: {row['latency_ms']}")
-        except FileNotFoundError as e:
-            message = str(e)
-            if "Image folder not found" in message or "No image files found" in message or "Image not found" in message:
-                print(f"[SKIP][이미지 없음] {message}")
-                skip_image_count += 1
-                skip_image_details.append({"doc_key": doc_key, "image_name": "-", "reason": message})
-            elif "GT not found" in message:
-                print(f"[SKIP][GT 없음] {message}")
-                skip_gt_count += 1
-            else:
-                print(f"[SKIP] {message}")
-            skip_count += 1
-        except Exception as e:
-            print(f"[FAIL] {doc_key}: {e}")
-            fail_count += 1
-            fail_details.append({"doc_key": doc_key, "image_name": "-", "reason": str(e)})
-            if stop_on_error:
-                raise
+
+            if progress_bar is not None:
+                progress_bar.set_postfix(ok=ok_count, fail=fail_count, skip=skip_count, refresh=False)
+    finally:
+        if progress_bar is not None:
+            progress_bar.close()
 
     print("\n=== OCR Batch Summary ===")
     print(f"1. total_docs: {len(doc_dirs)}")
+    print(f"1-1. total_images: {len(jobs)}")
     print(f"2. ok: {ok_count}")
     print(f"3. skip: {skip_count}")
     print(f"3-1. skip_image_missing: {skip_image_count}")
     print(f"3-2. skip_gt_missing: {skip_gt_count}")
+    print(f"3-3. images_root: {images_root}")
+    print(f"3-4. output_root: {engine_out_root}")
+    if images_tag:
+        print(f"3-5. images_tag: {images_tag}")
     if skip_image_details:
-        print("3-3. skip_image_missing_details:")
+        print("3-6. skip_image_missing_details:")
         for idx, detail in enumerate(skip_image_details, start=1):
             print(f"  {idx}) doc_key={detail['doc_key']} image={detail['image_name']} reason={detail['reason']}")
     print(f"4. fail: {fail_count}")
@@ -2189,7 +2280,6 @@ def ocr_run_batch(
             print(f"  {idx}) doc_key={detail['doc_key']} image={detail['image_name']} reason={detail['reason']}")
 
     if eval_rows:
-        engine_out_root = Path(output_root) / _engine_dir_name(normalized_engine)
         engine_out_root.mkdir(parents=True, exist_ok=True)
 
         summary_csv_path = engine_out_root / "ocr_eval_summary.csv"
@@ -2300,11 +2390,13 @@ def ocr_run_batch(
             review_queue_path.write_text("", encoding="utf-8")
         print(f"saved_review_queue_jsonl: {review_queue_path}")
     elif not require_gt:
-        engine_out_root = Path(output_root) / _engine_dir_name(normalized_engine)
         engine_out_root.mkdir(parents=True, exist_ok=True)
         inference_summary = {
             "mode": "inference_only",
             "engine": normalized_engine,
+            "images_root": images_root,
+            "images_tag": images_tag,
+            "engine_output_root": str(engine_out_root),
             "total_docs": len(doc_dirs),
             "ok": ok_count,
             "skip": skip_count,
@@ -2713,6 +2805,11 @@ def main() -> None:
         help="Output JSONL path (default: outputs/eval_harness_results.jsonl)",
     )
     harness_parser.add_argument(
+        "--evaluation-set",
+        default=None,
+        help="Eval questions JSONL (default: paths.evaluation_set in config)",
+    )
+    harness_parser.add_argument(
         "--judge-model",
         default="gpt-5-mini",
         help="OpenAI chat model for faithfulness/relevance scoring",
@@ -3043,6 +3140,11 @@ def main() -> None:
         action="store_true",
         help="Allow exporting RAG handoff from inference-only OCR outputs (pred_raw/pred_table_layout) without GT eval files.",
     )
+    ocr_export_parser.add_argument(
+        "--images-tag",
+        default=None,
+        help="Optional OCR images version tag filter (e.g. v4_table_filtered_260531).",
+    )
 
     ocr_parser = subparsers.add_parser(
         "extract-ocr-images",
@@ -3101,19 +3203,16 @@ def main() -> None:
         "ocr-run-image",
         help="Run OCR/eval for one image with doc_key-based path resolution",
     )
-    ocr_image_parser.add_argument("--doc-key", required=True, help="Document key (folder name under ocr_images)")
+    ocr_image_parser.add_argument(
+        "--doc-key",
+        required=True,
+        help="Document key (folder name under paths.images_root from ocr-config)",
+    )
     ocr_image_parser.add_argument(
         "--id",
         default=None,
         help="Target item id. If omitted, auto-detected from GT JSON when unique.",
     )
-    ocr_image_parser.add_argument("--images-root", default="data/v2/ocr_images", help="Root folder of OCR images")
-    ocr_image_parser.add_argument(
-        "--gt-root",
-        default="data/v2/ocr_outputs/incoming_gt",
-        help="Root folder of GT files (.jsonl preferred, .json supported)",
-    )
-    ocr_image_parser.add_argument("--output-root", default="data/v2/ocr_outputs", help="Root folder of OCR outputs")
     ocr_image_parser.add_argument("--image-name", default="img_001.jpg", help="Image filename inside doc folder")
     ocr_image_parser.add_argument("--lang", default="korean", help="PaddleOCR language fallback")
     ocr_image_parser.add_argument(
@@ -3165,17 +3264,10 @@ def main() -> None:
         "ocr-run-batch",
         help="Run OCR/eval for all doc folders under ocr_images",
     )
-    ocr_batch_parser.add_argument("--images-root", default="data/v2/ocr_images", help="Root folder of OCR images")
-    ocr_batch_parser.add_argument(
-        "--gt-root",
-        default="data/v2/ocr_outputs/incoming_gt",
-        help="Root folder of GT files (.jsonl preferred, .json supported)",
-    )
-    ocr_batch_parser.add_argument("--output-root", default="data/v2/ocr_outputs", help="Root folder of OCR outputs")
     ocr_batch_parser.add_argument(
         "--doc-key",
         default=None,
-        help="Run batch only for one document key folder under images-root",
+        help="Run batch only for one document key folder under paths.images_root from ocr-config",
     )
     ocr_batch_parser.add_argument("--image-name", default="img_001.jpg", help="Image filename inside doc folder")
     ocr_batch_parser.add_argument("--limit", type=int, default=0, help="Process first N doc folders only; 0=all")
@@ -3228,6 +3320,16 @@ def main() -> None:
         "--no-gt",
         action="store_true",
         help="Run inference-only mode without GT build/eval.",
+    )
+    ocr_batch_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print per-image OCR step logs (default: tqdm progress only).",
+    )
+    ocr_batch_parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable tqdm progress bar for batch OCR.",
     )
 
     pipeline_parser = subparsers.add_parser(
@@ -3301,6 +3403,7 @@ def main() -> None:
         evaluate_harness(
             args.config,
             output_path=args.output,
+            evaluation_set=args.evaluation_set,
             judge_model=args.judge_model,
             no_llm_judge=args.no_llm_judge,
             no_correctness_judge=args.no_correctness_judge,
@@ -3442,6 +3545,7 @@ def main() -> None:
             include_html_chunk=args.include_html_chunk,
             html_chunk_max_chars=args.html_chunk_max_chars,
             allow_inference_only=args.allow_inference_only,
+            images_tag=args.images_tag,
         )
     elif args.command == "extract-ocr-images":
         extract_ocr_images(
@@ -3474,7 +3578,9 @@ def main() -> None:
     elif args.command == "ocr-run-image":
         from src.config_ocr import load_ocr_config
 
-        ocr_cfg = load_ocr_config(args.ocr_config).ocr
+        ocr_app_cfg = load_ocr_config(args.ocr_config)
+        ocr_cfg = ocr_app_cfg.ocr
+        ocr_paths = ocr_app_cfg.paths
         effective_score_threshold = (
             args.score_threshold if args.score_threshold is not None else ocr_cfg.score_threshold
         )
@@ -3483,6 +3589,9 @@ def main() -> None:
             if args.structure_threshold is not None
             else ocr_cfg.structure_match_threshold
         )
+        print(f"[OCR CONFIG] images_root={ocr_paths.images_root}")
+        print(f"[OCR CONFIG] gt_root={ocr_paths.gt_root}")
+        print(f"[OCR CONFIG] output_root={ocr_paths.output_root}")
         engines = list(DEFAULT_OCR_ENGINE_MATRIX) if args.all_engines else [_normalize_ocr_engine(ocr_cfg.engine)]
         failed_engines: list[str] = []
         for engine_name in engines:
@@ -3491,9 +3600,9 @@ def main() -> None:
                 ocr_run_image(
                     doc_key=args.doc_key,
                     item_id=args.id,
-                    images_root=args.images_root,
-                    gt_root=args.gt_root,
-                    output_root=args.output_root,
+                    images_root=ocr_paths.images_root,
+                    gt_root=ocr_paths.gt_root,
+                    output_root=ocr_paths.output_root,
                     image_name=args.image_name,
                     lang=ocr_cfg.lang or args.lang,
                     score_threshold=effective_score_threshold,
@@ -3521,7 +3630,9 @@ def main() -> None:
     elif args.command == "ocr-run-batch":
         from src.config_ocr import load_ocr_config
 
-        ocr_cfg = load_ocr_config(args.ocr_config).ocr
+        ocr_app_cfg = load_ocr_config(args.ocr_config)
+        ocr_cfg = ocr_app_cfg.ocr
+        ocr_paths = ocr_app_cfg.paths
         effective_score_threshold = (
             args.score_threshold if args.score_threshold is not None else ocr_cfg.score_threshold
         )
@@ -3530,15 +3641,18 @@ def main() -> None:
             if args.structure_threshold is not None
             else ocr_cfg.structure_match_threshold
         )
+        print(f"[OCR CONFIG] images_root={ocr_paths.images_root}")
+        print(f"[OCR CONFIG] gt_root={ocr_paths.gt_root}")
+        print(f"[OCR CONFIG] output_root={ocr_paths.output_root}")
         engines = list(DEFAULT_OCR_ENGINE_MATRIX) if args.all_engines else [_normalize_ocr_engine(ocr_cfg.engine)]
         failed_engines: list[str] = []
         for engine_name in engines:
             print(f"\n=== OCR Batch Engine: {engine_name} ===")
             try:
                 ocr_run_batch(
-                    images_root=args.images_root,
-                    gt_root=args.gt_root,
-                    output_root=args.output_root,
+                    images_root=ocr_paths.images_root,
+                    gt_root=ocr_paths.gt_root,
+                    output_root=ocr_paths.output_root,
                     image_name=args.image_name,
                     doc_key=args.doc_key,
                     limit=args.limit,
@@ -3558,6 +3672,8 @@ def main() -> None:
                     table_dual_pass=args.table_dual_pass,
                     table_second_engine=args.table_second_engine,
                     require_gt=not args.no_gt,
+                    quiet=not args.verbose,
+                    show_progress=not args.no_progress,
                 )
             except Exception as exc:
                 failed_engines.append(engine_name)
