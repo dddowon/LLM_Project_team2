@@ -168,15 +168,6 @@ python -m src.cli run-pipeline \
   --force-real
 ```
 
-### 1.5) OCR용 이미지 추출 (`llm_team2`)
-
-```bash
-python -m src.cli extract-ocr-images \
-  --input-dir "data/raw/RFP_file_100" \
-  --output-dir "data/v2/ocr_images" \
-  --recursive
-```
-
 ### 2) OCR — GT 없이 추론 + chunk export (`ocr_vl15`)
 
 ```bash
@@ -196,14 +187,15 @@ wc -l data/v2/ocr_rag/ocr_input_chunks.jsonl
 ```bash
 source ~/llm_team2/bin/activate
 
-python -m src.cli embed-jsonl \
-  --input data/v2/ocr_rag/ocr_input_chunks.jsonl \
-  --output data/v2/ocr_rag/ocr_input_embedded.jsonl \
-  --force-real
+OCR_BASE="data/v2/ocr_rag/paddleocr_vl/v4_table_filtered_260531"
 
+python -m src.cli embed-jsonl \
+  --input "${OCR_BASE}/ocr_input_chunks.jsonl" \
+  --output "${OCR_BASE}/ocr_input_embedded.jsonl" \
+  --force-real
 python -m src.cli build-chroma \
-  --input data/v2/ocr_rag/ocr_input_embedded.jsonl \
-  --index-dir data/v2/ocr_rag/chroma_index
+  --input "${OCR_BASE}/ocr_input_embedded.jsonl" \
+  --index-dir "${OCR_BASE}/chroma_index"
 ```
 
 ### 3) 통합 Chroma (`llm_team2`) — query·eval 공용
@@ -232,6 +224,8 @@ python -m src.cli --config configs/default.yaml query \
 ```bash
 python -m src.evaluation.generate_eval_questions \
   --input-dir data/v2 \
+  --pattern "mixed_chunks_slim.jsonl" \
+  --extra-chunk-file "data/v2/ocr_rag/paddleocr_vl/v4_table_filtered_260531/ocr_input_chunks.jsonl" \
   --max-docs 100 \
   --max-chunks-per-doc 12 \
   --questions-per-doc 5 \
