@@ -43,6 +43,7 @@ OCR_CONFIG_PATH="${OCR_CONFIG_PATH:-configs/ocr_default.yaml}"
 INPUT_CHUNKS="${INPUT_CHUNKS:-data/v2/ocr_rag/ocr_input_chunks.jsonl}"
 OUTPUT_EMBEDDED="${OUTPUT_EMBEDDED:-}"
 INDEX_DIR="${INDEX_DIR:-}"
+RAG_INDEX_VERSION="${RAG_INDEX_VERSION:-}"
 EMBED_MODEL="${EMBED_MODEL:-text-embedding-3-small}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 FORCE_REAL="${FORCE_REAL:-0}"
@@ -74,10 +75,12 @@ fi
 
 OUTPUT_EMBEDDED="${OUTPUT_EMBEDDED:-${RAG_VARIANT_DIR}/ocr_input_embedded.jsonl}"
 INDEX_DIR="${INDEX_DIR:-${RAG_VARIANT_DIR}/chroma_index}"
+RAG_INDEX_VERSION="${RAG_INDEX_VERSION:-${OCR_IMAGES_TAG:-default}}"
 
 echo "[RAG STAGE] input=${INPUT_CHUNKS}"
 echo "[RAG STAGE] ocr_engine=${OCR_ENGINE}"
 echo "[RAG STAGE] images_tag=${OCR_IMAGES_TAG:-<none>}"
+echo "[RAG STAGE] rag_index_version=${RAG_INDEX_VERSION}"
 echo "[RAG STAGE] output_embedded=${OUTPUT_EMBEDDED}"
 echo "[RAG STAGE] index_dir=${INDEX_DIR}"
 
@@ -100,6 +103,20 @@ python -m src.cli build-chroma \
   --input "${OUTPUT_EMBEDDED}" \
   --index-dir "${INDEX_DIR}"
 
+RAG_INDEX_METADATA="${INDEX_DIR}/rag_index_metadata.json"
+cat > "${RAG_INDEX_METADATA}" <<EOF
+{
+  "schema_version": "rag_index_metadata.v1",
+  "rag_index_version": "${RAG_INDEX_VERSION}",
+  "ocr_engine": "${OCR_ENGINE}",
+  "images_tag": "${OCR_IMAGES_TAG}",
+  "input_chunks": "${INPUT_CHUNKS}",
+  "output_embedded": "${OUTPUT_EMBEDDED}",
+  "index_dir": "${INDEX_DIR}"
+}
+EOF
+
 echo "[RAG STAGE DONE]"
 echo "embedded: ${OUTPUT_EMBEDDED}"
 echo "index: ${INDEX_DIR}"
+echo "index_metadata: ${RAG_INDEX_METADATA}"

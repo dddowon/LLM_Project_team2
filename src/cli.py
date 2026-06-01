@@ -652,6 +652,13 @@ def export_ocr_rag_handoff(
     html_chunk_max_chars: int,
     allow_inference_only: bool,
     images_tag: str | None,
+    curated_root: str | None,
+    curated_file_name: str,
+    input_version: str | None,
+    ocr_engine_version: str | None,
+    ocr_output_version: str | None,
+    ocr_curated_version: str | None,
+    rag_index_version: str | None,
 ) -> None:
     from src.pipeline.ocr_rag_bridge import export_ocr_eval_to_rag_inputs
 
@@ -666,6 +673,13 @@ def export_ocr_rag_handoff(
         html_chunk_max_chars=html_chunk_max_chars,
         allow_inference_only=allow_inference_only,
         images_tag=images_tag,
+        curated_root=Path(curated_root) if curated_root else None,
+        curated_file_name=curated_file_name,
+        input_version=input_version,
+        ocr_engine_version=ocr_engine_version,
+        ocr_output_version=ocr_output_version,
+        ocr_curated_version=ocr_curated_version,
+        rag_index_version=rag_index_version,
     )
     print("\n=== OCR Export Summary ===")
     print("1. status: ocr_export_rag_done")
@@ -3145,6 +3159,41 @@ def main() -> None:
         default=None,
         help="Optional OCR images version tag filter (e.g. v4_table_filtered_260531).",
     )
+    ocr_export_parser.add_argument(
+        "--curated-root",
+        default=None,
+        help="Optional curated root. If set, {curated_root}/{engine}/{doc_key}/{image_stem}/{curated-file-name} is preferred over raw table layout.",
+    )
+    ocr_export_parser.add_argument(
+        "--curated-file-name",
+        default="pred_table_layout.curated.json",
+        help="Curated table layout file name under curated root.",
+    )
+    ocr_export_parser.add_argument(
+        "--input-version",
+        default=None,
+        help="Input document-set version tag (lineage metadata).",
+    )
+    ocr_export_parser.add_argument(
+        "--ocr-engine-version",
+        default=None,
+        help="OCR engine/model version tag (lineage metadata).",
+    )
+    ocr_export_parser.add_argument(
+        "--ocr-output-version",
+        default=None,
+        help="Raw OCR output version tag (lineage metadata).",
+    )
+    ocr_export_parser.add_argument(
+        "--ocr-curated-version",
+        default=None,
+        help="Curated OCR output version tag (lineage metadata).",
+    )
+    ocr_export_parser.add_argument(
+        "--rag-index-version",
+        default=None,
+        help="Planned RAG index version tag (lineage metadata).",
+    )
 
     ocr_parser = subparsers.add_parser(
         "extract-ocr-images",
@@ -3546,6 +3595,13 @@ def main() -> None:
             html_chunk_max_chars=args.html_chunk_max_chars,
             allow_inference_only=args.allow_inference_only,
             images_tag=args.images_tag,
+            curated_root=args.curated_root,
+            curated_file_name=args.curated_file_name,
+            input_version=args.input_version,
+            ocr_engine_version=args.ocr_engine_version,
+            ocr_output_version=args.ocr_output_version,
+            ocr_curated_version=args.ocr_curated_version,
+            rag_index_version=args.rag_index_version,
         )
     elif args.command == "extract-ocr-images":
         extract_ocr_images(

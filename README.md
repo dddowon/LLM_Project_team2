@@ -761,6 +761,26 @@ OCR_USE_GT=1 \
 
 eval/query에서 OCR을 검색하려면 위 embedded를 **통합 인덱스** 절의 `merge-embedded`로 `checkpoints/chroma_openai`에 병합하세요.
 
+### Curated 반영 릴리즈 (권장)
+
+사람 검수 후 `ocr_curated`를 기준으로 RAG를 갱신하려면 아래처럼 실행합니다.
+
+```bash
+OCR_OUTPUT_VERSION=v4_table_filtered_260531 \
+OCR_CURATED_VERSION=v4_curated_20260601_1542 \
+./scripts/run_curated_rag_stage.sh
+```
+
+curated 경로 규칙(고정):
+
+- `data/v2/ocr_curated/paddleocr_vl/<OCR_CURATED_VERSION>/<doc>/<img>/pred_table_layout.curated.json`
+
+`STRICT_CURATED=1` 품질 게이트:
+
+- `run_curated_rag_stage.sh`는 기본적으로 `STRICT_CURATED=1`을 강제합니다.
+- handoff manifest에서 `table_source=raw`가 1건이라도 있으면 즉시 실패합니다.
+- 즉 curated 파일 누락/경로 불일치를 배포 전에 차단합니다.
+
 운영 원칙:
 
 - 팀 간 OCR→RAG 인터페이스 파일은 `data/v2/ocr_rag/ocr_input_chunks.jsonl` 단일 파일로 고정합니다.

@@ -250,6 +250,50 @@ def _format_pred_raw_text(pred_raw: dict[str, Any], *, max_lines: int = 160) -> 
     return "\n".join(lines).strip()
 
 
+def _resolve_curated_table_rows_path(
+    *,
+    curated_root: Path,
+    engine_name: str,
+    doc_key: str,
+    image_stem: str,
+    curated_file_name: str,
+    images_tag: str | None,
+    curated_version: str | None,
+) -> Path:
+    candidates: list[Path] = []
+    normalized_images_tag = _normalize_space(images_tag)
+    normalized_curated_version = _normalize_space(curated_version)
+
+    if normalized_curated_version:
+        candidates.extend(
+            [
+                curated_root / engine_name / normalized_curated_version / doc_key / image_stem / curated_file_name,
+                curated_root / normalized_curated_version / engine_name / doc_key / image_stem / curated_file_name,
+                curated_root / normalized_curated_version / doc_key / image_stem / curated_file_name,
+            ]
+        )
+    if normalized_images_tag:
+        candidates.extend(
+            [
+                curated_root / engine_name / normalized_images_tag / doc_key / image_stem / curated_file_name,
+                curated_root / normalized_images_tag / engine_name / doc_key / image_stem / curated_file_name,
+                curated_root / normalized_images_tag / doc_key / image_stem / curated_file_name,
+            ]
+        )
+
+    candidates.extend(
+        [
+            curated_root / engine_name / doc_key / image_stem / curated_file_name,
+            curated_root / doc_key / image_stem / curated_file_name,
+        ]
+    )
+
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
+
+
 def export_ocr_eval_to_rag_inputs(
     *,
     ocr_eval_root: Path,
@@ -262,6 +306,13 @@ def export_ocr_eval_to_rag_inputs(
     html_chunk_max_chars: int = 1200,
     allow_inference_only: bool = False,
     images_tag: str | None = None,
+    curated_root: Path | None = None,
+    curated_file_name: str = "pred_table_layout.curated.json",
+    input_version: str | None = None,
+    ocr_engine_version: str | None = None,
+    ocr_output_version: str | None = None,
+    ocr_curated_version: str | None = None,
+    rag_index_version: str | None = None,
 ) -> tuple[int, int]:
     manifest_rows: list[dict[str, Any]] = []
     chunk_rows: list[dict[str, Any]] = []
@@ -282,6 +333,17 @@ def export_ocr_eval_to_rag_inputs(
             pred_table_preview_path = image_dir / "inference" / "pred_table_layout.html"
             eval_summary_path = image_dir / "eval" / "gt_eval_summary.json"
             pred_raw_path = image_dir / "inference" / "pred_raw.json"
+            curated_table_rows_path = None
+            if curated_root:
+                curated_table_rows_path = _resolve_curated_table_rows_path(
+                    curated_root=curated_root,
+                    engine_name=engine_name,
+                    doc_key=one_doc_key,
+                    image_stem=image_dir.name,
+                    curated_file_name=curated_file_name,
+                    images_tag=images_tag,
+                    curated_version=ocr_curated_version,
+                )
 
             pred_structured = _load_json(pred_structured_path)
             is_inference_only = not bool(pred_structured)
@@ -289,7 +351,12 @@ def export_ocr_eval_to_rag_inputs(
                 continue
 
             pred_raw = _load_json(pred_raw_path) if is_inference_only else {}
-            table_rows_payload = _load_json(pred_table_rows_path)
+            table_source = "raw"
+            table_rows_source_path = pred_table_rows_path
+            if curated_table_rows_path and curated_table_rows_path.exists():
+                table_source = "curated"
+                table_rows_source_path = curated_table_rows_path
+            table_rows_payload = _load_json(table_rows_source_path)
             eval_summary = _load_json(eval_summary_path)
 
             item_id = (
@@ -309,12 +376,23 @@ def export_ocr_eval_to_rag_inputs(
             if review_required and not include_review_required:
                 continue
 
+            resolved_input_version = _normalize_space(input_version)
+            resolved_ocr_engine_version = _normalize_space(ocr_engine_version) or engine_name
+            resolved_ocr_output_version = _normalize_space(ocr_output_version) or _normalize_space(images_tag)
+            resolved_ocr_curated_version = _normalize_space(ocr_curated_version)
+            resolved_rag_index_version = _normalize_space(rag_index_version)
+
             manifest_row: dict[str, Any] = {
                 "id": item_id,
                 "doc_key": one_doc_key,
                 "image_stem": image_stem,
                 "type": image_type,
                 "ocr_engine": engine_name,
+                "input_version": resolved_input_version,
+                "ocr_engine_version": resolved_ocr_engine_version,
+                "ocr_output_version": resolved_ocr_output_version,
+                "ocr_curated_version": resolved_ocr_curated_version,
+                "rag_index_version": resolved_rag_index_version,
                 "review_required": review_required,
                 "review_reasons": review_reasons,
                 "inference_only": is_inference_only,
@@ -322,10 +400,14 @@ def export_ocr_eval_to_rag_inputs(
                     "pred_structured_path": str(pred_structured_path),
                     "pred_raw_path": str(pred_raw_path),
                     "pred_table_rows_path": str(pred_table_rows_path),
+                    "curated_table_rows_path": str(curated_table_rows_path) if curated_table_rows_path else "",
+                    "table_rows_source_path": str(table_rows_source_path),
                     "pred_table_html_path": str(pred_table_html_path),
                     "pred_table_preview_path": str(pred_table_preview_path),
                     "eval_summary_path": str(eval_summary_path),
                 },
+                "table_source": table_source,
+                "fallback_used": table_source != "curated",
                 "table_sections_count": len(table_rows_payload.get("table_sections", []))
                 if isinstance(table_rows_payload.get("table_sections"), list)
                 else 0,
@@ -342,15 +424,25 @@ def export_ocr_eval_to_rag_inputs(
                 "ocr_item_id": item_id,
                 "ocr_engine": engine_name,
                 "ocr_type": image_type,
+                "input_version": resolved_input_version,
+                "ocr_engine_version": resolved_ocr_engine_version,
+                "ocr_output_version": resolved_ocr_output_version,
+                "ocr_curated_version": resolved_ocr_curated_version,
+                "rag_index_version": resolved_rag_index_version,
                 "pred_structured_path": str(pred_structured_path),
                 "pred_raw_path": str(pred_raw_path),
                 "pred_table_rows_path": str(pred_table_rows_path),
+                "curated_table_rows_path": str(curated_table_rows_path) if curated_table_rows_path else "",
+                "table_rows_source_path": str(table_rows_source_path),
                 "pred_table_html_path": str(pred_table_html_path),
                 "eval_summary_path": str(eval_summary_path),
                 "review_required": str(review_required),
                 "review_reasons": "|".join(str(reason) for reason in review_reasons),
                 "inference_only": str(is_inference_only),
                 "source": "ocr",
+                "table_source": table_source,
+                "source_priority": "curated>raw",
+                "fallback_used": str(table_source != "curated"),
             }
 
             if pred_structured:
