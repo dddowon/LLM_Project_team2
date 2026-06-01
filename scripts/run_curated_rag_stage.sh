@@ -31,6 +31,7 @@ EMBED_MODEL="${EMBED_MODEL:-text-embedding-3-small}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 FORCE_REAL="${FORCE_REAL:-0}"
 STRICT_CURATED="${STRICT_CURATED:-1}"
+USE_MERGE_MANIFEST="${USE_MERGE_MANIFEST:-1}"
 
 if [[ -z "${OCR_OUTPUT_VERSION}" ]]; then
   echo "[ERROR] OCR_OUTPUT_VERSION is required. Example: OCR_OUTPUT_VERSION=v1_extracted_unfiltered"
@@ -42,6 +43,10 @@ if [[ -z "${OCR_CURATED_VERSION}" ]]; then
 fi
 if [[ "${STRICT_CURATED}" != "1" ]]; then
   echo "[ERROR] run_curated_rag_stage.sh requires STRICT_CURATED=1"
+  exit 1
+fi
+if [[ "${USE_MERGE_MANIFEST}" != "1" ]]; then
+  echo "[ERROR] run_curated_rag_stage.sh requires USE_MERGE_MANIFEST=1"
   exit 1
 fi
 
@@ -69,6 +74,8 @@ EXPORT_ARGS=(
   --images-tag "${OCR_OUTPUT_VERSION}"
   --curated-root "${CURATED_ROOT}"
   --curated-file-name "${CURATED_FILE_NAME}"
+  --curated-only
+  --use-merge-manifest
   --ocr-curated-version "${OCR_CURATED_VERSION}"
   --ocr-output-version "${OCR_OUTPUT_VERSION}"
   --output-manifest "${MANIFEST_OUTPUT}"

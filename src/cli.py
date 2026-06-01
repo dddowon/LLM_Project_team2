@@ -654,6 +654,8 @@ def export_ocr_rag_handoff(
     images_tag: str | None,
     curated_root: str | None,
     curated_file_name: str,
+    use_merge_manifest: bool,
+    curated_only: bool,
     input_version: str | None,
     ocr_engine_version: str | None,
     ocr_output_version: str | None,
@@ -675,6 +677,8 @@ def export_ocr_rag_handoff(
         images_tag=images_tag,
         curated_root=Path(curated_root) if curated_root else None,
         curated_file_name=curated_file_name,
+        use_merge_manifest=use_merge_manifest,
+        curated_only=curated_only,
         input_version=input_version,
         ocr_engine_version=ocr_engine_version,
         ocr_output_version=ocr_output_version,
@@ -3170,6 +3174,16 @@ def main() -> None:
         help="Curated table layout file name under curated root.",
     )
     ocr_export_parser.add_argument(
+        "--use-merge-manifest",
+        action="store_true",
+        help="When set, read merge_manifest.json under curated doc folders and export merged units (e.g., img_005_006).",
+    )
+    ocr_export_parser.add_argument(
+        "--curated-only",
+        action="store_true",
+        help="Use only curated dataset as export source (do not enumerate ocr_outputs image units).",
+    )
+    ocr_export_parser.add_argument(
         "--input-version",
         default=None,
         help="Input document-set version tag (lineage metadata).",
@@ -3597,6 +3611,8 @@ def main() -> None:
             images_tag=args.images_tag,
             curated_root=args.curated_root,
             curated_file_name=args.curated_file_name,
+            use_merge_manifest=args.use_merge_manifest,
+            curated_only=args.curated_only,
             input_version=args.input_version,
             ocr_engine_version=args.ocr_engine_version,
             ocr_output_version=args.ocr_output_version,

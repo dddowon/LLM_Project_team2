@@ -75,6 +75,13 @@ OCR_OUTPUT_VERSION="${OCR_OUTPUT_VERSION:-}"
 OCR_CURATED_VERSION="${OCR_CURATED_VERSION:-}"
 RAG_INDEX_VERSION="${RAG_INDEX_VERSION:-}"
 STRICT_CURATED="${STRICT_CURATED:-0}"
+USE_MERGE_MANIFEST="${USE_MERGE_MANIFEST:-0}"
+
+if [[ "${USE_MERGE_MANIFEST}" == "1" ]]; then
+  echo "[ERROR] run_ocr_stage.sh does not allow USE_MERGE_MANIFEST=1."
+  echo "        Use ./scripts/run_curated_rag_stage.sh for merge-manifest based curated release."
+  exit 1
+fi
 
 if ! command -v conda >/dev/null 2>&1; then
   echo "[ERROR] conda not found. Activate '${OCR_ENV_NAME}' manually and rerun."
