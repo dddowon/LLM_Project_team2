@@ -885,12 +885,139 @@ def table_metadata(record: dict[str, Any]) -> dict[str, Any]:
             "table_rows": table.get("rows"),
             "table_cols": table.get("cols"),
             "table_cell_count": table.get("cell_count"),
+            "continuation_group_id": record.get("continuation_group_id", ""),
+            "table_continuation_role": record.get("table_continuation_role", ""),
+            "continued_from_table_id": record.get("continued_from_table_id", ""),
+            "continued_to_table_id": record.get("continued_to_table_id", ""),
         }
     )
     if table.get("nested_table_count") is not None:
         metadata["nested_table_count"] = table.get("nested_table_count")
     return {key: value for key, value in metadata.items() if value not in ("", None, [])}
 
+
+def table_header_tokens(record: dict[str, Any]) -> set[str]:
+    table = record.get("table") or {}
+    tokens: set[str] = set()
+    rows_data = table.get("rows_data")
+    if isinstance(rows_data, list):
+        for row in rows_data[:5]:
+            cells = row.get("cells") if isinstance(row, dict) else None
+            if not isinstance(cells, dict):
+                continue
+            for key in cells:
+                clean = compact_key(str(key))
+                if clean and not clean.startswith("col"):
+                    tokens.add(clean)
+    markdown = str(table.get("markdown") or "")
+    for line in markdown.splitlines()[:3]:
+        for cell in line.strip("| ").split("|"):
+            clean = compact_key(cell)
+            if clean and clean != "---":
+                tokens.add(clean)
+    return tokens
+
+
+def table_section_key(record: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
+    return (
+        str(record.get("file_name") or ""),
+        tuple(str(item) for item in (record.get("section_path") or [])),
+    )
+
+
+def likely_continuation_table(previous: dict[str, Any], current: dict[str, Any]) -> bool:
+    if previous.get("content_type") != "table" or current.get("content_type") != "table":
+        return False
+    if table_section_key(previous) != table_section_key(current):
+        return False
+
+    previous_table = previous.get("table") or {}
+    current_table = current.get("table") or {}
+    previous_cols = previous_table.get("cols")
+    current_cols = current_table.get("cols")
+    same_col_count = bool(previous_cols and current_cols and previous_cols == current_cols)
+
+    previous_type = str(previous.get("table_type") or "")
+    current_type = str(current.get("table_type") or "")
+    compatible_type = previous_type == current_type or {
+        previous_type,
+        current_type,
+    } <= {"data_table", "schedule_table", "requirement_table", "evaluation_table"}
+
+    if not (same_col_count and compatible_type):
+        return False
+
+    previous_headers = table_header_tokens(previous)
+    current_headers = table_header_tokens(current)
+    if previous_headers and current_headers:
+        overlap = len(previous_headers & current_headers) / max(1, min(len(previous_headers), len(current_headers)))
+        return overlap >= 0.5
+
+    return bool(same_col_count and compatible_type)
+
+
+def is_table_continuation_gap(record: dict[str, Any]) -> bool:
+    content_type = str(record.get("content_type") or "")
+    if content_type not in {"section_text", "cover_text", "toc"}:
+        return False
+    text = clean_text_block(record.get("text", ""))
+    if not text:
+        return True
+    compact = re.sub(r"\s+", "", text)
+    return len(compact) <= 40
+
+
+def annotate_table_continuations(records: list[dict[str, Any]]) -> None:
+    """Mark adjacent table records that look like one table split across pages."""
+    group_index = 0
+    previous_table_index: int | None = None
+    current_group_id = ""
+
+    for index, record in enumerate(records):
+        if record.get("content_type") != "table":
+            if previous_table_index is not None and is_table_continuation_gap(record):
+                continue
+            previous_table_index = None
+            current_group_id = ""
+            continue
+
+        if previous_table_index is not None and likely_continuation_table(
+            records[previous_table_index], record
+        ):
+            previous = records[previous_table_index]
+            if not current_group_id:
+                group_index += 1
+                current_group_id = f"table_continuation_{group_index:04d}"
+                previous["continuation_group_id"] = current_group_id
+                previous["table_continuation_role"] = "start"
+            previous["continued_to_table_id"] = record.get("table_id", "")
+            record["continuation_group_id"] = current_group_id
+            record["table_continuation_role"] = "continued"
+            record["continued_from_table_id"] = previous.get("table_id", "")
+        else:
+            current_group_id = ""
+
+        previous_table_index = index
+
+
+def table_continuation_prefix(record: dict[str, Any]) -> list[str]:
+    role = str(record.get("table_continuation_role") or "")
+    group_id = str(record.get("continuation_group_id") or "")
+    if not role or not group_id:
+        return []
+
+    table_id = str(record.get("table_id") or "")
+    if role == "start":
+        next_id = str(record.get("continued_to_table_id") or "")
+        suffix = f" Continued to table {next_id}." if next_id else ""
+        return [f"[TABLE CONTINUATION {group_id}] Table {table_id} starts a table split across pages.{suffix}"]
+
+    previous_id = str(record.get("continued_from_table_id") or "")
+    next_id = str(record.get("continued_to_table_id") or "")
+    parts = [f"[TABLE CONTINUATION {group_id}] Table {table_id} continues from table {previous_id}."]
+    if next_id:
+        parts.append(f" Continued to table {next_id}.")
+    return ["".join(parts)]
 
 def chunks_from_table(
     record: dict[str, Any],
@@ -906,7 +1033,8 @@ def chunks_from_table(
     prefix_lines: list[str] = []
     if pending_context_note:
         prefix_lines.append(f"직전본문: {pending_context_note}")
-        prefix_lines.append("표위치: 위 직전본문 다음에 이 표가 이어짐")
+        prefix_lines.append("The following table appears after the previous context.")
+    prefix_lines.extend(table_continuation_prefix(record))
 
     chunks: list[dict[str, Any]] = []
 
@@ -1239,6 +1367,7 @@ def same_text_bucket(left: dict[str, Any], right: dict[str, Any]) -> bool:
 
 
 def build_rag_chunks(records: list[dict[str, Any]], args: argparse.Namespace) -> list[dict[str, Any]]:
+    annotate_table_continuations(records)
     chunks: list[dict[str, Any]] = []
     text_buffer: list[dict[str, Any]] = []
     next_chunk_no = 1
@@ -1312,7 +1441,16 @@ def build_rag_chunks(records: list[dict[str, Any]], args: argparse.Namespace) ->
 def compact_output_metadata(chunks: list[dict[str, Any]]) -> None:
     """Keep only metadata that is useful for retrieval filters and citations."""
     common_keys = ["file_name", "section_path", "section_type", "heading"]
-    table_keys = ["table_type", "table_shape", "table_id", "row_range"]
+    table_keys = [
+        "table_type",
+        "table_shape",
+        "table_id",
+        "row_range",
+        "continuation_group_id",
+        "table_continuation_role",
+        "continued_from_table_id",
+        "continued_to_table_id",
+    ]
     link_keys = ["next_table_id", "next_table_type", "next_table_shape"]
     for chunk in chunks:
         metadata = chunk.get("metadata", {})
