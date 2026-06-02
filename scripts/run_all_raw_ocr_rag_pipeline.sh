@@ -19,6 +19,35 @@ format_elapsed() {
   printf "%02dh %02dm %02ds" "${h}" "${m}" "${s}"
 }
 
+infer_images_tag() {
+  local images_root="$1"
+  local marker="ocr_images/"
+  local suffix=""
+  local tag=""
+  if [[ "${images_root}" == *"${marker}"* ]]; then
+    suffix="${images_root#*"${marker}"}"
+    tag="${suffix%%/*}"
+  fi
+  printf "%s" "${tag}"
+}
+
+load_ocr_runtime_from_config() {
+  local config_path="$1"
+  python - "${config_path}" <<'PY'
+import shlex
+import sys
+from src.config_ocr import load_ocr_config
+
+cfg = load_ocr_config(sys.argv[1])
+pairs = {
+    "OCR_ENGINE_FROM_CONFIG": cfg.ocr.engine,
+    "IMAGES_ROOT_FROM_CONFIG": cfg.paths.images_root,
+}
+for key, value in pairs.items():
+    print(f"{key}={shlex.quote(str(value))}")
+PY
+}
+
 RUN_RAG_STAGE="${RUN_RAG_STAGE:-1}" # 1: OCR 후 RAG까지 실행, 0: OCR만 실행
 
 # OCR stage env/args
@@ -52,10 +81,21 @@ EMBED_MODEL="${EMBED_MODEL:-text-embedding-3-small}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 FORCE_REAL="${FORCE_REAL:-0}"
 
+eval "$(load_ocr_runtime_from_config "${OCR_CONFIG_PATH}")"
+OCR_IMAGES_TAG_FROM_CONFIG="$(infer_images_tag "${IMAGES_ROOT_FROM_CONFIG}")"
+if [[ -z "${CHUNKS_OUTPUT}" ]]; then
+  DEFAULT_RAG_HANDOFF_DIR="${RAG_HANDOFF_DIR:-data/v2/ocr_rag/${OCR_ENGINE_FROM_CONFIG}}"
+  if [[ -n "${OCR_IMAGES_TAG_FROM_CONFIG}" ]]; then
+    DEFAULT_RAG_HANDOFF_DIR="${DEFAULT_RAG_HANDOFF_DIR}/${OCR_IMAGES_TAG_FROM_CONFIG}"
+  fi
+  CHUNKS_OUTPUT="${DEFAULT_RAG_HANDOFF_DIR}/ocr_input_chunks.jsonl"
+fi
+
 echo "[PIPELINE] root=${ROOT_DIR}"
 echo "[PIPELINE] run_rag_stage=${RUN_RAG_STAGE}"
 echo "[PIPELINE] ocr_config=${OCR_CONFIG_PATH}"
 echo "[PIPELINE] doc_key=${DOC_KEY:-<all>}"
+echo "[PIPELINE] chunks_output=${CHUNKS_OUTPUT}"
 
 OCR_ENV_NAME="${OCR_ENV_NAME}" \
 OCR_CONFIG_PATH="${OCR_CONFIG_PATH}" \

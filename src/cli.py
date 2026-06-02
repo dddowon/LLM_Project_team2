@@ -835,6 +835,92 @@ def _dedupe_text_rows(rows: list[dict]) -> list[dict]:
     return deduped_rows
 
 
+def _rect_to_poly(bbox: list[float | int]) -> list[list[float]]:
+    x1, y1, x2, y2 = [float(value) for value in bbox]
+    return [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
+
+
+def _parse_bbox_text_line(text: str) -> list[float] | None:
+    match = re.search(r"bbox\s*:\s*\[([^\]]+)\]", text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    values = [part.strip() for part in match.group(1).split(",")]
+    if len(values) != 4:
+        return None
+    try:
+        return [float(value) for value in values]
+    except ValueError:
+        return None
+
+
+def _extract_source_canvas_size(payload: dict) -> tuple[int | None, int | None]:
+    raw_items = payload.get("raw_pipeline_output")
+    if not isinstance(raw_items, list) or not raw_items:
+        return None, None
+    first_item = raw_items[0]
+    if not isinstance(first_item, dict):
+        return None, None
+    width = first_item.get("width")
+    height = first_item.get("height")
+    if isinstance(width, (int, float)) and isinstance(height, (int, float)):
+        return int(width), int(height)
+    return None, None
+
+
+def _extract_bbox_rows_for_drawing(payload: dict) -> list[dict]:
+    # [Design Intent] PaddleOCR-VL may serialize layout boxes as text lines
+    # like "bbox: [x1, y1, x2, y2]" instead of structured polygon fields.
+    rows = payload.get("ocr_lines", [])
+    if not isinstance(rows, list):
+        return []
+
+    drawable_rows = [row for row in rows if isinstance(row, dict) and row.get("poly")]
+    if drawable_rows:
+        return drawable_rows
+
+    source_width, source_height = _extract_source_canvas_size(payload)
+    parsed_rows: list[dict] = []
+    pending_bbox: list[float] | None = None
+    pending_label: str | None = None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        text = str(row.get("text") or "").strip()
+        if not text:
+            continue
+
+        lowered = text.lower()
+        if lowered.startswith("label:"):
+            pending_label = text.split(":", 1)[1].strip()
+            continue
+
+        bbox = _parse_bbox_text_line(text)
+        if bbox is not None:
+            pending_bbox = bbox
+            continue
+
+        if pending_bbox is None:
+            continue
+
+        if lowered.startswith("content:"):
+            content = text.split(":", 1)[1].strip()
+        else:
+            content = pending_label or text
+        parsed_rows.append(
+            {
+                "text": content,
+                "score": row.get("score"),
+                "poly": _rect_to_poly(pending_bbox),
+                "source_width": source_width,
+                "source_height": source_height,
+            }
+        )
+        pending_bbox = None
+        pending_label = None
+
+    return parsed_rows
+
+
 def _extract_generic_rows_and_raw(results: object) -> tuple[list[dict], list[dict]]:
     rows: list[dict] = []
     raw_items: list[dict] = []
@@ -871,6 +957,72 @@ def _extract_ppocr_rows_and_raw(results: object) -> tuple[list[dict], list[dict]
         return _dedupe_text_rows(rows), raw_items
     generic_rows, _ = _extract_generic_rows_and_raw(raw_items)
     return generic_rows, raw_items
+
+
+def _draw_and_save_bboxes(image_path: str, bbox_image_output: str, rows: list[dict]) -> None:
+    try:
+        import cv2
+        import numpy as np
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        print("[WARNING] Missing cv2/numpy/PIL for bbox drawing.")
+        return
+
+    image = cv2.imread(image_path)
+    if image is None:
+        return
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    img_height, img_width = image.shape[:2]
+    base_font_size = max(int(img_height * 0.02), 12)
+
+    image_pil = Image.fromarray(image)
+    draw = ImageDraw.Draw(image_pil)
+    
+    font = None
+    for font_path in [
+        "malgun.ttf", 
+        "AppleGothic.ttf", 
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf", 
+        "/usr/share/fonts/nanum/NanumGothic.ttf"
+    ]:
+        try:
+            font = ImageFont.truetype(font_path, base_font_size)
+            break
+        except Exception:
+            pass
+    if font is None:
+        font = ImageFont.load_default()
+
+    for row in rows:
+        poly = row.get("poly")
+        text = row.get("text")
+        if not poly or not isinstance(poly, list):
+            continue
+        try:
+            bbox = np.array(poly, dtype=np.int32)
+            if bbox.ndim == 2 and bbox.shape[1] == 2:
+                source_width = row.get("source_width")
+                source_height = row.get("source_height")
+                if (
+                    isinstance(source_width, int)
+                    and isinstance(source_height, int)
+                    and source_width > 0
+                    and source_height > 0
+                    and (source_width != img_width or source_height != img_height)
+                ):
+                    bbox = bbox.astype(np.float32)
+                    bbox[:, 0] *= img_width / source_width
+                    bbox[:, 1] *= img_height / source_height
+                    bbox = bbox.astype(np.int32)
+                draw.polygon([tuple(point) for point in bbox], outline="red", width=3)
+                if text:
+                    x, y = bbox[0]
+                    draw.text((int(x), int(y) - 10), str(text), font=font, fill=(0, 255, 0))
+        except Exception:
+            pass
+
+    Path(bbox_image_output).parent.mkdir(parents=True, exist_ok=True)
+    image_pil.save(bbox_image_output)
 
 
 def _write_ocr_payload(output_path: str, payload: dict) -> None:
@@ -1518,6 +1670,7 @@ def ocr_run_all(
     table_second_engine: str = "pp_ocrv5",
     require_gt: bool = True,
     quiet: bool = False,
+    bbox_image_output: str | None = None,
 ) -> None:
     normalized_engine = _normalize_ocr_engine(ocr_engine)
     _ocr_batch_log("[1/4] run-ocr", quiet=quiet)
@@ -1632,6 +1785,16 @@ def ocr_run_all(
         )
     else:
         _ocr_batch_log("[4/4] skip-gt-eval (inference-only)", quiet=quiet)
+    
+    if bbox_image_output:
+        _ocr_batch_log("[5/5] draw-bbox-image", quiet=quiet)
+        try:
+            payload = json.loads(Path(pred_raw_output).read_text(encoding="utf-8"))
+            _draw_and_save_bboxes(image_path, bbox_image_output, _extract_bbox_rows_for_drawing(payload))
+            _ocr_batch_log(f"bbox_image_saved: {bbox_image_output}", quiet=quiet)
+        except Exception as exc:
+            _ocr_batch_log(f"bbox_image_failed: {exc}", quiet=quiet)
+
     _ocr_batch_log("ocr_run_all_done", quiet=quiet)
 
 
@@ -1660,6 +1823,12 @@ def _infer_item_id_from_gt(gt_path: Path, image_name: str | None = None) -> str:
                 candidate_stems = [Path(name).stem.lower() for name in candidate_names if name]
                 if image_name in candidate_names or image_stem in candidate_stems:
                     if record_id and record_id not in matched_ids:
+                        matched_ids.append(record_id)
+            # Fallback: match by id suffix, e.g., "..._img_003" for image "img_003.bmp".
+            if not matched_ids:
+                for record in records:
+                    record_id = str(record.get("id", ""))
+                    if record_id and record_id.lower().endswith(f"_{image_stem}") and record_id not in matched_ids:
                         matched_ids.append(record_id)
             if len(matched_ids) == 1:
                 return matched_ids[0]
@@ -1737,7 +1906,7 @@ def _resolve_gt_path(gt_root: str, doc_key: str) -> Path:
     json_path = gt_root_path / f"{doc_key}.json"
     if json_path.exists():
         return json_path
-    for path in sorted(gt_root_path.glob("*.jsonl")) + sorted(gt_root_path.glob("*.json")):
+    for path in sorted(gt_root_path.rglob("*.jsonl")) + sorted(gt_root_path.rglob("*.json")):
         try:
             payload = _load_gt_payload(path)
         except Exception:
@@ -1911,6 +2080,7 @@ def ocr_run_image(
     require_gt: bool = True,
     max_long_side: int | None = 2000,
     quiet: bool = False,
+    save_bbox_image: bool = False,
 ) -> bool:
     (
         image_path,
@@ -1951,6 +2121,8 @@ def ocr_run_image(
         image_path, max_long_side=max_long_side, quiet=quiet
     )
     try:
+        bbox_image_output = str(pred_raw.parent / f"pred_bbox_{Path(image_path.name).stem}.jpg") if save_bbox_image else None
+        
         _ocr_batch_log(f"doc_key: {doc_key}", quiet=quiet)
         _ocr_batch_log(f"image: {image_path}", quiet=quiet)
         _ocr_batch_log(f"image_input: {prepared_image_path}", quiet=quiet)
@@ -1981,6 +2153,7 @@ def ocr_run_image(
             table_second_engine=table_second_engine,
             require_gt=require_gt,
             quiet=quiet,
+            bbox_image_output=bbox_image_output,
         )
     finally:
         if temp_image_path and temp_image_path.exists():
@@ -3322,6 +3495,11 @@ def main() -> None:
         action="store_true",
         help="Run inference-only mode without GT build/eval.",
     )
+    ocr_image_parser.add_argument(
+        "--save-bbox-image",
+        action="store_true",
+        help="Generate and save an image with bounding boxes drawn over detected text.",
+    )
 
     ocr_batch_parser = subparsers.add_parser(
         "ocr-run-batch",
@@ -3691,6 +3869,7 @@ def main() -> None:
                     table_dual_pass=args.table_dual_pass,
                     table_second_engine=args.table_second_engine,
                     require_gt=not args.no_gt,
+                    save_bbox_image=args.save_bbox_image,
                 )
             except Exception as exc:
                 failed_engines.append(engine_name)

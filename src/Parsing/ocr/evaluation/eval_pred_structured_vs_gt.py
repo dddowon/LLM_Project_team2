@@ -255,6 +255,112 @@ def evaluate_structure(
     return field_metrics, aggregate
 
 
+def _build_gt_structure_from_typed_gt(gt_item: dict[str, Any]) -> dict[str, Any]:
+    image_type = str(gt_item.get("image_type", "")).strip().lower()
+    if image_type in {"table", "table_form"}:
+        table_gt = gt_item.get("table_gt")
+        if isinstance(table_gt, dict):
+            grid_text = table_gt.get("grid_text")
+            if isinstance(grid_text, list):
+                flat_cells: list[str] = []
+                for row in grid_text:
+                    if not isinstance(row, list):
+                        continue
+                    for cell in row:
+                        text = str(cell).strip()
+                        if text:
+                            flat_cells.append(text)
+                if flat_cells:
+                    return {"table_text": flat_cells}
+            return {}
+    if image_type == "chart":
+        chart_gt = gt_item.get("chart_gt")
+        if not isinstance(chart_gt, dict):
+            return {}
+        ticks = ((chart_gt.get("x_axis") or {}).get("ticks") or [])
+        series = chart_gt.get("series") or []
+        structure: dict[str, Any] = {}
+        if ticks:
+            structure["컬럼"] = [str(x) for x in ticks]
+        stat_map: dict[str, dict[str, str]] = {}
+        for one_series in series:
+            if not isinstance(one_series, dict):
+                continue
+            name = str(one_series.get("name", "")).strip()
+            values = one_series.get("values") or []
+            if not name:
+                continue
+            stat_map[name] = {str(year): str(val) for year, val in zip(ticks, values)}
+        if stat_map:
+            structure["통계"] = stat_map
+        if structure:
+            return structure
+        derived_text = ((gt_item.get("derived") or {}).get("gt_text_generated") or "")
+        if derived_text:
+            return {"chart_text": [str(derived_text)]}
+    if image_type == "diagram":
+        diagram_gt = gt_item.get("diagram_gt")
+        if isinstance(diagram_gt, dict):
+            flat = flatten_structure_values(diagram_gt)
+            texts: list[str] = []
+            for values in flat.values():
+                for v in values:
+                    value = str(v).strip()
+                    if value:
+                        texts.append(value)
+            if texts:
+                return {"diagram_text": texts}
+        derived_text = ((gt_item.get("derived") or {}).get("gt_text_generated") or "")
+        if derived_text:
+            return {"diagram_text": [str(derived_text)]}
+    return {}
+
+
+def _normalize_pred_structure_by_type(pred_item: dict[str, Any], image_type: str) -> dict[str, Any]:
+    pred_structure = pred_item.get("pred_structure", {})
+    if not isinstance(pred_structure, dict):
+        pred_structure = {}
+    pred_text = str(pred_item.get("pred_text", "")).strip()
+    t = image_type.lower()
+    if t in {"table", "table_form"}:
+        values: list[str] = []
+        for one in pred_structure.values():
+            if isinstance(one, list):
+                values.extend(str(v).strip() for v in one if str(v).strip())
+            else:
+                value = str(one).strip()
+                if value:
+                    values.append(value)
+        if not values and pred_text:
+            values = [pred_text]
+        return {"table_text": values}
+    if t == "chart":
+        values = []
+        for one in pred_structure.values():
+            if isinstance(one, list):
+                values.extend(str(v).strip() for v in one if str(v).strip())
+            else:
+                value = str(one).strip()
+                if value:
+                    values.append(value)
+        if not values and pred_text:
+            values = [pred_text]
+        return {"chart_text": values}
+    if t == "diagram":
+        values = []
+        for one in pred_structure.values():
+            if isinstance(one, list):
+                values.extend(str(v).strip() for v in one if str(v).strip())
+            else:
+                value = str(one).strip()
+                if value:
+                    values.append(value)
+        if not values and pred_text:
+            values = [pred_text]
+        return {"diagram_text": values}
+    return pred_structure
+
+
 def build_eval_report(
     *,
     item_id: str,
@@ -277,10 +383,12 @@ def build_eval_report(
     word_dist = levenshtein_tokens(gt_words, pred_words)
     text_wer = word_dist / max(1, len(gt_words))
 
-    gt_structure = gt_item.get("gt_structure", {}) if isinstance(gt_item.get("gt_structure", {}), dict) else {}
-    pred_structure = (
-        pred_item.get("pred_structure", {}) if isinstance(pred_item.get("pred_structure", {}), dict) else {}
-    )
+    # [Design Intent]
+    # Use typed GT blocks (chart_gt/table_gt/diagram_gt) as the single source of truth.
+    # Do not depend on optional legacy `gt_structure`.
+    image_type = str(gt_item.get("image_type", pred_item.get("type", "unknown"))).strip().lower()
+    gt_structure = _build_gt_structure_from_typed_gt(gt_item)
+    pred_structure = _normalize_pred_structure_by_type(pred_item, image_type)
 
     field_metrics, aggregate = evaluate_structure(gt_structure, pred_structure, threshold=threshold)
 

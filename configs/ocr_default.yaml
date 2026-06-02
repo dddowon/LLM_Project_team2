@@ -8,5 +8,5 @@ ocr:
 
 paths:
   images_root: data/v2/ocr_images/v4_table_filtered_260531
-  gt_root: data/v2/ocr_outputs/incoming_gt
+  gt_root: data/v2/ocr_outputs/incoming_gt/v4_table_filtered_260531
   output_root: data/v2/ocr_outputs

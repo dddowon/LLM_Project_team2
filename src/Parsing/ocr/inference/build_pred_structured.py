@@ -728,7 +728,22 @@ def build_pred_structured(gt_item: dict, pred_raw_item: dict, score_threshold: f
     ]
     result = {key: gt_item.get(key) for key in meta_keys}
     result["pred_text"] = pred_text
-    result["pred_structure"] = build_pred_structure_from_ocr(pred_text, pred_raw_item)
+    image_type = str(gt_item.get("image_type", "unknown")).strip().lower()
+    pred_structure = build_pred_structure_from_ocr(pred_text, pred_raw_item)
+    # [Design Intent]
+    # Ensure non-empty structured output for chart/diagram/table families.
+    # This prevents invalid eval states (pred_total=0) when OCR text exists
+    # but rule-based structure extraction misses the shape.
+    if not pred_structure and pred_text:
+        if image_type == "chart":
+            pred_structure = {"차트_텍스트": [pred_text]}
+        elif image_type == "diagram":
+            pred_structure = {"다이어그램_텍스트": [pred_text]}
+        elif image_type in {"table", "table_form"}:
+            pred_structure = {"테이블_텍스트": [pred_text]}
+        else:
+            pred_structure = {"텍스트": [pred_text]}
+    result["pred_structure"] = pred_structure
     result["type"] = gt_item.get("image_type", "unknown")
     result["status"] = pred_raw_item.get("status", "success" if kept else "empty")
     result["latency_ms"] = pred_raw_item.get("latency_ms")
