@@ -973,7 +973,7 @@ def _draw_and_save_bboxes(image_path: str, bbox_image_output: str, rows: list[di
         return
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     img_height, img_width = image.shape[:2]
-    base_font_size = max(int(img_height * 0.02), 12)
+    base_font_size = max(int(img_height * 0.014), 10)
 
     image_pil = Image.fromarray(image)
     draw = ImageDraw.Draw(image_pil)
@@ -993,7 +993,28 @@ def _draw_and_save_bboxes(image_path: str, bbox_image_output: str, rows: list[di
     if font is None:
         font = ImageFont.load_default()
 
-    for row in rows:
+    palette = [
+        (37, 99, 235),
+        (239, 68, 68),
+        (34, 197, 94),
+        (245, 158, 11),
+        (168, 85, 247),
+        (14, 165, 233),
+        (236, 72, 153),
+        (20, 184, 166),
+    ]
+
+    def _short_label(value: object, score: object) -> str:
+        text_value = str(value or "").strip()
+        if len(text_value) > 18:
+            text_value = f"{text_value[:17]}…"
+        if isinstance(score, (int, float)):
+            return f"{text_value} ({score:.2f})" if text_value else f"{score:.2f}"
+        return text_value
+
+    draw_labels = len(rows) <= 30
+
+    for row_idx, row in enumerate(rows):
         poly = row.get("poly")
         text = row.get("text")
         if not poly or not isinstance(poly, list):
@@ -1014,10 +1035,25 @@ def _draw_and_save_bboxes(image_path: str, bbox_image_output: str, rows: list[di
                     bbox[:, 0] *= img_width / source_width
                     bbox[:, 1] *= img_height / source_height
                     bbox = bbox.astype(np.int32)
-                draw.polygon([tuple(point) for point in bbox], outline="red", width=3)
-                if text:
-                    x, y = bbox[0]
-                    draw.text((int(x), int(y) - 10), str(text), font=font, fill=(0, 255, 0))
+                color = palette[row_idx % len(palette)]
+                points = [tuple(point) for point in bbox]
+                draw.polygon(points, outline=color, width=3)
+
+                label = _short_label(text, row.get("score"))
+                if draw_labels and label:
+                    x_min = int(np.min(bbox[:, 0]))
+                    y_min = int(np.min(bbox[:, 1]))
+                    label_left = max(x_min, 0)
+                    label_top = max(y_min - base_font_size - 6, 0)
+                    label_bbox = draw.textbbox((label_left, label_top), label, font=font)
+                    label_rect = (
+                        label_bbox[0] - 2,
+                        label_bbox[1] - 1,
+                        label_bbox[2] + 2,
+                        label_bbox[3] + 1,
+                    )
+                    draw.rectangle(label_rect, fill=(255, 255, 255), outline=color, width=1)
+                    draw.text((label_left, label_top), label, font=font, fill=color)
         except Exception:
             pass
 
