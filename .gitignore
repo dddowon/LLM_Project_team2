@@ -36,6 +36,7 @@ data/v1/raw/
 data/v2/raw/
 data/v2/ocr_images/
 data/v2/ocr_outputs/
+data/v2/ocr_curated/
 data/v3/raw/
 
 # RFP original documents
@@ -83,6 +84,7 @@ data/v2/*/*_embedded.jsonl
 data/v2/*/*_chunks_sample.jsonl
 data/v2/*/*_chroma_metadata_sample.json
 data/v2/*/*_heading_debug.jsonl
+data/v2/ocr_rag
 
 # Common vector DB / index files
 *.faiss

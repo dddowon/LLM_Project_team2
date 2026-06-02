@@ -67,6 +67,21 @@ HTML_CHUNK_MAX_CHARS="${HTML_CHUNK_MAX_CHARS:-1200}"
 USE_DOC_UNWARPING="${USE_DOC_UNWARPING:-1}"
 TABLE_DUAL_PASS="${TABLE_DUAL_PASS:-0}"
 OCR_USE_GT="${OCR_USE_GT:-0}"
+CURATED_ROOT="${CURATED_ROOT:-}"
+CURATED_FILE_NAME="${CURATED_FILE_NAME:-pred_table_layout.curated.json}"
+INPUT_VERSION="${INPUT_VERSION:-}"
+OCR_ENGINE_VERSION="${OCR_ENGINE_VERSION:-}"
+OCR_OUTPUT_VERSION="${OCR_OUTPUT_VERSION:-}"
+OCR_CURATED_VERSION="${OCR_CURATED_VERSION:-}"
+RAG_INDEX_VERSION="${RAG_INDEX_VERSION:-}"
+STRICT_CURATED="${STRICT_CURATED:-0}"
+USE_MERGE_MANIFEST="${USE_MERGE_MANIFEST:-0}"
+
+if [[ "${USE_MERGE_MANIFEST}" == "1" ]]; then
+  echo "[ERROR] run_ocr_stage.sh does not allow USE_MERGE_MANIFEST=1."
+  echo "        Use ./scripts/run_curated_rag_stage.sh for merge-manifest based curated release."
+  exit 1
+fi
 
 if ! command -v conda >/dev/null 2>&1; then
   echo "[ERROR] conda not found. Activate '${OCR_ENV_NAME}' manually and rerun."
@@ -82,6 +97,8 @@ RAG_HANDOFF_DIR="${RAG_HANDOFF_DIR:-data/v2/ocr_rag/${OCR_ENGINE}}"
 if [[ -n "${OCR_IMAGES_TAG}" ]]; then
   RAG_HANDOFF_DIR="${RAG_HANDOFF_DIR}/${OCR_IMAGES_TAG}"
 fi
+OCR_ENGINE_VERSION="${OCR_ENGINE_VERSION:-${OCR_ENGINE}}"
+OCR_OUTPUT_VERSION="${OCR_OUTPUT_VERSION:-${OCR_IMAGES_TAG}}"
 MANIFEST_OUTPUT="${MANIFEST_OUTPUT:-${RAG_HANDOFF_DIR}/ocr_input_manifest.jsonl}"
 CHUNKS_OUTPUT="${CHUNKS_OUTPUT:-${RAG_HANDOFF_DIR}/ocr_input_chunks.jsonl}"
 
@@ -94,6 +111,10 @@ echo "[OCR STAGE] gt_root=${GT_ROOT}"
 echo "[OCR STAGE] output_root=${OCR_OUTPUT_ROOT}"
 if [[ -n "${OCR_IMAGES_TAG}" ]]; then
   echo "[OCR STAGE] images_tag=${OCR_IMAGES_TAG}"
+fi
+if [[ -n "${CURATED_ROOT}" ]]; then
+  echo "[OCR STAGE] curated_root=${CURATED_ROOT}"
+  echo "[OCR STAGE] curated_file_name=${CURATED_FILE_NAME}"
 fi
 
 OCR_BATCH_ARGS=(
@@ -141,8 +162,59 @@ fi
 if [[ -n "${DOC_KEY}" ]]; then
   EXPORT_ARGS+=(--doc-key "${DOC_KEY}")
 fi
+if [[ -n "${CURATED_ROOT}" ]]; then
+  EXPORT_ARGS+=(--curated-root "${CURATED_ROOT}" --curated-file-name "${CURATED_FILE_NAME}")
+fi
+if [[ -n "${INPUT_VERSION}" ]]; then
+  EXPORT_ARGS+=(--input-version "${INPUT_VERSION}")
+fi
+if [[ -n "${OCR_ENGINE_VERSION}" ]]; then
+  EXPORT_ARGS+=(--ocr-engine-version "${OCR_ENGINE_VERSION}")
+fi
+if [[ -n "${OCR_OUTPUT_VERSION}" ]]; then
+  EXPORT_ARGS+=(--ocr-output-version "${OCR_OUTPUT_VERSION}")
+fi
+if [[ -n "${OCR_CURATED_VERSION}" ]]; then
+  EXPORT_ARGS+=(--ocr-curated-version "${OCR_CURATED_VERSION}")
+fi
+if [[ -n "${RAG_INDEX_VERSION}" ]]; then
+  EXPORT_ARGS+=(--rag-index-version "${RAG_INDEX_VERSION}")
+fi
 
 python "${EXPORT_ARGS[@]}"
+
+if [[ "${STRICT_CURATED}" == "1" ]]; then
+  python - "${MANIFEST_OUTPUT}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest_path = Path(sys.argv[1])
+if not manifest_path.exists():
+    print(f"[ERROR] STRICT_CURATED=1 but manifest not found: {manifest_path}")
+    raise SystemExit(1)
+
+raw_count = 0
+rows = 0
+with manifest_path.open("r", encoding="utf-8") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        rows += 1
+        obj = json.loads(line)
+        if str(obj.get("table_source", "")).strip().lower() == "raw":
+            raw_count += 1
+
+if rows == 0:
+    print(f"[ERROR] STRICT_CURATED=1 but manifest is empty: {manifest_path}")
+    raise SystemExit(1)
+if raw_count > 0:
+    print(f"[ERROR] STRICT_CURATED=1 failed: table_source=raw rows={raw_count}/{rows}")
+    raise SystemExit(1)
+print(f"[OK] STRICT_CURATED=1 passed: all rows use curated source ({rows}/{rows})")
+PY
+fi
 
 STAGE_END_TS="$(date +%s)"
 STAGE_ELAPSED_SEC="$((STAGE_END_TS - STAGE_START_TS))"
@@ -170,8 +242,13 @@ cat <<EOF
 9. images_tag: ${OCR_IMAGES_TAG:-<none>}
 10. manifest: ${MANIFEST_OUTPUT}
 11. chunks: ${CHUNKS_OUTPUT}
-12. total_latency_ms: ${STAGE_TOTAL_LATENCY_MS}
-13. total_latency_hms: ${STAGE_TOTAL_LATENCY_HMS}
+12. input_version: ${INPUT_VERSION:-<none>}
+13. ocr_engine_version: ${OCR_ENGINE_VERSION:-<none>}
+14. ocr_output_version: ${OCR_OUTPUT_VERSION:-<none>}
+15. ocr_curated_version: ${OCR_CURATED_VERSION:-<none>}
+16. rag_index_version: ${RAG_INDEX_VERSION:-<none>}
+17. total_latency_ms: ${STAGE_TOTAL_LATENCY_MS}
+18. total_latency_hms: ${STAGE_TOTAL_LATENCY_HMS}
 EOF
 
 cat > "${STAGE_SUMMARY_TXT}" <<EOF
@@ -187,8 +264,13 @@ cat > "${STAGE_SUMMARY_TXT}" <<EOF
 9. images_tag: ${OCR_IMAGES_TAG:-<none>}
 10. manifest: ${MANIFEST_OUTPUT}
 11. chunks: ${CHUNKS_OUTPUT}
-12. total_latency_ms: ${STAGE_TOTAL_LATENCY_MS}
-13. total_latency_hms: ${STAGE_TOTAL_LATENCY_HMS}
+12. input_version: ${INPUT_VERSION:-<none>}
+13. ocr_engine_version: ${OCR_ENGINE_VERSION:-<none>}
+14. ocr_output_version: ${OCR_OUTPUT_VERSION:-<none>}
+15. ocr_curated_version: ${OCR_CURATED_VERSION:-<none>}
+16. rag_index_version: ${RAG_INDEX_VERSION:-<none>}
+17. total_latency_ms: ${STAGE_TOTAL_LATENCY_MS}
+18. total_latency_hms: ${STAGE_TOTAL_LATENCY_HMS}
 EOF
 
 cat > "${STAGE_SUMMARY_JSON}" <<EOF
@@ -205,6 +287,11 @@ cat > "${STAGE_SUMMARY_JSON}" <<EOF
   "images_tag": "${OCR_IMAGES_TAG}",
   "manifest": "${MANIFEST_OUTPUT}",
   "chunks": "${CHUNKS_OUTPUT}",
+  "input_version": "${INPUT_VERSION}",
+  "ocr_engine_version": "${OCR_ENGINE_VERSION}",
+  "ocr_output_version": "${OCR_OUTPUT_VERSION}",
+  "ocr_curated_version": "${OCR_CURATED_VERSION}",
+  "rag_index_version": "${RAG_INDEX_VERSION}",
   "total_latency_ms": ${STAGE_TOTAL_LATENCY_MS},
   "total_latency_hms": "${STAGE_TOTAL_LATENCY_HMS}"
 }

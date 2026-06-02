@@ -250,6 +250,121 @@ def _format_pred_raw_text(pred_raw: dict[str, Any], *, max_lines: int = 160) -> 
     return "\n".join(lines).strip()
 
 
+def _resolve_curated_table_rows_path(
+    *,
+    curated_root: Path,
+    engine_name: str,
+    doc_key: str,
+    image_stem: str,
+    curated_file_name: str,
+    images_tag: str | None,
+    curated_version: str | None,
+) -> Path:
+    candidates: list[Path] = []
+    candidate_names: list[str] = []
+    for name in (
+        curated_file_name,
+        "pred_table_layout.curated.json",
+        "pred_table_layout.json",
+    ):
+        normalized = _normalize_space(name)
+        if normalized and normalized not in candidate_names:
+            candidate_names.append(normalized)
+
+    def add_candidates(base_dir: Path) -> None:
+        for file_name in candidate_names:
+            candidates.append(base_dir / file_name)
+            candidates.append(base_dir / "inference" / file_name)
+
+    normalized_images_tag = _normalize_space(images_tag)
+    normalized_curated_version = _normalize_space(curated_version)
+
+    if normalized_curated_version:
+        add_candidates(curated_root / engine_name / normalized_curated_version / doc_key / image_stem)
+        add_candidates(curated_root / normalized_curated_version / engine_name / doc_key / image_stem)
+        add_candidates(curated_root / normalized_curated_version / doc_key / image_stem)
+    if normalized_images_tag:
+        add_candidates(curated_root / engine_name / normalized_images_tag / doc_key / image_stem)
+        add_candidates(curated_root / normalized_images_tag / engine_name / doc_key / image_stem)
+        add_candidates(curated_root / normalized_images_tag / doc_key / image_stem)
+
+    add_candidates(curated_root / engine_name / doc_key / image_stem)
+    add_candidates(curated_root / doc_key / image_stem)
+
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
+
+
+def _resolve_curated_doc_dir(
+    *,
+    curated_root: Path,
+    engine_name: str,
+    doc_key: str,
+    images_tag: str | None,
+    curated_version: str | None,
+) -> Path | None:
+    candidates: list[Path] = []
+    normalized_images_tag = _normalize_space(images_tag)
+    normalized_curated_version = _normalize_space(curated_version)
+
+    if normalized_curated_version:
+        candidates.extend(
+            [
+                curated_root / engine_name / normalized_curated_version / doc_key,
+                curated_root / normalized_curated_version / engine_name / doc_key,
+                curated_root / normalized_curated_version / doc_key,
+            ]
+        )
+    if normalized_images_tag:
+        candidates.extend(
+            [
+                curated_root / engine_name / normalized_images_tag / doc_key,
+                curated_root / normalized_images_tag / engine_name / doc_key,
+                curated_root / normalized_images_tag / doc_key,
+            ]
+        )
+
+    candidates.extend(
+        [
+            curated_root / engine_name / doc_key,
+            curated_root / doc_key,
+        ]
+    )
+
+    for path in candidates:
+        if path.exists() and path.is_dir():
+            return path
+    return None
+
+
+def _load_merge_entries(curated_doc_dir: Path) -> tuple[Path, list[dict[str, Any]]]:
+    manifest_path = curated_doc_dir / "merge_manifest.json"
+    payload = _load_json(manifest_path)
+    merges = payload.get("merges", [])
+    if not isinstance(merges, list):
+        return manifest_path, []
+
+    normalized: list[dict[str, Any]] = []
+    for item in merges:
+        if not isinstance(item, dict):
+            continue
+        merged_item_id = _normalize_space(item.get("merged_item_id", ""))
+        if not merged_item_id:
+            continue
+        sources = _to_str_list(item.get("sources", []))
+        output_file = _normalize_space(item.get("output_file", ""))
+        normalized.append(
+            {
+                "merged_item_id": merged_item_id,
+                "sources": sources,
+                "output_file": output_file,
+            }
+        )
+    return manifest_path, normalized
+
+
 def export_ocr_eval_to_rag_inputs(
     *,
     ocr_eval_root: Path,
@@ -262,216 +377,419 @@ def export_ocr_eval_to_rag_inputs(
     html_chunk_max_chars: int = 1200,
     allow_inference_only: bool = False,
     images_tag: str | None = None,
+    curated_root: Path | None = None,
+    curated_file_name: str = "pred_table_layout.curated.json",
+    use_merge_manifest: bool = False,
+    curated_only: bool = False,
+    input_version: str | None = None,
+    ocr_engine_version: str | None = None,
+    ocr_output_version: str | None = None,
+    ocr_curated_version: str | None = None,
+    rag_index_version: str | None = None,
 ) -> tuple[int, int]:
     manifest_rows: list[dict[str, Any]] = []
     chunk_rows: list[dict[str, Any]] = []
     engine_dirs = _iter_engine_dirs(ocr_eval_root, engine)
 
     global_chunk_index = 0
-    for engine_dir in engine_dirs:
-        engine_name = engine_dir.name
-        for one_doc_key, image_dir in _iter_image_dirs(
-            engine_dir,
-            doc_key,
-            allow_inference_only=allow_inference_only,
-            images_tag=images_tag,
-        ):
-            pred_structured_path = image_dir / "eval" / "gt_pred_structured.json"
-            pred_table_rows_path = image_dir / "inference" / "pred_table_layout.json"
-            pred_table_html_path = image_dir / "inference" / "pred_table_raw.html"
-            pred_table_preview_path = image_dir / "inference" / "pred_table_layout.html"
-            eval_summary_path = image_dir / "eval" / "gt_eval_summary.json"
-            pred_raw_path = image_dir / "inference" / "pred_raw.json"
 
-            pred_structured = _load_json(pred_structured_path)
-            is_inference_only = not bool(pred_structured)
-            if is_inference_only and not allow_inference_only:
-                continue
+    def append_unit(
+        *,
+        engine_dir: Path,
+        engine_name: str,
+        one_doc_key: str,
+        image_stem: str,
+        base_image_dir: Path | None,
+        merge_sources: list[str] | None = None,
+        merge_manifest_path: Path | None = None,
+    ) -> None:
+        nonlocal global_chunk_index
 
-            pred_raw = _load_json(pred_raw_path) if is_inference_only else {}
-            table_rows_payload = _load_json(pred_table_rows_path)
-            eval_summary = _load_json(eval_summary_path)
+        normalized_merge_sources = [_normalize_space(x) for x in (merge_sources or []) if _normalize_space(x)]
+        is_merged_unit = bool(normalized_merge_sources)
 
-            item_id = (
-                _normalize_space((pred_structured or {}).get("id"))
-                or _normalize_space(pred_raw.get("id"))
-                or f"{one_doc_key}_{image_dir.name}"
+        if base_image_dir is not None:
+            image_dir = base_image_dir
+        else:
+            if images_tag and (engine_dir / images_tag / one_doc_key).exists():
+                image_dir = engine_dir / images_tag / one_doc_key / image_stem
+            elif (engine_dir / one_doc_key).exists():
+                image_dir = engine_dir / one_doc_key / image_stem
+            else:
+                image_dir = engine_dir / one_doc_key / image_stem
+
+        pred_structured_path = image_dir / "eval" / "gt_pred_structured.json"
+        pred_table_rows_path = image_dir / "inference" / "pred_table_layout.json"
+        pred_table_html_path = image_dir / "inference" / "pred_table_raw.html"
+        pred_table_preview_path = image_dir / "inference" / "pred_table_layout.html"
+        eval_summary_path = image_dir / "eval" / "gt_eval_summary.json"
+        pred_raw_path = image_dir / "inference" / "pred_raw.json"
+        curated_table_rows_path = None
+        if curated_root:
+            curated_table_rows_path = _resolve_curated_table_rows_path(
+                curated_root=curated_root,
+                engine_name=engine_name,
+                doc_key=one_doc_key,
+                image_stem=image_stem,
+                curated_file_name=curated_file_name,
+                images_tag=images_tag,
+                curated_version=ocr_curated_version,
             )
-            image_stem = image_dir.name
-            image_type = _normalize_space((pred_structured or {}).get("type", "")) or _normalize_space(
-                pred_raw.get("type", "unknown")
-            )
-            review_required = False if is_inference_only else bool(eval_summary.get("review_required", False))
-            review_reasons = [] if is_inference_only else eval_summary.get("review_reasons", [])
-            if not isinstance(review_reasons, list):
-                review_reasons = []
 
-            if review_required and not include_review_required:
-                continue
+        pred_structured = _load_json(pred_structured_path)
+        is_inference_only = not bool(pred_structured)
+        if is_inference_only and not allow_inference_only:
+            return
 
-            manifest_row: dict[str, Any] = {
-                "id": item_id,
-                "doc_key": one_doc_key,
-                "image_stem": image_stem,
-                "type": image_type,
-                "ocr_engine": engine_name,
-                "review_required": review_required,
-                "review_reasons": review_reasons,
-                "inference_only": is_inference_only,
-                "paths": {
-                    "pred_structured_path": str(pred_structured_path),
-                    "pred_raw_path": str(pred_raw_path),
-                    "pred_table_rows_path": str(pred_table_rows_path),
-                    "pred_table_html_path": str(pred_table_html_path),
-                    "pred_table_preview_path": str(pred_table_preview_path),
-                    "eval_summary_path": str(eval_summary_path),
-                },
-                "table_sections_count": len(table_rows_payload.get("table_sections", []))
-                if isinstance(table_rows_payload.get("table_sections"), list)
-                else 0,
-                "table_rows_count": len(table_rows_payload.get("table_rows", []))
-                if isinstance(table_rows_payload.get("table_rows"), list)
-                else 0,
-            }
-            manifest_rows.append(manifest_row)
+        pred_raw = _load_json(pred_raw_path) if is_inference_only else {}
+        table_source = "raw"
+        table_rows_source_path = pred_table_rows_path
+        if curated_table_rows_path and curated_table_rows_path.exists():
+            table_source = "curated"
+            table_rows_source_path = curated_table_rows_path
+        table_rows_payload = _load_json(table_rows_source_path)
+        eval_summary = _load_json(eval_summary_path)
 
-            common_metadata = {
-                "file_name": one_doc_key,
-                "doc_key": one_doc_key,
-                "image_stem": image_stem,
-                "ocr_item_id": item_id,
-                "ocr_engine": engine_name,
-                "ocr_type": image_type,
+        item_id = (
+            _normalize_space((pred_structured or {}).get("id"))
+            or _normalize_space(pred_raw.get("id"))
+            or f"{one_doc_key}_{image_stem}"
+        )
+        image_type = (
+            _normalize_space((pred_structured or {}).get("type", ""))
+            or _normalize_space(pred_raw.get("type", ""))
+            or ("merged" if is_merged_unit else "unknown")
+        )
+        review_required = False if is_inference_only else bool(eval_summary.get("review_required", False))
+        review_reasons = [] if is_inference_only else eval_summary.get("review_reasons", [])
+        if not isinstance(review_reasons, list):
+            review_reasons = []
+
+        if review_required and not include_review_required:
+            return
+
+        resolved_input_version = _normalize_space(input_version)
+        resolved_ocr_engine_version = _normalize_space(ocr_engine_version) or engine_name
+        resolved_ocr_output_version = _normalize_space(ocr_output_version) or _normalize_space(images_tag)
+        resolved_ocr_curated_version = _normalize_space(ocr_curated_version)
+        resolved_rag_index_version = _normalize_space(rag_index_version)
+
+        manifest_row: dict[str, Any] = {
+            "id": item_id,
+            "doc_key": one_doc_key,
+            "image_stem": image_stem,
+            "type": image_type,
+            "ocr_engine": engine_name,
+            "input_version": resolved_input_version,
+            "ocr_engine_version": resolved_ocr_engine_version,
+            "ocr_output_version": resolved_ocr_output_version,
+            "ocr_curated_version": resolved_ocr_curated_version,
+            "rag_index_version": resolved_rag_index_version,
+            "review_required": review_required,
+            "review_reasons": review_reasons,
+            "inference_only": is_inference_only,
+            "is_merged_unit": is_merged_unit,
+            "merged_sources": normalized_merge_sources,
+            "merge_manifest_path": str(merge_manifest_path) if merge_manifest_path else "",
+            "paths": {
                 "pred_structured_path": str(pred_structured_path),
                 "pred_raw_path": str(pred_raw_path),
                 "pred_table_rows_path": str(pred_table_rows_path),
+                "curated_table_rows_path": str(curated_table_rows_path) if curated_table_rows_path else "",
+                "table_rows_source_path": str(table_rows_source_path),
                 "pred_table_html_path": str(pred_table_html_path),
+                "pred_table_preview_path": str(pred_table_preview_path),
                 "eval_summary_path": str(eval_summary_path),
-                "review_required": str(review_required),
-                "review_reasons": "|".join(str(reason) for reason in review_reasons),
-                "inference_only": str(is_inference_only),
-                "source": "ocr",
-            }
+            },
+            "table_source": table_source,
+            "fallback_used": table_source != "curated",
+            "table_sections_count": len(table_rows_payload.get("table_sections", []))
+            if isinstance(table_rows_payload.get("table_sections"), list)
+            else 0,
+            "table_rows_count": len(table_rows_payload.get("table_rows", []))
+            if isinstance(table_rows_payload.get("table_rows"), list)
+            else 0,
+        }
+        manifest_rows.append(manifest_row)
 
-            if pred_structured:
-                pred_structure = pred_structured.get("pred_structure", {})
-                if isinstance(pred_structure, dict):
-                    structure_text = _format_pred_structure_text(pred_structure)
-                    if structure_text:
-                        global_chunk_index += 1
-                        seed = f"{item_id}|pred_structure|{engine_name}|{structure_text[:120]}"
-                        chunk_rows.append(
-                            _build_chunk_row(
-                                chunk_id=f"ocr_chunk_{global_chunk_index:08d}_{_stable_hash(seed)}",
-                                doc_id=one_doc_key,
-                                chunk_type="ocr_structured",
-                                chunk_text=(
-                                    f"문서키: {one_doc_key}\n이미지: {image_stem}\nOCR ID: {item_id}\n"
-                                    f"자료유형: {image_type}\n\n[Pred Structure]\n{structure_text}"
-                                ),
-                                metadata={**common_metadata, "chunk_scope": "pred_structure"},
-                            )
-                        )
-            elif pred_raw:
-                raw_text = _format_pred_raw_text(pred_raw)
-                if raw_text:
+        common_metadata = {
+            "file_name": one_doc_key,
+            "doc_key": one_doc_key,
+            "image_stem": image_stem,
+            "ocr_item_id": item_id,
+            "ocr_engine": engine_name,
+            "ocr_type": image_type,
+            "input_version": resolved_input_version,
+            "ocr_engine_version": resolved_ocr_engine_version,
+            "ocr_output_version": resolved_ocr_output_version,
+            "ocr_curated_version": resolved_ocr_curated_version,
+            "rag_index_version": resolved_rag_index_version,
+            "pred_structured_path": str(pred_structured_path),
+            "pred_raw_path": str(pred_raw_path),
+            "pred_table_rows_path": str(pred_table_rows_path),
+            "curated_table_rows_path": str(curated_table_rows_path) if curated_table_rows_path else "",
+            "table_rows_source_path": str(table_rows_source_path),
+            "pred_table_html_path": str(pred_table_html_path),
+            "eval_summary_path": str(eval_summary_path),
+            "review_required": str(review_required),
+            "review_reasons": "|".join(str(reason) for reason in review_reasons),
+            "inference_only": str(is_inference_only),
+            "is_merged_unit": str(is_merged_unit),
+            "merged_sources": "|".join(normalized_merge_sources),
+            "merge_manifest_path": str(merge_manifest_path) if merge_manifest_path else "",
+            "source": "ocr",
+            "table_source": table_source,
+            "source_priority": "curated>raw",
+            "fallback_used": str(table_source != "curated"),
+        }
+
+        if pred_structured:
+            pred_structure = pred_structured.get("pred_structure", {})
+            if isinstance(pred_structure, dict):
+                structure_text = _format_pred_structure_text(pred_structure)
+                if structure_text:
                     global_chunk_index += 1
-                    seed = f"{item_id}|pred_raw|{engine_name}|{raw_text[:120]}"
+                    seed = f"{item_id}|pred_structure|{engine_name}|{structure_text[:120]}"
                     chunk_rows.append(
                         _build_chunk_row(
                             chunk_id=f"ocr_chunk_{global_chunk_index:08d}_{_stable_hash(seed)}",
                             doc_id=one_doc_key,
-                            chunk_type="ocr_raw_text",
+                            chunk_type="ocr_structured",
                             chunk_text=(
                                 f"문서키: {one_doc_key}\n이미지: {image_stem}\nOCR ID: {item_id}\n"
-                                f"자료유형: {image_type}\n\n[OCR Raw Text]\n{raw_text}"
+                                f"자료유형: {image_type}\n\n[Pred Structure]\n{structure_text}"
                             ),
-                            metadata={**common_metadata, "chunk_scope": "pred_raw"},
+                            metadata={**common_metadata, "chunk_scope": "pred_structure"},
                         )
                     )
-
-            table_sections = table_rows_payload.get("table_sections", [])
-            if isinstance(table_sections, list) and table_sections:
-                for section_idx, section in enumerate(table_sections, start=1):
-                    if not isinstance(section, dict):
-                        continue
-                    section_text = _format_table_section_text(section)
-                    if not section_text:
-                        continue
-                    section_title = _normalize_space(section.get("section_title", "")) or f"section_{section_idx}"
-                    global_chunk_index += 1
-                    seed = f"{item_id}|table_section|{section_idx}|{section_title}|{engine_name}"
-                    chunk_rows.append(
-                        _build_chunk_row(
-                            chunk_id=f"ocr_chunk_{global_chunk_index:08d}_{_stable_hash(seed)}",
-                            doc_id=one_doc_key,
-                            chunk_type="ocr_table_section",
-                            chunk_text=(
-                                f"문서키: {one_doc_key}\n이미지: {image_stem}\nOCR ID: {item_id}\n"
-                                f"섹션제목: {section_title}\n\n{section_text}"
-                            ),
-                            metadata={
-                                **common_metadata,
-                                "chunk_scope": "table_section",
-                                "table_section_title": section_title,
-                                "table_section_index": str(section_idx),
-                            },
-                        )
-                    )
-            else:
-                fallback_text = _format_table_rows_fallback_text(table_rows_payload)
-                if fallback_text:
-                    global_chunk_index += 1
-                    seed = f"{item_id}|table_rows_fallback|{engine_name}"
-                    chunk_rows.append(
-                        _build_chunk_row(
-                            chunk_id=f"ocr_chunk_{global_chunk_index:08d}_{_stable_hash(seed)}",
-                            doc_id=one_doc_key,
-                            chunk_type="ocr_table_rows",
-                            chunk_text=(
-                                f"문서키: {one_doc_key}\n이미지: {image_stem}\nOCR ID: {item_id}\n\n"
-                                f"[Parsed Table Rows]\n{fallback_text}"
-                            ),
-                            metadata={**common_metadata, "chunk_scope": "table_rows_fallback"},
-                        )
-                    )
-
-            footnote_text = _format_table_footnotes(table_rows_payload)
-            if footnote_text:
+        elif pred_raw:
+            raw_text = _format_pred_raw_text(pred_raw)
+            if raw_text:
                 global_chunk_index += 1
-                seed = f"{item_id}|table_footnotes|{engine_name}"
+                seed = f"{item_id}|pred_raw|{engine_name}|{raw_text[:120]}"
                 chunk_rows.append(
                     _build_chunk_row(
                         chunk_id=f"ocr_chunk_{global_chunk_index:08d}_{_stable_hash(seed)}",
                         doc_id=one_doc_key,
-                        chunk_type="ocr_table_footnotes",
+                        chunk_type="ocr_raw_text",
                         chunk_text=(
-                            f"문서키: {one_doc_key}\n이미지: {image_stem}\nOCR ID: {item_id}\n\n"
-                            f"[Table Footnotes]\n{footnote_text}"
+                            f"문서키: {one_doc_key}\n이미지: {image_stem}\nOCR ID: {item_id}\n"
+                            f"자료유형: {image_type}\n\n[OCR Raw Text]\n{raw_text}"
                         ),
-                        metadata={**common_metadata, "chunk_scope": "table_footnotes"},
+                        metadata={**common_metadata, "chunk_scope": "pred_raw"},
                     )
                 )
 
-            if include_html_chunk and pred_table_html_path.exists():
-                html_text = pred_table_html_path.read_text(encoding="utf-8")
-                html_text = _normalize_space(html_text)
-                if html_text:
-                    html_snippet = html_text[:html_chunk_max_chars]
-                    global_chunk_index += 1
-                    seed = f"{item_id}|table_html|{engine_name}|{html_snippet[:120]}"
-                    chunk_rows.append(
-                        _build_chunk_row(
-                            chunk_id=f"ocr_chunk_{global_chunk_index:08d}_{_stable_hash(seed)}",
-                            doc_id=one_doc_key,
-                            chunk_type="ocr_table_html",
-                            chunk_text=(
-                                f"문서키: {one_doc_key}\n이미지: {image_stem}\nOCR ID: {item_id}\n"
-                                f"[Table HTML Snippet]\n{html_snippet}"
-                            ),
-                            metadata={**common_metadata, "chunk_scope": "table_html_snippet"},
-                        )
+        table_sections = table_rows_payload.get("table_sections", [])
+        if isinstance(table_sections, list) and table_sections:
+            for section_idx, section in enumerate(table_sections, start=1):
+                if not isinstance(section, dict):
+                    continue
+                section_text = _format_table_section_text(section)
+                if not section_text:
+                    continue
+                section_title = _normalize_space(section.get("section_title", "")) or f"section_{section_idx}"
+                global_chunk_index += 1
+                seed = f"{item_id}|table_section|{section_idx}|{section_title}|{engine_name}"
+                chunk_rows.append(
+                    _build_chunk_row(
+                        chunk_id=f"ocr_chunk_{global_chunk_index:08d}_{_stable_hash(seed)}",
+                        doc_id=one_doc_key,
+                        chunk_type="ocr_table_section",
+                        chunk_text=(
+                            f"문서키: {one_doc_key}\n이미지: {image_stem}\nOCR ID: {item_id}\n"
+                            f"섹션제목: {section_title}\n\n{section_text}"
+                        ),
+                        metadata={
+                            **common_metadata,
+                            "chunk_scope": "table_section",
+                            "table_section_title": section_title,
+                            "table_section_index": str(section_idx),
+                        },
                     )
+                )
+        else:
+            fallback_text = _format_table_rows_fallback_text(table_rows_payload)
+            if fallback_text:
+                global_chunk_index += 1
+                seed = f"{item_id}|table_rows_fallback|{engine_name}"
+                chunk_rows.append(
+                    _build_chunk_row(
+                        chunk_id=f"ocr_chunk_{global_chunk_index:08d}_{_stable_hash(seed)}",
+                        doc_id=one_doc_key,
+                        chunk_type="ocr_table_rows",
+                        chunk_text=(
+                            f"문서키: {one_doc_key}\n이미지: {image_stem}\nOCR ID: {item_id}\n\n"
+                            f"[Parsed Table Rows]\n{fallback_text}"
+                        ),
+                        metadata={**common_metadata, "chunk_scope": "table_rows_fallback"},
+                    )
+                )
+
+        footnote_text = _format_table_footnotes(table_rows_payload)
+        if footnote_text:
+            global_chunk_index += 1
+            seed = f"{item_id}|table_footnotes|{engine_name}"
+            chunk_rows.append(
+                _build_chunk_row(
+                    chunk_id=f"ocr_chunk_{global_chunk_index:08d}_{_stable_hash(seed)}",
+                    doc_id=one_doc_key,
+                    chunk_type="ocr_table_footnotes",
+                    chunk_text=(
+                        f"문서키: {one_doc_key}\n이미지: {image_stem}\nOCR ID: {item_id}\n\n"
+                        f"[Table Footnotes]\n{footnote_text}"
+                    ),
+                    metadata={**common_metadata, "chunk_scope": "table_footnotes"},
+                )
+            )
+
+        if include_html_chunk and pred_table_html_path.exists():
+            html_text = pred_table_html_path.read_text(encoding="utf-8")
+            html_text = _normalize_space(html_text)
+            if html_text:
+                html_snippet = html_text[:html_chunk_max_chars]
+                global_chunk_index += 1
+                seed = f"{item_id}|table_html|{engine_name}|{html_snippet[:120]}"
+                chunk_rows.append(
+                    _build_chunk_row(
+                        chunk_id=f"ocr_chunk_{global_chunk_index:08d}_{_stable_hash(seed)}",
+                        doc_id=one_doc_key,
+                        chunk_type="ocr_table_html",
+                        chunk_text=(
+                            f"문서키: {one_doc_key}\n이미지: {image_stem}\nOCR ID: {item_id}\n"
+                            f"[Table HTML Snippet]\n{html_snippet}"
+                        ),
+                        metadata={**common_metadata, "chunk_scope": "table_html_snippet"},
+                    )
+                )
+
+    for engine_dir in engine_dirs:
+        engine_name = engine_dir.name
+        raw_pairs: list[tuple[str, Path]] = []
+        if not curated_only:
+            raw_pairs = _iter_image_dirs(
+                engine_dir,
+                doc_key,
+                allow_inference_only=allow_inference_only,
+                images_tag=images_tag,
+            )
+
+        raw_by_doc: dict[str, list[Path]] = {}
+        for one_doc_key, image_dir in raw_pairs:
+            raw_by_doc.setdefault(one_doc_key, []).append(image_dir)
+
+        doc_keys = set(raw_by_doc.keys())
+        if curated_only and curated_root:
+            candidate_roots: list[Path] = []
+            if ocr_curated_version:
+                candidate_roots.extend(
+                    [
+                        curated_root / engine_name / _normalize_space(ocr_curated_version),
+                        curated_root / _normalize_space(ocr_curated_version),
+                    ]
+                )
+            if images_tag:
+                candidate_roots.extend(
+                    [
+                        curated_root / engine_name / _normalize_space(images_tag),
+                        curated_root / _normalize_space(images_tag),
+                    ]
+                )
+            candidate_roots.extend([curated_root / engine_name, curated_root])
+            for root in candidate_roots:
+                if root.exists() and root.is_dir():
+                    for d in root.iterdir():
+                        if d.is_dir():
+                            if doc_key and d.name != doc_key:
+                                continue
+                            doc_keys.add(d.name)
+
+        for one_doc_key in sorted(doc_keys):
+            doc_image_dirs = sorted(raw_by_doc.get(one_doc_key, []), key=lambda p: p.name)
+            merge_manifest_path: Path | None = None
+            merge_entries: list[dict[str, Any]] = []
+            merged_source_stems: set[str] = set()
+
+            if use_merge_manifest and curated_root:
+                curated_doc_dir = _resolve_curated_doc_dir(
+                    curated_root=curated_root,
+                    engine_name=engine_name,
+                    doc_key=one_doc_key,
+                    images_tag=images_tag,
+                    curated_version=ocr_curated_version,
+                )
+                if curated_doc_dir:
+                    merge_manifest_path, merge_entries = _load_merge_entries(curated_doc_dir)
+                    for entry in merge_entries:
+                        for source_stem in _to_str_list(entry.get("sources", [])):
+                            merged_source_stems.add(source_stem)
+
+            processed_stems: set[str] = set()
+            if not curated_only:
+                for image_dir in doc_image_dirs:
+                # If merge_manifest declares this image as source, export merged unit instead of raw source rows.
+                    if image_dir.name in merged_source_stems:
+                        continue
+                    append_unit(
+                        engine_dir=engine_dir,
+                        engine_name=engine_name,
+                        one_doc_key=one_doc_key,
+                        image_stem=image_dir.name,
+                        base_image_dir=image_dir,
+                        merge_sources=[],
+                        merge_manifest_path=merge_manifest_path,
+                    )
+                    processed_stems.add(image_dir.name)
+
+            for entry in merge_entries:
+                merged_item_id = _normalize_space(entry.get("merged_item_id", ""))
+                if not merged_item_id or merged_item_id in processed_stems:
+                    continue
+                merge_sources = _to_str_list(entry.get("sources", []))
+                append_unit(
+                    engine_dir=engine_dir,
+                    engine_name=engine_name,
+                    one_doc_key=one_doc_key,
+                    image_stem=merged_item_id,
+                    base_image_dir=None,
+                    merge_sources=merge_sources,
+                    merge_manifest_path=merge_manifest_path,
+                )
+                processed_stems.add(merged_item_id)
+
+            if curated_only and curated_root:
+                curated_doc_dir = _resolve_curated_doc_dir(
+                    curated_root=curated_root,
+                    engine_name=engine_name,
+                    doc_key=one_doc_key,
+                    images_tag=images_tag,
+                    curated_version=ocr_curated_version,
+                )
+                if curated_doc_dir and curated_doc_dir.exists():
+                    for sub in sorted([p for p in curated_doc_dir.iterdir() if p.is_dir()], key=lambda p: p.name):
+                        stem = sub.name
+                        if stem in processed_stems or stem in merged_source_stems:
+                            continue
+                        candidate = _resolve_curated_table_rows_path(
+                            curated_root=curated_root,
+                            engine_name=engine_name,
+                            doc_key=one_doc_key,
+                            image_stem=stem,
+                            curated_file_name=curated_file_name,
+                            images_tag=images_tag,
+                            curated_version=ocr_curated_version,
+                        )
+                        if candidate.exists():
+                            append_unit(
+                                engine_dir=engine_dir,
+                                engine_name=engine_name,
+                                one_doc_key=one_doc_key,
+                                image_stem=stem,
+                                base_image_dir=None,
+                                merge_sources=[],
+                                merge_manifest_path=merge_manifest_path,
+                            )
+                            processed_stems.add(stem)
 
     # Attach per-image chunk counts to manifest rows.
     chunk_count_map: dict[str, int] = {}

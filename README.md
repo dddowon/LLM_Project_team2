@@ -761,9 +761,48 @@ OCR_USE_GT=1 \
 
 eval/query에서 OCR을 검색하려면 위 embedded를 **통합 인덱스** 절의 `merge-embedded`로 `checkpoints/chroma_openai`에 병합하세요.
 
+### Curated 반영 릴리즈 (권장)
+
+사람 검수 후 `ocr_curated`를 기준으로 RAG를 갱신하려면 아래처럼 실행합니다.
+
+```bash
+OCR_OUTPUT_VERSION=v4_table_filtered_260531 \
+OCR_CURATED_VERSION=v4_curated_20260601_1542 \
+./scripts/run_curated_rag_stage.sh
+```
+
+빠른 테스트(복붙용):
+
+```bash
+OCR_OUTPUT_VERSION=v4_table_filtered_260531 \
+OCR_CURATED_VERSION=v4_table_filtered_260531 \
+./scripts/run_curated_rag_stage.sh
+```
+
+curated 경로 규칙:
+
+- 권장: `data/v2/ocr_curated/<OCR_CURATED_VERSION>/<doc>/<img>/inference/pred_table_layout.curated.json`
+- 현재 export는 아래도 자동 인식합니다.
+- `.../<img>/pred_table_layout.curated.json`
+- `.../<img>/inference/pred_table_layout.curated.json`
+- `.../<img>/pred_table_layout.json`
+- `.../<img>/inference/pred_table_layout.json`
+
+`STRICT_CURATED=1` 품질 게이트:
+
+- `run_curated_rag_stage.sh`는 기본적으로 `STRICT_CURATED=1`을 강제합니다.
+- handoff manifest에서 `table_source=raw`가 1건이라도 있으면 즉시 실패합니다.
+- 즉 curated 파일 누락/경로 불일치를 배포 전에 차단합니다.
+
+`merge_manifest.json` 적용 범위:
+
+- `run_curated_rag_stage.sh`는 내부적으로 `--curated-only` + `--use-merge-manifest`를 켜서, `ocr_outputs` 전체 이미지 스캔 없이 curated 결과(및 병합 유닛)만 export에 반영합니다.
+- `run_ocr_stage.sh`는 `USE_MERGE_MANIFEST=1`을 허용하지 않으며(즉시 실패), raw OCR 파이프라인과 curated 병합 파이프라인을 분리합니다.
+
 운영 원칙:
 
-- 팀 간 OCR→RAG 인터페이스 파일은 `data/v2/ocr_rag/ocr_input_chunks.jsonl` 단일 파일로 고정합니다.
+- 팀 간 OCR→RAG 인터페이스 파일 기본 경로는 `data/v2/ocr_rag/<engine>/<OCR_OUTPUT_VERSION>/ocr_input_chunks.jsonl` 입니다.
+- 필요 시 `MANIFEST_OUTPUT`, `CHUNKS_OUTPUT` 환경변수로 산출 경로를 오버라이드할 수 있습니다.
 - `chroma_index/`는 RAG 임베딩/인덱싱 이후의 런타임 산출물이며 전달 표준 포맷이 아닙니다.
 - `pred_table_layout.html`은 사람 검수용 참고 파일이며, 기본 RAG 입력 계약 포맷이 아닙니다.
 
@@ -774,9 +813,11 @@ python -m src.cli ocr-export-rag \
   --ocr-eval-root "data/v2/ocr_outputs" \
   --engine "paddleocr_vl" \
   --images-tag "v4_table_filtered_260531" \
-  --output-manifest "data/v2/ocr_rag/ocr_input_manifest.jsonl" \
-  --output-chunks "data/v2/ocr_rag/ocr_input_chunks.jsonl"
+  --output-manifest "data/v2/ocr_rag/paddleocr_vl/v4_table_filtered_260531/ocr_input_manifest.jsonl" \
+  --output-chunks "data/v2/ocr_rag/paddleocr_vl/v4_table_filtered_260531/ocr_input_chunks.jsonl"
 ```
+
+병합 유닛을 반영하려면 `--use-merge-manifest`를 명시적으로 추가하세요(권장: curated 릴리즈에서만 사용).
 
 - 같은 `doc_key`가 여러 버전 태그(`v1_*`, `v4_*`)에 공존하면 `--images-tag`를 지정해서 현재 실험 태그만 export하세요.
 - `scripts/run_ocr_stage.sh`는 `ocr_default.yaml`의 `paths.images_root`에서 추출한 `images_tag`를 자동으로 `ocr-export-rag`에 전달합니다.
