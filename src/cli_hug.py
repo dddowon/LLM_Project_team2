@@ -433,6 +433,79 @@ def query_index(
     return payload
 
 
+def evaluate_set(
+    *,
+    input_path: Path,
+    output_path: Path,
+    index_dir: Path,
+    embedding_model: str,
+    llm_model: str | None,
+    top_k: int,
+    score_threshold: float,
+    max_context_chars: int,
+    batch_size: int,
+    device: str | None,
+    normalize_embeddings: bool,
+    passage_prefix: str,
+    query_prefix: str,
+    trust_remote_code: bool,
+    llm_device_map: str,
+    dtype: str,
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    strip_thinking: bool,
+) -> int:
+    from tqdm.auto import tqdm
+
+    rows = read_jsonl(input_path)
+    if not rows:
+        raise RuntimeError(f"평가 질문셋이 없습니다: {input_path}")
+
+    if not (index_dir / "chunks.json").is_file():
+        raise FileNotFoundError(
+            f"Chroma 인덱스가 없습니다: {index_dir}\n"
+            "  필요 파일: chunks.json (+ chroma.sqlite3 등)\n"
+            "  Drive에서 checkpoints/chroma_hug_mixed_ocr_from_drive 폴더 전체를 넣으세요."
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    out_rows: list[dict[str, Any]] = []
+    for row in tqdm(rows, desc="HF evaluate", unit="q"):
+        question = str(row.get("question") or "").strip()
+        if not question:
+            continue
+        doc_id = str(row.get("doc_id") or "").strip() or None
+        payload = query_index(
+            index_dir=index_dir,
+            question=question,
+            embedding_model=embedding_model,
+            llm_model=llm_model,
+            top_k=top_k,
+            score_threshold=score_threshold,
+            doc_id=doc_id,
+            max_context_chars=max_context_chars,
+            batch_size=batch_size,
+            device=device,
+            normalize_embeddings=normalize_embeddings,
+            passage_prefix=passage_prefix,
+            query_prefix=query_prefix,
+            trust_remote_code=trust_remote_code,
+            llm_device_map=llm_device_map,
+            dtype=dtype,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            strip_thinking=strip_thinking,
+            include_source_text=True,
+            output_path=None,
+        )
+        out_rows.append({**row, **payload})
+
+    write_jsonl(output_path, out_rows)
+    return len(out_rows)
+
+
 def print_query_result(payload: dict[str, Any]) -> None:
     answer = payload.get("answer")
     if answer:
@@ -679,6 +752,25 @@ def main() -> None:
     query_parser.add_argument("--output", default=None)
     add_embedding_args(query_parser)
 
+    evaluate_parser = subparsers.add_parser(
+        "evaluate",
+        help="Run eval questions JSONL with HF retrieve + optional LLM answer",
+    )
+    evaluate_parser.add_argument("--input", required=True, help="Eval questions JSONL")
+    evaluate_parser.add_argument("--output", required=True, help="Output results JSONL")
+    evaluate_parser.add_argument("--index-dir", default=DEFAULT_INDEX_DIR)
+    evaluate_parser.add_argument("--llm-model", default=None, help="Example: qwen3-8b, llama, gemma, exaone")
+    evaluate_parser.add_argument("--top-k", type=int, default=5)
+    evaluate_parser.add_argument("--score-threshold", type=float, default=0.0)
+    evaluate_parser.add_argument("--max-context-chars", type=int, default=12000)
+    evaluate_parser.add_argument("--llm-device-map", default="auto")
+    evaluate_parser.add_argument("--dtype", default="auto", choices=("auto", "float16", "bfloat16", "float32"))
+    evaluate_parser.add_argument("--max-new-tokens", type=int, default=512)
+    evaluate_parser.add_argument("--temperature", type=float, default=0.2)
+    evaluate_parser.add_argument("--top-p", type=float, default=0.9)
+    evaluate_parser.add_argument("--keep-thinking", action="store_true")
+    add_embedding_args(evaluate_parser)
+
     pipeline_parser = subparsers.add_parser(
         "run-pipeline",
         help="Run HWP parse -> chunk -> HF embed -> unified Chroma",
@@ -763,6 +855,30 @@ def main() -> None:
             output_path=Path(args.output) if args.output else None,
         )
         print_query_result(payload)
+    elif args.command == "evaluate":
+        count = evaluate_set(
+            input_path=Path(args.input),
+            output_path=Path(args.output),
+            index_dir=Path(args.index_dir),
+            embedding_model=args.embedding_model,
+            llm_model=args.llm_model,
+            top_k=args.top_k,
+            score_threshold=args.score_threshold,
+            max_context_chars=args.max_context_chars,
+            batch_size=args.batch_size,
+            device=args.device,
+            normalize_embeddings=not args.no_normalize_embeddings,
+            passage_prefix=args.passage_prefix,
+            query_prefix=args.query_prefix,
+            trust_remote_code=args.trust_remote_code,
+            llm_device_map=args.llm_device_map,
+            dtype=args.dtype,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            strip_thinking=not args.keep_thinking,
+        )
+        print(f"Wrote {count} rows -> {args.output}")
     elif args.command == "run-pipeline":
         run_pipeline(
             input_path=Path(args.input) if args.input else None,
