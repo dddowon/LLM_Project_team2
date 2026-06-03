@@ -40,7 +40,6 @@ data/v2/ocr_curated/
 data/v3/raw/
 
 # RFP original documents
-*.pdf
 *.hwp
 *.hwpx
 *.doc
