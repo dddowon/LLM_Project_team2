@@ -112,6 +112,10 @@ PYTHONPYCACHEPREFIX=.cache/pycache python3 -m src.cli evaluate-harness --config 
   - [OpenAI Embeddings guide](https://platform.openai.com/docs/guides/embeddings)
   - [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses/create)
 
+## 프로젝트 보고서
+
+- 최종 보고서(PDF): [docs/report/최종_프로젝트_보고서.pdf](docs/report/최종_프로젝트_보고서.pdf)
+
 ## 팀 협업 일지 (Notion)
 
 - 박도원: [협업 일지 링크](https://www.notion.so/)
