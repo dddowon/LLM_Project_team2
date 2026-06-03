@@ -16,7 +16,8 @@
 ```text
 .
 ├── configs/                 # 실행/실험 설정
-│   └── default.yaml
+│   ├── default.yaml          # RAG 기본 설정
+│   └── ocr_default.yaml      # OCR 기본 설정
 ├── data/
 │   ├── raw/                 # 원본 데이터(PDF/HWP + data_list.csv), git 업로드 금지
 │   ├── v1/                  # Hugging Face 시나리오 데이터/산출물
@@ -119,5 +120,4 @@ PYTHONPYCACHEPREFIX=.cache/pycache python3 -m src.cli evaluate-harness --config 
 - 김태민: [협업 일지 링크](https://www.notion.so/)
 - 안수진: [협업 일지 링크](https://www.notion.so/)
 - 김범수: [협업 일지 링크](https://www.notion.so/)
-
 

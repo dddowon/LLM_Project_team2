@@ -1987,11 +1987,14 @@ def _resolve_ocr_doc_paths(
     output_root: str,
     image_name: str,
     ocr_engine: str,
+    output_variant: str | None = None,
 ) -> tuple[Path, Path, Path, Path, Path, Path, Path]:
     normalized_engine = _normalize_ocr_engine(ocr_engine)
     image_path = Path(images_root) / doc_key / image_name
     gt_path = _resolve_gt_path(gt_root, doc_key)
     image_stem = Path(image_name).stem
+    if output_variant:
+        image_stem = f"{image_stem}_{output_variant}"
     out_dir = _resolve_ocr_engine_output_root(
         output_root=output_root,
         ocr_engine=normalized_engine,
@@ -2058,36 +2061,114 @@ def _list_image_paths(doc_dir: Path) -> list[Path]:
     return image_files
 
 
-def _prepare_resized_image_if_needed(image_path: Path, max_long_side: int | None, *, quiet: bool = False) -> tuple[Path, Path | None]:
+def _prepare_ocr_input_image(
+    image_path: Path,
+    max_long_side: int | None,
+    *,
+    image_preprocess: str = "none",
+    grayscale_strength: float = 1.0,
+    clahe_clip_limit: float = 2.0,
+    clahe_tile_grid_size: int = 8,
+    quiet: bool = False,
+) -> tuple[Path, Path | None]:
     # [Design Intent]
-    # OOM 완화를 위해 긴 변 기준으로만 비율 유지 축소한다.
-    # 원본은 유지하고 필요 시 임시 파일로만 추론한다.
-    if not max_long_side or max_long_side <= 0:
-        return image_path, None
+    # OOM 완화 resize와 OCR 전처리 실험은 원본 파일을 건드리지 않고
+    # 임시 입력 이미지에만 적용한다.
+    normalized_preprocess = str(image_preprocess or "none").strip().lower()
+    if normalized_preprocess not in {"none", "grayscale", "clahe"}:
+        raise ValueError(f"Unsupported image_preprocess: {image_preprocess}")
+    if not 0.0 <= grayscale_strength <= 1.0:
+        raise ValueError(f"grayscale_strength must be between 0.0 and 1.0: {grayscale_strength}")
+    if normalized_preprocess == "clahe" and clahe_clip_limit <= 0.0:
+        raise ValueError(f"clahe_clip_limit must be positive: {clahe_clip_limit}")
+    if clahe_tile_grid_size <= 0:
+        raise ValueError(f"clahe_tile_grid_size must be positive: {clahe_tile_grid_size}")
 
     import cv2
 
     image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if image is None:
-        raise RuntimeError(f"Failed to load image for resize check: {image_path}")
+        raise RuntimeError(f"Failed to load image for OCR input preparation: {image_path}")
 
     height, width = image.shape[:2]
     long_side = max(width, height)
-    if long_side <= max_long_side:
+    resized = image
+    resize_applied = False
+    if max_long_side and max_long_side > 0 and long_side > max_long_side:
+        scale = float(max_long_side) / float(long_side)
+        resized = cv2.resize(image, dsize=None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        resize_applied = True
+
+    prepared = resized
+    effective_preprocess = normalized_preprocess
+    if normalized_preprocess == "grayscale" and grayscale_strength <= 0.0:
+        effective_preprocess = "none"
+    if normalized_preprocess == "grayscale" and grayscale_strength > 0.0:
+        gray = cv2.cvtColor(prepared, cv2.COLOR_BGR2GRAY)
+        gray_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        prepared = cv2.addWeighted(gray_bgr, grayscale_strength, prepared, 1.0 - grayscale_strength, 0.0)
+    if normalized_preprocess == "clahe":
+        gray = cv2.cvtColor(prepared, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(
+            clipLimit=clahe_clip_limit,
+            tileGridSize=(clahe_tile_grid_size, clahe_tile_grid_size),
+        )
+        prepared = cv2.cvtColor(clahe.apply(gray), cv2.COLOR_GRAY2BGR)
+
+    if not resize_applied and effective_preprocess == "none":
         return image_path, None
 
-    scale = float(max_long_side) / float(long_side)
-    resized = cv2.resize(image, dsize=None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     suffix = image_path.suffix if image_path.suffix else ".jpg"
-    with tempfile.NamedTemporaryFile(prefix="ocr_resized_", suffix=suffix, delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(prefix="ocr_input_", suffix=suffix, delete=False) as tmp:
         temp_path = Path(tmp.name)
-    if not cv2.imwrite(str(temp_path), resized):
+    if not cv2.imwrite(str(temp_path), prepared):
         raise RuntimeError(f"Failed to write resized temp image: {temp_path}")
-    _ocr_batch_log(
-        f"resize_applied: {width}x{height} -> {resized.shape[1]}x{resized.shape[0]} (max_long_side={max_long_side})",
-        quiet=quiet,
-    )
+    if resize_applied:
+        _ocr_batch_log(
+            f"resize_applied: {width}x{height} -> {prepared.shape[1]}x{prepared.shape[0]} (max_long_side={max_long_side})",
+            quiet=quiet,
+        )
+    if effective_preprocess != "none":
+        if effective_preprocess == "clahe":
+            detail = f"clahe_clip_limit={clahe_clip_limit:.2f}, clahe_tile_grid_size={clahe_tile_grid_size}"
+        else:
+            detail = f"grayscale_strength={grayscale_strength:.2f}"
+        _ocr_batch_log(f"image_preprocess_applied: {effective_preprocess} ({detail})", quiet=quiet)
     return temp_path, temp_path
+
+
+def _format_preprocess_variant(
+    image_preprocess: str,
+    grayscale_strength: float,
+    clahe_clip_limit: float = 2.0,
+    clahe_tile_grid_size: int = 8,
+) -> str | None:
+    normalized_preprocess = str(image_preprocess or "none").strip().lower()
+    if normalized_preprocess == "none":
+        return None
+    if normalized_preprocess == "grayscale":
+        if grayscale_strength <= 0.0:
+            return None
+        strength_tag = f"{grayscale_strength:.2f}".rstrip("0").rstrip(".").replace(".", "p")
+        return f"grayscale_{strength_tag}"
+    if normalized_preprocess == "clahe":
+        clip_tag = f"{clahe_clip_limit:.2f}".rstrip("0").rstrip(".").replace(".", "p")
+        return f"clahe_c{clip_tag}_t{clahe_tile_grid_size}"
+    return normalized_preprocess
+
+
+def _save_ocr_input_preview(source_image_path: Path, output_path: Path) -> None:
+    # [Design Intent]
+    # 전처리 실험의 실제 OCR 입력 이미지를 결과 폴더에 남겨 JSON 지표와
+    # 시각 검수를 같은 실험 단위에서 재현 가능하게 만든다.
+    import cv2
+
+    image = cv2.imread(str(source_image_path), cv2.IMREAD_COLOR)
+    if image is None:
+        raise RuntimeError(f"Failed to load OCR input preview image: {source_image_path}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(output_path), image):
+        raise RuntimeError(f"Failed to save OCR input preview image: {output_path}")
 
 
 def ocr_run_image(
@@ -2117,7 +2198,19 @@ def ocr_run_image(
     max_long_side: int | None = 2000,
     quiet: bool = False,
     save_bbox_image: bool = False,
+    save_preprocessed_image: bool = False,
+    image_preprocess: str = "none",
+    grayscale_strength: float = 1.0,
+    clahe_clip_limit: float = 2.0,
+    clahe_tile_grid_size: int = 8,
 ) -> bool:
+    normalized_preprocess = str(image_preprocess or "none").strip().lower()
+    output_variant = _format_preprocess_variant(
+        normalized_preprocess,
+        grayscale_strength,
+        clahe_clip_limit=clahe_clip_limit,
+        clahe_tile_grid_size=clahe_tile_grid_size,
+    )
     (
         image_path,
         gt_path,
@@ -2133,6 +2226,7 @@ def ocr_run_image(
         output_root=output_root,
         image_name=image_name,
         ocr_engine=ocr_engine,
+        output_variant=output_variant,
     )
     image_path = _resolve_image_path(Path(images_root) / doc_key, image_name)
     if require_gt and not gt_path.exists():
@@ -2153,11 +2247,21 @@ def ocr_run_image(
         use_eval = False
 
     pred_raw.parent.mkdir(parents=True, exist_ok=True)
-    prepared_image_path, temp_image_path = _prepare_resized_image_if_needed(
-        image_path, max_long_side=max_long_side, quiet=quiet
+    prepared_image_path, temp_image_path = _prepare_ocr_input_image(
+        image_path,
+        max_long_side=max_long_side,
+        image_preprocess=normalized_preprocess,
+        grayscale_strength=grayscale_strength,
+        clahe_clip_limit=clahe_clip_limit,
+        clahe_tile_grid_size=clahe_tile_grid_size,
+        quiet=quiet,
     )
     try:
         bbox_image_output = str(pred_raw.parent / f"pred_bbox_{Path(image_path.name).stem}.jpg") if save_bbox_image else None
+        if save_preprocessed_image:
+            preprocessed_image_output = pred_raw.parent / "input_preprocessed.png"
+            _save_ocr_input_preview(prepared_image_path, preprocessed_image_output)
+            _ocr_batch_log(f"preprocessed_image_saved: {preprocessed_image_output}", quiet=quiet)
         
         _ocr_batch_log(f"doc_key: {doc_key}", quiet=quiet)
         _ocr_batch_log(f"image: {image_path}", quiet=quiet)
@@ -2197,6 +2301,392 @@ def ocr_run_image(
     if require_gt and not use_eval:
         _ocr_batch_log(f"[SKIP_EVAL_SUMMARY] use_eval=false: {final_item_id}", quiet=quiet)
     return use_eval
+
+
+def _flatten_text_values(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        stripped = value.strip()
+        return [stripped] if stripped else []
+    if isinstance(value, dict):
+        texts: list[str] = []
+        for nested in value.values():
+            texts.extend(_flatten_text_values(nested))
+        return texts
+    if isinstance(value, list):
+        texts: list[str] = []
+        for nested in value:
+            texts.extend(_flatten_text_values(nested))
+        return texts
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def _summarize_preprocess_output(
+    *,
+    doc_key: str,
+    image_name: str,
+    images_root: str,
+    gt_root: str,
+    output_root: str,
+    ocr_engine: str,
+    image_preprocess: str,
+    grayscale_strength: float,
+    clahe_clip_limit: float,
+    clahe_tile_grid_size: int,
+    keywords: list[str],
+) -> dict[str, object]:
+    output_variant = _format_preprocess_variant(
+        image_preprocess,
+        grayscale_strength,
+        clahe_clip_limit=clahe_clip_limit,
+        clahe_tile_grid_size=clahe_tile_grid_size,
+    )
+    _, _, pred_raw, _, _, pred_table_rows, _ = _resolve_ocr_doc_paths(
+        doc_key=doc_key,
+        images_root=images_root,
+        gt_root=gt_root,
+        output_root=output_root,
+        image_name=image_name,
+        ocr_engine=ocr_engine,
+        output_variant=output_variant,
+    )
+    raw_payload = json.loads(pred_raw.read_text(encoding="utf-8")) if pred_raw.exists() else {}
+    layout_payload = json.loads(pred_table_rows.read_text(encoding="utf-8")) if pred_table_rows.exists() else {}
+
+    ocr_lines = raw_payload.get("ocr_lines", [])
+    if not isinstance(ocr_lines, list):
+        ocr_lines = []
+    raw_texts = [str(row.get("text") or "").strip() for row in ocr_lines if isinstance(row, dict)]
+    raw_text = "\n".join(text for text in raw_texts if text)
+
+    table_rows = layout_payload.get("table_rows", []) if isinstance(layout_payload, dict) else []
+    if not isinstance(table_rows, list):
+        table_rows = []
+    layout_texts = _flatten_text_values(table_rows)
+    layout_text = "\n".join(layout_texts)
+    combined_text = f"{raw_text}\n{layout_text}"
+
+    non_empty_cells = 0
+    empty_cells = 0
+    for row in table_rows:
+        if not isinstance(row, dict):
+            continue
+        for key, value in row.items():
+            if str(key).startswith("_") or key in {"table_index", "row_index"}:
+                continue
+            values = _flatten_text_values(value)
+            if values:
+                non_empty_cells += 1
+            else:
+                empty_cells += 1
+    total_cells = non_empty_cells + empty_cells
+    empty_cell_ratio = round(empty_cells / total_cells, 4) if total_cells else None
+
+    keyword_hits = [keyword for keyword in keywords if keyword and keyword in combined_text]
+    return {
+        "variant": output_variant or "baseline",
+        "image_preprocess": image_preprocess,
+        "grayscale_strength": grayscale_strength,
+        "clahe_clip_limit": clahe_clip_limit,
+        "clahe_tile_grid_size": clahe_tile_grid_size,
+        "latency_ms": raw_payload.get("latency_ms"),
+        "ocr_line_count": len(ocr_lines),
+        "raw_text_length": len(raw_text),
+        "table_row_count": len(table_rows),
+        "layout_text_length": len(layout_text),
+        "empty_cell_ratio": empty_cell_ratio,
+        "keyword_hit_count": len(keyword_hits),
+        "keyword_hits": ",".join(keyword_hits),
+        "preprocessed_image": str(pred_raw.parent / "input_preprocessed.png")
+        if (pred_raw.parent / "input_preprocessed.png").exists()
+        else "",
+        "pred_raw": str(pred_raw),
+        "pred_table_layout": str(pred_table_rows),
+    }
+
+
+def _write_markdown_table(rows: list[dict[str, object]], output_path: Path) -> None:
+    if not rows:
+        output_path.write_text("", encoding="utf-8")
+        return
+    headers = list(rows[0].keys())
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
+    for row in rows:
+        values = [str(row.get(header, "")).replace("\n", " ") for header in headers]
+        lines.append("| " + " | ".join(values) + " |")
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def ocr_run_image_preprocess_sweep(
+    *,
+    doc_key: str,
+    item_id: str | None,
+    images_root: str,
+    gt_root: str,
+    output_root: str,
+    image_name: str,
+    lang: str,
+    score_threshold: float,
+    structure_match_threshold: float,
+    ocr_engine: str,
+    ocr_device: str,
+    ocr_batch_size: int,
+    image_preprocess: str,
+    strengths: list[float],
+    clahe_clip_limits: list[float],
+    clahe_tile_grid_size: int,
+    keywords: list[str],
+    use_doc_orientation_classify: bool = False,
+    use_doc_unwarping: bool = False,
+    use_chart_recognition: bool = False,
+    use_table_orientation_classify: bool = True,
+    use_ocr_results_with_table_cells: bool = True,
+    text_det_limit_side_len: int | None = None,
+    table_dual_pass: bool = False,
+    table_second_engine: str = "pp_ocrv5",
+    require_gt: bool = False,
+    save_bbox_image: bool = False,
+    save_preprocessed_image: bool = False,
+) -> Path:
+    normalized_preprocess = str(image_preprocess or "grayscale").strip().lower()
+    if normalized_preprocess not in {"grayscale", "clahe"}:
+        raise ValueError(f"Unsupported sweep image_preprocess: {image_preprocess}")
+    rows: list[dict[str, object]] = []
+    sweep_values = strengths if normalized_preprocess == "grayscale" else clahe_clip_limits
+    for sweep_value in sweep_values:
+        grayscale_strength = float(sweep_value) if normalized_preprocess == "grayscale" else 1.0
+        clahe_clip_limit = float(sweep_value) if normalized_preprocess == "clahe" else 2.0
+        if normalized_preprocess == "grayscale" and grayscale_strength <= 0.0:
+            run_preprocess = "none"
+        elif normalized_preprocess == "clahe" and clahe_clip_limit <= 0.0:
+            run_preprocess = "none"
+        else:
+            run_preprocess = normalized_preprocess
+        ocr_run_image(
+            doc_key=doc_key,
+            item_id=item_id,
+            images_root=images_root,
+            gt_root=gt_root,
+            output_root=output_root,
+            image_name=image_name,
+            lang=lang,
+            score_threshold=score_threshold,
+            structure_match_threshold=structure_match_threshold,
+            ocr_engine=ocr_engine,
+            ocr_device=ocr_device,
+            ocr_batch_size=ocr_batch_size,
+            use_doc_orientation_classify=use_doc_orientation_classify,
+            use_doc_unwarping=use_doc_unwarping,
+            use_chart_recognition=use_chart_recognition,
+            use_table_orientation_classify=use_table_orientation_classify,
+            use_ocr_results_with_table_cells=use_ocr_results_with_table_cells,
+            text_det_limit_side_len=text_det_limit_side_len,
+            table_dual_pass=table_dual_pass,
+            table_second_engine=table_second_engine,
+            require_gt=require_gt,
+            quiet=False,
+            save_bbox_image=save_bbox_image,
+            save_preprocessed_image=save_preprocessed_image,
+            image_preprocess=run_preprocess,
+            grayscale_strength=grayscale_strength,
+            clahe_clip_limit=clahe_clip_limit,
+            clahe_tile_grid_size=clahe_tile_grid_size,
+        )
+        rows.append(
+            _summarize_preprocess_output(
+                doc_key=doc_key,
+                image_name=image_name,
+                images_root=images_root,
+                gt_root=gt_root,
+                output_root=output_root,
+                ocr_engine=ocr_engine,
+                image_preprocess=run_preprocess,
+                grayscale_strength=grayscale_strength,
+                clahe_clip_limit=clahe_clip_limit,
+                clahe_tile_grid_size=clahe_tile_grid_size,
+                keywords=keywords,
+            )
+        )
+
+    output_variant = f"{normalized_preprocess}_sweep"
+    _, _, pred_raw, _, _, _, _ = _resolve_ocr_doc_paths(
+        doc_key=doc_key,
+        images_root=images_root,
+        gt_root=gt_root,
+        output_root=output_root,
+        image_name=image_name,
+        ocr_engine=ocr_engine,
+        output_variant=output_variant,
+    )
+    summary_dir = pred_raw.parent
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = summary_dir / f"{normalized_preprocess}_sweep_summary.csv"
+    md_path = summary_dir / f"{normalized_preprocess}_sweep_summary.md"
+    with csv_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else [])
+        if rows:
+            writer.writeheader()
+            writer.writerows(rows)
+    _write_markdown_table(rows, md_path)
+    print(f"sweep_summary_csv: {csv_path}")
+    print(f"sweep_summary_md: {md_path}")
+    return csv_path
+
+
+def _read_csv_rows(path: Path) -> list[dict[str, object]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", newline="") as f:
+        return [dict(row) for row in csv.DictReader(f)]
+
+
+def ocr_run_preprocess_sweep_batch(
+    *,
+    images_root: str,
+    gt_root: str,
+    output_root: str,
+    doc_key: str | None,
+    limit_docs: int,
+    limit_images_per_doc: int,
+    lang: str,
+    score_threshold: float,
+    structure_match_threshold: float,
+    ocr_engine: str,
+    ocr_device: str,
+    ocr_batch_size: int,
+    image_preprocess: str,
+    strengths: list[float],
+    clahe_clip_limits: list[float],
+    clahe_tile_grid_size: int,
+    keywords: list[str],
+    use_doc_orientation_classify: bool = False,
+    use_doc_unwarping: bool = False,
+    use_chart_recognition: bool = False,
+    use_table_orientation_classify: bool = True,
+    use_ocr_results_with_table_cells: bool = True,
+    text_det_limit_side_len: int | None = None,
+    table_dual_pass: bool = False,
+    table_second_engine: str = "pp_ocrv5",
+    require_gt: bool = False,
+    save_bbox_image: bool = False,
+    save_preprocessed_image: bool = False,
+    stop_on_error: bool = False,
+) -> Path:
+    normalized_preprocess = str(image_preprocess or "grayscale").strip().lower()
+    if normalized_preprocess not in {"grayscale", "clahe"}:
+        raise ValueError(f"Unsupported batch sweep image_preprocess: {image_preprocess}")
+
+    image_root_path = Path(images_root)
+    if not image_root_path.exists():
+        raise FileNotFoundError(f"images_root not found: {image_root_path}")
+
+    doc_dirs = sorted([path for path in image_root_path.iterdir() if path.is_dir()], key=lambda p: p.name)
+    if doc_key:
+        doc_dirs = [path for path in doc_dirs if path.name == doc_key]
+        if not doc_dirs:
+            raise FileNotFoundError(f"doc_key folder not found under images_root: {doc_key}")
+    if limit_docs > 0:
+        doc_dirs = doc_dirs[:limit_docs]
+
+    all_rows: list[dict[str, object]] = []
+    fail_rows: list[dict[str, str]] = []
+    processed_images = 0
+    for doc_dir in doc_dirs:
+        try:
+            image_paths = _list_image_paths(doc_dir)
+        except Exception as exc:
+            message = str(exc)
+            print(f"[SKIP] {doc_dir.name}: {message}")
+            fail_rows.append({"doc_key": doc_dir.name, "image_name": "", "error": message})
+            if stop_on_error:
+                raise
+            continue
+        if limit_images_per_doc > 0:
+            image_paths = image_paths[:limit_images_per_doc]
+
+        for image_path in image_paths:
+            print(f"=== SWEEP_BATCH: {doc_dir.name} / {image_path.name} ===")
+            try:
+                summary_csv = ocr_run_image_preprocess_sweep(
+                    doc_key=doc_dir.name,
+                    item_id=None,
+                    images_root=images_root,
+                    gt_root=gt_root,
+                    output_root=output_root,
+                    image_name=image_path.name,
+                    lang=lang,
+                    score_threshold=score_threshold,
+                    structure_match_threshold=structure_match_threshold,
+                    ocr_engine=ocr_engine,
+                    ocr_device=ocr_device,
+                    ocr_batch_size=ocr_batch_size,
+                    image_preprocess=normalized_preprocess,
+                    strengths=strengths,
+                    clahe_clip_limits=clahe_clip_limits,
+                    clahe_tile_grid_size=clahe_tile_grid_size,
+                    keywords=keywords,
+                    use_doc_orientation_classify=use_doc_orientation_classify,
+                    use_doc_unwarping=use_doc_unwarping,
+                    use_chart_recognition=use_chart_recognition,
+                    use_table_orientation_classify=use_table_orientation_classify,
+                    use_ocr_results_with_table_cells=use_ocr_results_with_table_cells,
+                    text_det_limit_side_len=text_det_limit_side_len,
+                    table_dual_pass=table_dual_pass,
+                    table_second_engine=table_second_engine,
+                    require_gt=require_gt,
+                    save_bbox_image=save_bbox_image,
+                    save_preprocessed_image=save_preprocessed_image,
+                )
+                for row in _read_csv_rows(summary_csv):
+                    row["doc_key"] = doc_dir.name
+                    row["image_name"] = image_path.name
+                    all_rows.append(row)
+                processed_images += 1
+            except Exception as exc:
+                message = str(exc)
+                print(f"[FAIL] {doc_dir.name}/{image_path.name}: {message}")
+                fail_rows.append({"doc_key": doc_dir.name, "image_name": image_path.name, "error": message})
+                if stop_on_error:
+                    raise
+
+    engine_root = _resolve_ocr_engine_output_root(
+        output_root=output_root,
+        ocr_engine=ocr_engine,
+        images_root=images_root,
+    )
+    engine_root.mkdir(parents=True, exist_ok=True)
+    csv_path = engine_root / f"{normalized_preprocess}_sweep_summary_all.csv"
+    md_path = engine_root / f"{normalized_preprocess}_sweep_summary_all.md"
+    fail_path = engine_root / f"{normalized_preprocess}_sweep_failures.csv"
+
+    if all_rows:
+        preferred = ["doc_key", "image_name"]
+        headers = preferred + [key for key in all_rows[0].keys() if key not in set(preferred)]
+        with csv_path.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            writer.writeheader()
+            writer.writerows(all_rows)
+        _write_markdown_table(all_rows, md_path)
+    else:
+        csv_path.write_text("", encoding="utf-8")
+        md_path.write_text("", encoding="utf-8")
+
+    if fail_rows:
+        with fail_path.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["doc_key", "image_name", "error"])
+            writer.writeheader()
+            writer.writerows(fail_rows)
+
+    print(f"sweep_batch_processed_images: {processed_images}")
+    print(f"sweep_batch_summary_csv: {csv_path}")
+    print(f"sweep_batch_summary_md: {md_path}")
+    if fail_rows:
+        print(f"sweep_batch_failures_csv: {fail_path}")
+    return csv_path
 
 
 def ocr_run_batch(
@@ -3536,6 +4026,214 @@ def main() -> None:
         action="store_true",
         help="Generate and save an image with bounding boxes drawn over detected text.",
     )
+    ocr_image_parser.add_argument(
+        "--save-preprocessed-image",
+        action="store_true",
+        help="Save the actual OCR input image as input_preprocessed.png in the inference folder.",
+    )
+    ocr_image_parser.add_argument(
+        "--image-preprocess",
+        default=None,
+        choices=["none", "grayscale", "clahe"],
+        help="Override OCR input preprocessing variant from config for single-image experiments.",
+    )
+    ocr_image_parser.add_argument(
+        "--grayscale-strength",
+        type=float,
+        default=None,
+        help="Override grayscale blend strength from config. 0.0=baseline, 1.0=full grayscale.",
+    )
+    ocr_image_parser.add_argument(
+        "--clahe-clip-limit",
+        type=float,
+        default=None,
+        help="Override CLAHE clipLimit from config.",
+    )
+    ocr_image_parser.add_argument(
+        "--clahe-tile-grid-size",
+        type=int,
+        default=None,
+        help="Override CLAHE tileGridSize from config.",
+    )
+
+    ocr_sweep_parser = subparsers.add_parser(
+        "ocr-sweep-preprocess-image",
+        help="Run one image across grayscale preprocessing strengths and summarize proxy metrics",
+    )
+    ocr_sweep_parser.add_argument(
+        "--doc-key",
+        required=True,
+        help="Document key (folder name under paths.images_root from ocr-config)",
+    )
+    ocr_sweep_parser.add_argument("--id", default=None, help="Optional target item id")
+    ocr_sweep_parser.add_argument("--image-name", default="img_001.jpg", help="Image filename inside doc folder")
+    ocr_sweep_parser.add_argument("--lang", default="korean", help="PaddleOCR language fallback")
+    ocr_sweep_parser.add_argument(
+        "--ocr-config",
+        default="configs/ocr_default.yaml",
+        help="OCR config path (engine/device/model settings)",
+    )
+    ocr_sweep_parser.add_argument(
+        "--strengths",
+        nargs="+",
+        type=float,
+        default=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+        help="Grayscale strengths to run. 0.0=baseline, 1.0=full grayscale.",
+    )
+    ocr_sweep_parser.add_argument(
+        "--preprocess",
+        default="grayscale",
+        choices=["grayscale", "clahe"],
+        help="Preprocessing sweep type.",
+    )
+    ocr_sweep_parser.add_argument(
+        "--clahe-clip-limits",
+        nargs="+",
+        type=float,
+        default=[0.0, 1.5, 2.0, 3.0],
+        help="CLAHE clipLimit values to run when --preprocess clahe. 0.0=baseline.",
+    )
+    ocr_sweep_parser.add_argument(
+        "--clahe-tile-grid-size",
+        type=int,
+        default=8,
+        help="CLAHE tileGridSize used when --preprocess clahe.",
+    )
+    ocr_sweep_parser.add_argument(
+        "--keyword",
+        action="append",
+        default=None,
+        help="Keyword expected in OCR/table output; can be passed multiple times.",
+    )
+    ocr_sweep_parser.add_argument("--use-doc-orientation-classify", action="store_true")
+    ocr_sweep_parser.add_argument("--use-doc-unwarping", action="store_true")
+    ocr_sweep_parser.add_argument("--use-chart-recognition", action="store_true")
+    ocr_sweep_parser.add_argument("--use-table-orientation-classify", action="store_true")
+    ocr_sweep_parser.add_argument("--use-ocr-results-with-table-cells", action="store_true")
+    ocr_sweep_parser.add_argument("--text-det-limit-side-len", type=int, default=None)
+    ocr_sweep_parser.add_argument(
+        "--table-dual-pass",
+        action="store_true",
+        help="For table images, run VL first and then PP-OCRv5 to merge non-table text.",
+    )
+    ocr_sweep_parser.add_argument(
+        "--table-second-engine",
+        default="pp_ocrv5",
+        choices=["pp_ocrv5", "pp_ocrv5_transformers"],
+        help="Second pass OCR engine used when --table-dual-pass is enabled.",
+    )
+    ocr_sweep_parser.add_argument(
+        "--require-gt",
+        action="store_true",
+        help="Enable GT build/eval during sweep. Default is inference-only.",
+    )
+    ocr_sweep_parser.add_argument(
+        "--save-bbox-image",
+        action="store_true",
+        help="Generate bbox image for each sweep variant.",
+    )
+    ocr_sweep_parser.add_argument(
+        "--save-preprocessed-image",
+        action="store_true",
+        help="Save input_preprocessed.png for each sweep variant.",
+    )
+
+    ocr_sweep_batch_parser = subparsers.add_parser(
+        "ocr-sweep-preprocess-batch",
+        help="Run preprocessing sweep for images under OCR images root and write root-level summary",
+    )
+    ocr_sweep_batch_parser.add_argument(
+        "--doc-key",
+        default=None,
+        help="Run sweep only for one document key folder under paths.images_root from ocr-config.",
+    )
+    ocr_sweep_batch_parser.add_argument(
+        "--limit-docs",
+        type=int,
+        default=0,
+        help="Process first N doc folders after name sort; 0=all.",
+    )
+    ocr_sweep_batch_parser.add_argument(
+        "--limit-images-per-doc",
+        type=int,
+        default=0,
+        help="Process first N images per doc folder after name sort; 0=all.",
+    )
+    ocr_sweep_batch_parser.add_argument("--lang", default="korean", help="PaddleOCR language fallback")
+    ocr_sweep_batch_parser.add_argument(
+        "--ocr-config",
+        default="configs/ocr_default.yaml",
+        help="OCR config path (engine/device/model settings)",
+    )
+    ocr_sweep_batch_parser.add_argument(
+        "--strengths",
+        nargs="+",
+        type=float,
+        default=[0.0, 0.4],
+        help="Grayscale strengths to run when --preprocess grayscale.",
+    )
+    ocr_sweep_batch_parser.add_argument(
+        "--preprocess",
+        default="grayscale",
+        choices=["grayscale", "clahe"],
+        help="Preprocessing sweep type.",
+    )
+    ocr_sweep_batch_parser.add_argument(
+        "--clahe-clip-limits",
+        nargs="+",
+        type=float,
+        default=[0.0, 1.5, 2.0, 3.0],
+        help="CLAHE clipLimit values to run when --preprocess clahe. 0.0=baseline.",
+    )
+    ocr_sweep_batch_parser.add_argument(
+        "--clahe-tile-grid-size",
+        type=int,
+        default=8,
+        help="CLAHE tileGridSize used when --preprocess clahe.",
+    )
+    ocr_sweep_batch_parser.add_argument(
+        "--keyword",
+        action="append",
+        default=None,
+        help="Keyword expected in OCR/table output; can be passed multiple times.",
+    )
+    ocr_sweep_batch_parser.add_argument("--use-doc-orientation-classify", action="store_true")
+    ocr_sweep_batch_parser.add_argument("--use-doc-unwarping", action="store_true")
+    ocr_sweep_batch_parser.add_argument("--use-chart-recognition", action="store_true")
+    ocr_sweep_batch_parser.add_argument("--use-table-orientation-classify", action="store_true")
+    ocr_sweep_batch_parser.add_argument("--use-ocr-results-with-table-cells", action="store_true")
+    ocr_sweep_batch_parser.add_argument("--text-det-limit-side-len", type=int, default=None)
+    ocr_sweep_batch_parser.add_argument(
+        "--table-dual-pass",
+        action="store_true",
+        help="For table images, run VL first and then PP-OCRv5 to merge non-table text.",
+    )
+    ocr_sweep_batch_parser.add_argument(
+        "--table-second-engine",
+        default="pp_ocrv5",
+        choices=["pp_ocrv5", "pp_ocrv5_transformers"],
+        help="Second pass OCR engine used when --table-dual-pass is enabled.",
+    )
+    ocr_sweep_batch_parser.add_argument(
+        "--require-gt",
+        action="store_true",
+        help="Enable GT build/eval during sweep. Default is inference-only.",
+    )
+    ocr_sweep_batch_parser.add_argument(
+        "--save-bbox-image",
+        action="store_true",
+        help="Generate bbox image for each sweep variant.",
+    )
+    ocr_sweep_batch_parser.add_argument(
+        "--save-preprocessed-image",
+        action="store_true",
+        help="Save input_preprocessed.png for each sweep variant.",
+    )
+    ocr_sweep_batch_parser.add_argument(
+        "--stop-on-error",
+        action="store_true",
+        help="Stop batch sweep when one image fails.",
+    )
 
     ocr_batch_parser = subparsers.add_parser(
         "ocr-run-batch",
@@ -3867,6 +4565,7 @@ def main() -> None:
         ocr_app_cfg = load_ocr_config(args.ocr_config)
         ocr_cfg = ocr_app_cfg.ocr
         ocr_paths = ocr_app_cfg.paths
+        preprocessing_cfg = ocr_app_cfg.preprocessing
         effective_score_threshold = (
             args.score_threshold if args.score_threshold is not None else ocr_cfg.score_threshold
         )
@@ -3878,6 +4577,28 @@ def main() -> None:
         print(f"[OCR CONFIG] images_root={ocr_paths.images_root}")
         print(f"[OCR CONFIG] gt_root={ocr_paths.gt_root}")
         print(f"[OCR CONFIG] output_root={ocr_paths.output_root}")
+        effective_image_preprocess = (
+            args.image_preprocess if args.image_preprocess is not None else preprocessing_cfg.image
+        )
+        effective_grayscale_strength = (
+            args.grayscale_strength
+            if args.grayscale_strength is not None
+            else preprocessing_cfg.grayscale_strength
+        )
+        effective_clahe_clip_limit = (
+            args.clahe_clip_limit
+            if args.clahe_clip_limit is not None
+            else preprocessing_cfg.clahe_clip_limit
+        )
+        effective_clahe_tile_grid_size = (
+            args.clahe_tile_grid_size
+            if args.clahe_tile_grid_size is not None
+            else preprocessing_cfg.clahe_tile_grid_size
+        )
+        print(f"[OCR CONFIG] image_preprocess={effective_image_preprocess}")
+        print(f"[OCR CONFIG] grayscale_strength={effective_grayscale_strength}")
+        print(f"[OCR CONFIG] clahe_clip_limit={effective_clahe_clip_limit}")
+        print(f"[OCR CONFIG] clahe_tile_grid_size={effective_clahe_tile_grid_size}")
         engines = list(DEFAULT_OCR_ENGINE_MATRIX) if args.all_engines else [_normalize_ocr_engine(ocr_cfg.engine)]
         failed_engines: list[str] = []
         for engine_name in engines:
@@ -3906,6 +4627,11 @@ def main() -> None:
                     table_second_engine=args.table_second_engine,
                     require_gt=not args.no_gt,
                     save_bbox_image=args.save_bbox_image,
+                    save_preprocessed_image=args.save_preprocessed_image,
+                    image_preprocess=effective_image_preprocess,
+                    grayscale_strength=effective_grayscale_strength,
+                    clahe_clip_limit=effective_clahe_clip_limit,
+                    clahe_tile_grid_size=effective_clahe_tile_grid_size,
                 )
             except Exception as exc:
                 failed_engines.append(engine_name)
@@ -3914,6 +4640,101 @@ def main() -> None:
                     raise
         if failed_engines:
             raise SystemExit(f"Failed engines: {', '.join(failed_engines)}")
+    elif args.command == "ocr-sweep-preprocess-image":
+        from src.config_ocr import load_ocr_config
+
+        ocr_app_cfg = load_ocr_config(args.ocr_config)
+        ocr_cfg = ocr_app_cfg.ocr
+        ocr_paths = ocr_app_cfg.paths
+        engine_name = _normalize_ocr_engine(ocr_cfg.engine)
+        keywords = args.keyword or ["검토항목", "검토의견", "추정 사업기간"]
+        print(f"[OCR CONFIG] images_root={ocr_paths.images_root}")
+        print(f"[OCR CONFIG] gt_root={ocr_paths.gt_root}")
+        print(f"[OCR CONFIG] output_root={ocr_paths.output_root}")
+        print(f"[OCR CONFIG] engine={engine_name}")
+        print(f"[OCR SWEEP] preprocess={args.preprocess}")
+        print(f"[OCR SWEEP] strengths={args.strengths}")
+        print(f"[OCR SWEEP] clahe_clip_limits={args.clahe_clip_limits}")
+        print(f"[OCR SWEEP] keywords={keywords}")
+        ocr_run_image_preprocess_sweep(
+            doc_key=args.doc_key,
+            item_id=args.id,
+            images_root=ocr_paths.images_root,
+            gt_root=ocr_paths.gt_root,
+            output_root=ocr_paths.output_root,
+            image_name=args.image_name,
+            lang=ocr_cfg.lang or args.lang,
+            score_threshold=ocr_cfg.score_threshold,
+            structure_match_threshold=ocr_cfg.structure_match_threshold,
+            ocr_engine=engine_name,
+            ocr_device=ocr_cfg.device,
+            ocr_batch_size=ocr_cfg.batch_size,
+            image_preprocess=args.preprocess,
+            strengths=args.strengths,
+            clahe_clip_limits=args.clahe_clip_limits,
+            clahe_tile_grid_size=args.clahe_tile_grid_size,
+            keywords=keywords,
+            use_doc_orientation_classify=args.use_doc_orientation_classify,
+            use_doc_unwarping=args.use_doc_unwarping,
+            use_chart_recognition=args.use_chart_recognition,
+            use_table_orientation_classify=args.use_table_orientation_classify,
+            use_ocr_results_with_table_cells=args.use_ocr_results_with_table_cells,
+            text_det_limit_side_len=args.text_det_limit_side_len,
+            table_dual_pass=args.table_dual_pass,
+            table_second_engine=args.table_second_engine,
+            require_gt=args.require_gt,
+            save_bbox_image=args.save_bbox_image,
+            save_preprocessed_image=args.save_preprocessed_image,
+        )
+    elif args.command == "ocr-sweep-preprocess-batch":
+        from src.config_ocr import load_ocr_config
+
+        ocr_app_cfg = load_ocr_config(args.ocr_config)
+        ocr_cfg = ocr_app_cfg.ocr
+        ocr_paths = ocr_app_cfg.paths
+        engine_name = _normalize_ocr_engine(ocr_cfg.engine)
+        keywords = args.keyword or ["검토항목", "검토의견", "추정 사업기간"]
+        print(f"[OCR CONFIG] images_root={ocr_paths.images_root}")
+        print(f"[OCR CONFIG] gt_root={ocr_paths.gt_root}")
+        print(f"[OCR CONFIG] output_root={ocr_paths.output_root}")
+        print(f"[OCR CONFIG] engine={engine_name}")
+        print(f"[OCR SWEEP BATCH] preprocess={args.preprocess}")
+        print(f"[OCR SWEEP BATCH] strengths={args.strengths}")
+        print(f"[OCR SWEEP BATCH] clahe_clip_limits={args.clahe_clip_limits}")
+        print(f"[OCR SWEEP BATCH] limit_docs={args.limit_docs}")
+        print(f"[OCR SWEEP BATCH] limit_images_per_doc={args.limit_images_per_doc}")
+        print(f"[OCR SWEEP BATCH] keywords={keywords}")
+        ocr_run_preprocess_sweep_batch(
+            images_root=ocr_paths.images_root,
+            gt_root=ocr_paths.gt_root,
+            output_root=ocr_paths.output_root,
+            doc_key=args.doc_key,
+            limit_docs=args.limit_docs,
+            limit_images_per_doc=args.limit_images_per_doc,
+            lang=ocr_cfg.lang or args.lang,
+            score_threshold=ocr_cfg.score_threshold,
+            structure_match_threshold=ocr_cfg.structure_match_threshold,
+            ocr_engine=engine_name,
+            ocr_device=ocr_cfg.device,
+            ocr_batch_size=ocr_cfg.batch_size,
+            image_preprocess=args.preprocess,
+            strengths=args.strengths,
+            clahe_clip_limits=args.clahe_clip_limits,
+            clahe_tile_grid_size=args.clahe_tile_grid_size,
+            keywords=keywords,
+            use_doc_orientation_classify=args.use_doc_orientation_classify,
+            use_doc_unwarping=args.use_doc_unwarping,
+            use_chart_recognition=args.use_chart_recognition,
+            use_table_orientation_classify=args.use_table_orientation_classify,
+            use_ocr_results_with_table_cells=args.use_ocr_results_with_table_cells,
+            text_det_limit_side_len=args.text_det_limit_side_len,
+            table_dual_pass=args.table_dual_pass,
+            table_second_engine=args.table_second_engine,
+            require_gt=args.require_gt,
+            save_bbox_image=args.save_bbox_image,
+            save_preprocessed_image=args.save_preprocessed_image,
+            stop_on_error=args.stop_on_error,
+        )
     elif args.command == "ocr-run-batch":
         from src.config_ocr import load_ocr_config
 

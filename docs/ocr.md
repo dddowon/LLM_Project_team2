@@ -13,11 +13,12 @@ python -m src.cli check-ocr3-setup
 
 ## 입력/출력 규칙
 
-- 이미지 입력: `data/v2/ocr_images/<doc_key>/img_001.jpg`
-- GT 입력: `data/v2/ocr_outputs/incoming_gt/<doc_key>.jsonl` (없으면 `.json` fallback)
+- 이미지 입력: `data/v2/ocr_images/<images_tag>/<doc_key>/img_001.jpg`
+- GT 입력: `data/v2/ocr_outputs/incoming_gt/<images_tag>/<doc_key>.jsonl` (없으면 `.json` fallback)
 - 주요 출력:
-  - `data/v2/ocr_outputs/<engine>/<doc_key>/<image_stem>/inference/*`
-  - `data/v2/ocr_outputs/<engine>/<doc_key>/<image_stem>/eval/*` (GT 모드)
+  - `data/v2/ocr_outputs/<engine>/<images_tag>/<doc_key>/<image_stem>/inference/*`
+  - `data/v2/ocr_outputs/<engine>/<images_tag>/<doc_key>/<image_stem>/eval/*` (GT 모드)
+- 현재 기본 `<images_tag>`는 `configs/ocr_default.yaml`의 `paths.images_root` 기준 `v4_table_filtered_260531`
 - `--doc-key`는 파일명이 아니라 `ocr_images` 하위 폴더명 기준
 
 ## 주요 실행 명령
@@ -51,6 +52,81 @@ python -m src.cli ocr-run-image \
   --ocr-config "configs/ocr_default.yaml" \
   --no-gt
 ```
+
+### OCR bbox / 전처리 입력 이미지 저장
+
+단일 이미지 디버깅 시 bbox 시각화와 실제 OCR 입력 이미지를 저장할 수 있습니다.
+
+```bash
+python -m src.cli ocr-run-image \
+  --doc-key "문서_키" \
+  --image-name "img_001.jpg" \
+  --ocr-config "configs/ocr_default.yaml" \
+  --image-preprocess clahe \
+  --clahe-clip-limit 1.5 \
+  --clahe-tile-grid-size 8 \
+  --save-bbox-image \
+  --save-preprocessed-image \
+  --no-gt
+```
+
+- `pred_bbox_<image_stem>.jpg`: OCR bbox 시각화 이미지
+- `input_preprocessed.png`: resize/전처리 후 실제 OCR에 입력된 이미지
+
+### OCR 전처리 sweep
+
+GT가 없는 전처리 실험에서는 CER/WER 대신 OCR 검출 결과 기반 proxy metric을 사용합니다.
+
+| 지표 | 목적 |
+| --- | --- |
+| `ocr_line_count` | 텍스트 누락/과검출 확인 |
+| `raw_text_length` | 전체 추출 텍스트량 확인 |
+| `table_row_count` | 표 행 구조 유지 여부 확인 |
+| `layout_text_length` | 구조화 결과 텍스트량 확인 |
+| `empty_cell_ratio` | 구조화 JSON의 빈 셀 증가 여부 확인 |
+| `keyword_hit_count` | 핵심 필드 유지 여부 확인 |
+| `latency_ms` | 전처리 비용 확인 |
+
+Grayscale 단일 이미지 sweep:
+
+```bash
+python -m src.cli ocr-sweep-preprocess-image \
+  --doc-key "문서_키" \
+  --image-name "img_001.jpg" \
+  --preprocess grayscale \
+  --strengths 0.0 0.4 \
+  --save-preprocessed-image
+```
+
+CLAHE 단일 이미지 sweep:
+
+```bash
+python -m src.cli ocr-sweep-preprocess-image \
+  --doc-key "문서_키" \
+  --image-name "img_001.jpg" \
+  --preprocess clahe \
+  --clahe-clip-limits 0.0 1.5 \
+  --clahe-tile-grid-size 8 \
+  --save-preprocessed-image
+```
+
+문서 batch sweep:
+
+```bash
+python -m src.cli ocr-sweep-preprocess-batch \
+  --preprocess clahe \
+  --clahe-clip-limits 0.0 1.5 \
+  --clahe-tile-grid-size 8 \
+  --limit-docs 10 \
+  --save-preprocessed-image
+```
+
+주요 출력:
+
+- 단일 이미지: `<image_stem>_<preprocess>_sweep/inference/<preprocess>_sweep_summary.csv`
+- 전체 요약: `data/v2/ocr_outputs/<engine>/<images_tag>/<preprocess>_sweep_summary_all.csv`
+- variant별 OCR 결과: `<image_stem>_grayscale_0p4/inference/*`, `<image_stem>_clahe_c1p5_t8/inference/*`
+- variant별 입력 이미지: `<variant>/inference/input_preprocessed.png`
 
 ### 문서/전체 배치 OCR
 

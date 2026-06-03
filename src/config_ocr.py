@@ -28,9 +28,19 @@ class OCRPathConfig(BaseModel):
     output_root: str = "data/v2/ocr_outputs"
 
 
+class OCRPreprocessingConfig(BaseModel):
+    # [Design Intent] Keep OCR input preprocessing variants reproducible
+    # without mutating source images.
+    image: str = "none"  # none | grayscale | clahe
+    grayscale_strength: float = 1.0
+    clahe_clip_limit: float = 2.0
+    clahe_tile_grid_size: int = 8
+
+
 class OCRAppConfig(BaseModel):
     ocr: OCRConfig = OCRConfig()
     paths: OCRPathConfig = OCRPathConfig()
+    preprocessing: OCRPreprocessingConfig = OCRPreprocessingConfig()
 
 
 def load_ocr_config(path: str | Path = "configs/ocr_default.yaml") -> OCRAppConfig:
