@@ -105,9 +105,9 @@ PYTHONPYCACHEPREFIX=.cache/pycache python3 -m src.cli evaluate-harness --config 
 
 ## 상세 문서
 
-- 운영 파이프라인(HWP + OCR 전체): `[docs/operations.md](docs/operations.md)`
-- 평가/질문셋/리포트: `[docs/evaluation.md](docs/evaluation.md)`
-- OCR 파이프라인 상세: `[docs/ocr.md](docs/ocr.md)`
+- 운영 파이프라인(HWP + OCR 전체): [docs/operations.md](docs/operations.md)
+- 평가/질문셋/리포트: [docs/evaluation.md](docs/evaluation.md)
+- OCR 파이프라인 상세: [docs/ocr.md](docs/ocr.md)
 - 공식 문서 참고:
   - [OpenAI Embeddings guide](https://platform.openai.com/docs/guides/embeddings)
   - [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses/create)
