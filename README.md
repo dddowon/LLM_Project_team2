@@ -114,7 +114,7 @@ PYTHONPYCACHEPREFIX=.cache/pycache python3 -m src.cli evaluate-harness --config 
 
 ## 최종 발표 자료
 
-- 최종 발표 PDF: [docs/2팀 팀 프로젝트_최종발표.pdf](docs/2팀%20팀%20프로젝트_최종발표.pdf)
+- 최종 발표 PDF: [docs/report/2팀 팀 프로젝트_최종발표.pdf](docs/report/2팀%20팀%20프로젝트_최종발표.pdf)
 
 ## 팀 협업 일지 (Notion)
 
@@ -123,4 +123,3 @@ PYTHONPYCACHEPREFIX=.cache/pycache python3 -m src.cli evaluate-harness --config 
 - 김태민: [협업 일지 링크](https://www.notion.so/)
 - 안수진: [협업 일지 링크](https://www.notion.so/)
 - 김범수: [협업 일지 링크](https://www.notion.so/)
-
