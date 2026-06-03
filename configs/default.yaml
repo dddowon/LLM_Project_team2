@@ -2,10 +2,10 @@ project:
   name: bidmate-rag
 
 paths:
-  raw_data_dir: data/v1/raw
-  metadata_csv: data/v1/data_list.csv
+  raw_data_dir: data/raw
+  metadata_csv: data/raw/data_list.csv
   processed_dir: data/v2
-  index_dir: checkpoints/faiss_openai
+  index_dir: checkpoints/chroma_openai
   evaluation_set: data/v2/eval_questions.jsonl
   evaluation_output: outputs/eval_results.jsonl
 
@@ -14,9 +14,9 @@ openai:
   generation_model: gpt-5-mini
 
 vector_store:
-  provider: faiss
-  index_type: IndexFlatIP
-  distance_metric: cosine_similarity
+  provider: chroma
+  index_type: hnsw
+  distance_metric: cosine
 
 chunking:
   chunk_size: 1200
@@ -24,8 +24,18 @@ chunking:
   min_chunk_chars: 80
 
 retrieval:
-  top_k: 5
+  top_k: 10
   score_threshold: 0.0
+  hybrid:
+    enabled: true
+    dense_top_k: 40
+    bm25_top_k: 40
+    rrf_k: 60
+  reranker:
+    enabled: true
+    model: dragonkue/bge-reranker-v2-m3-ko
+    top_k: 10
+    device: auto
 
 generation:
   max_context_chars: 12000

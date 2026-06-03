@@ -5,14 +5,17 @@ description = "Scenario B RAG baseline for RFP question answering."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "faiss-cpu>=1.8.0",
+    "chromadb>=0.5.0",
+    "langsmith>=0.3.0",
     "numpy>=1.26.0",
     "openai>=1.99.0",
     "pandas>=2.2.0",
     "pydantic>=2.7.0",
+    "pymupdf>=1.24.0",
     "pypdf>=4.2.0",
     "python-dotenv>=1.0.1",
     "pyyaml>=6.0.1",
+    "sentence-transformers>=3.0.0",
     "tqdm>=4.66.0",
 ]
 
@@ -23,6 +26,17 @@ dev = [
 ]
 hwp = [
     "pyhwp>=0.1b15",
+    "rhwp-python>=0.5.1",
+]
+huggingface = [
+    "accelerate>=0.33.0",
+    "sentence-transformers>=3.0.0",
+    "sentencepiece>=0.2.0",
+    "torch>=2.2.0",
+    "transformers>=4.44.0",
+]
+vllm = [
+    "vllm>=0.6.0",
 ]
 
 [tool.ruff]

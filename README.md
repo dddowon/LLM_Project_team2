@@ -2,44 +2,51 @@
 
 공공입찰 RFP 문서를 대상으로 질의응답을 수행하는 시나리오 B(LLM API 기반) RAG baseline입니다.
 
-## 목표
+## 프로젝트 설명
 
-- PDF/HWP RFP 문서와 `data_list.csv` 메타데이터를 불러옵니다.
-- 문서를 청킹하고 `text-embedding-3-small`로 임베딩합니다.
-- FAISS vector DB를 생성합니다.
-- 검색된 문서 근거를 바탕으로 `gpt-5-mini`가 답변합니다.
-- 평가 질문셋으로 검색/생성 결과를 반복 비교합니다.
-
-## 기술 스택
-
-- LLM API: OpenAI `gpt-5-mini`
-- Embedding: OpenAI `text-embedding-3-small`
-- Vector DB: FAISS `IndexFlatIP`
-- Similarity: L2 정규화 후 inner product 검색, cosine similarity 기준으로 사용
+- 입력: PDF/HWP RFP 문서 + `data_list.csv`
+- 처리: 파싱/청킹 -> 임베딩(`text-embedding-3-small`) -> Chroma 인덱싱
+- 출력: 검색 근거 기반 답변 생성(`gpt-5-mini`) 및 평가 리포트
+- CLI 구분:
+  - `src/cli.py`: OpenAI API 기반 표준 실행 CLI
+  - `src/cli_hug.py`: Hugging Face 모델 기반 로컬 실행 CLI
 
 ## 프로젝트 구조
 
 ```text
 .
-├── configs/                 # 실험 설정
+├── configs/                 # 실행/실험 설정
 │   └── default.yaml
 ├── data/
-│   ├── v1/                  # 원본 데이터 위치, git 업로드 금지
-│   │   ├── raw/             # PDF/HWP 파일 배치
-│   │   └── data_list.csv    # 제공 메타데이터
-│   └── v2/                  # 평가 질문셋 등 2차 가공 데이터
-├── checkpoints/             # FAISS 인덱스, git 업로드 금지
+│   ├── raw/                 # 원본 데이터(PDF/HWP + data_list.csv), git 업로드 금지
+│   ├── v1/                  # Hugging Face 시나리오 데이터/산출물
+│   └── v2/                  # OpenAI 시나리오 데이터/산출물
+├── checkpoints/             # Chroma 인덱스, git 업로드 금지
 ├── outputs/                 # 평가 결과, git 업로드 금지
+├── scripts/                 # 운영 보조 스크립트
 ├── src/
+│   ├── cli.py               # OpenAI 전용 표준 CLI
+│   ├── cli_hug.py           # Hugging Face 전용 CLI
 │   ├── dataset/             # 문서/메타데이터 로더
-│   ├── preprocessing/       # 텍스트 정규화 및 청킹
-│   ├── models/              # OpenAI API 래퍼
-│   ├── engine/              # vector store, prompt, RAG engine
-│   └── cli.py               # 실행 진입점
-└── tests/
+│   ├── preprocessing/       # 텍스트 전처리/청킹
+│   ├── models/              # OpenAI 모델 클라이언트
+│   ├── engine/              # 검색/생성 엔진
+│   └── evaluation/          # 평가 하네스/리포트/질문셋
+└── docs/
+    ├── operations.md        # 운영 파이프라인 상세
+    ├── evaluation.md        # 평가/질문셋/리포트 상세
+    └── ocr.md               # OCR 실행 상세
 ```
 
-## 빠른 시작
+## 표준 실행 경로
+
+### 시작 전 확인
+
+- 권장 환경: Python 3.10+, Linux/WSL(Windows는 WSL 권장)
+- 기본 문서는 OpenAI 경로(`src/cli.py`) 기준입니다.
+- Hugging Face 로컬 실행이 필요하면 `src/cli_hug.py`를 사용합니다.
+
+### 1) 환경 준비
 
 ```bash
 python3 -m venv .venv
@@ -49,67 +56,72 @@ cp .env.example .env
 export PYTHONPYCACHEPREFIX="$PWD/.cache/pycache"
 ```
 
-`.env`에 팀 OpenAI API key를 입력합니다.
+`.env`:
 
 ```bash
 OPENAI_API_KEY=...
 ```
 
-원본 파일은 외부 공유 금지 대상이므로 git에 올리지 않습니다.
+원본 데이터:
 
 ```text
-data/v1/raw/문서파일.pdf
-data/v1/raw/문서파일.hwp
-data/v1/data_list.csv
+data/raw/문서파일.pdf
+data/raw/문서파일.hwp
+data/raw/data_list.csv
 ```
 
-현재 세팅이 잘 잡혔는지 먼저 확인할 수 있습니다.
+### 2) 사전 점검
 
 ```bash
 PYTHONPYCACHEPREFIX=.cache/pycache python3 -m src.cli check-setup
-```
-
-API key와 네트워크 연결까지 실제로 확인하려면 아래처럼 실행합니다.
-
-```bash
 PYTHONPYCACHEPREFIX=.cache/pycache python3 -m src.cli check-setup --check-openai
 ```
 
-## 실행
-
-인덱스 생성:
+### 3) 인덱스 생성 -> 질의 -> 평가
 
 ```bash
+# 인덱스 생성
 PYTHONPYCACHEPREFIX=.cache/pycache python3 -m src.cli ingest
-```
 
-질의:
-
-```bash
+# 질의
 PYTHONPYCACHEPREFIX=.cache/pycache python3 -m src.cli query "국민연금공단이 발주한 이러닝시스템 관련 사업 요구사항을 정리해 줘."
-```
 
-평가:
-
-```bash
-cp data/v2/eval_questions.example.jsonl data/v2/eval_questions.jsonl
+# 평가 (기본: data/v2/eval_questions.example.jsonl)
 PYTHONPYCACHEPREFIX=.cache/pycache python3 -m src.cli evaluate
 ```
 
-HWP 파일을 처리해야 한다면 VM에서 선택 의존성을 추가로 설치합니다.
+성공 기준(최소):
+
+- `ingest` 완료 후 `checkpoints/chroma_openai`에 인덱스 파일 생성
+- `query` 실행 시 답변과 `Sources`가 함께 출력
+- `evaluate` 실행 시 `outputs/` 아래 평가 결과 파일 생성
+
+LangSmith 하네스 평가:
 
 ```bash
-pip install -e ".[hwp]"
+# .env: OPENAI_API_KEY, LANGSMITH_API_KEY, LANGSMITH_TRACING=true, LANGSMITH_PROJECT=bidmate-rag-eval
+PYTHONPYCACHEPREFIX=.cache/pycache python3 -m src.cli evaluate-harness --config configs/default.yaml
 ```
 
-## 실험 포인트
+## 상세 문서
 
-- 청킹: `chunk_size`, `chunk_overlap`, 목차/장절 기반 의미 청킹 비교
-- 검색: `top_k`, 메타데이터 필터링, MMR, hybrid search, re-ranking 비교
-- 생성: 프롬프트, 답변 포맷, 답변 길이, 대화 히스토리 반영 방식 비교
-- 평가: 단일 문서 정확도, 다중 문서 종합, 후속 질문 맥락 유지, 모르는 내용 거절 여부
+- 운영 파이프라인(HWP + OCR 전체): [docs/operations.md](docs/operations.md)
+- 평가/질문셋/리포트: [docs/evaluation.md](docs/evaluation.md)
+- OCR 파이프라인 상세: [docs/ocr.md](docs/ocr.md)
+- 공식 문서 참고:
+  - [OpenAI Embeddings guide](https://platform.openai.com/docs/guides/embeddings)
+  - [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses/create)
 
-## 참고한 공식 문서
+## 프로젝트 보고서
 
-- OpenAI Embeddings guide: https://platform.openai.com/docs/guides/embeddings
-- OpenAI Responses API: https://platform.openai.com/docs/api-reference/responses/create
+- 최종 보고서(PDF): [docs/report/최종_프로젝트_보고서.pdf](docs/report/최종_프로젝트_보고서.pdf)
+
+## 팀 협업 일지 (Notion)
+
+- 박도원: [협업 일지 링크](https://www.notion.so/)
+- 정신우: [협업 일지 링크](https://www.notion.so/)
+- 김태민: [협업 일지 링크](https://www.notion.so/)
+- 안수진: [협업 일지 링크](https://www.notion.so/)
+- 김범수: [협업 일지 링크](https://www.notion.so/)
+
+

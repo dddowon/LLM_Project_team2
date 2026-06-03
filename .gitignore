@@ -19,6 +19,8 @@ service-account*.json
 # Streamlit secrets
 .streamlit/secrets.toml
 
+*.egg-info/
+src/*.egg-info/
 
 # =========================
 # Project data / NDA files
@@ -28,9 +30,13 @@ service-account*.json
 data/raw/
 data/**/raw/
 
+
 # Versioned data folders
 data/v1/raw/
 data/v2/raw/
+data/v2/ocr_images/
+data/v2/ocr_outputs/
+data/v2/ocr_curated/
 data/v3/raw/
 
 # RFP original documents
@@ -39,6 +45,10 @@ data/v3/raw/
 *.hwpx
 *.doc
 *.docx
+
+# Allow report PDFs under docs/report
+!docs/report/*.pdf
+!docs/report/**/*.pdf
 
 # Large / private metadata files
 data/**/*.csv
@@ -63,12 +73,22 @@ data/**/*.zip
 # Chunked documents may contain original text, so do not commit.
 data/processed/
 data/**/processed/
+file/
+venv/
 
 # Vector DB / embedding outputs
 data/vector_store/
 data/**/vector_store/
 vector_store/
 faiss_index/
+
+# Pipeline outputs under data/v2 (document-scoped folders)
+data/v2/*/chroma_index/
+data/v2/*/*_embedded.jsonl
+data/v2/*/*_chunks_sample.jsonl
+data/v2/*/*_chroma_metadata_sample.json
+data/v2/*/*_heading_debug.jsonl
+data/v2/ocr_rag
 
 # Common vector DB / index files
 *.faiss
@@ -110,3 +130,5 @@ __pycache__/
 .mypy_cache/
 .venv/
 venv/
+.codex
+.DS_Store

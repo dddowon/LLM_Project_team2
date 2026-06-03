@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# [Design Intent]
+# OCR + RAG를 한 번에 실행하는 통합 엔트리포인트.
+# 내부적으로 기존 stage 스크립트를 호출해 중복 구현을 피하고,
+# 디버깅 시에는 stage 스크립트를 개별 실행할 수 있게 유지한다.
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${ROOT_DIR}"
+
+PIPELINE_START_TS="$(date +%s)"
+
+format_elapsed() {
+  local elapsed="$1"
+  local h=$((elapsed / 3600))
+  local m=$(((elapsed % 3600) / 60))
+  local s=$((elapsed % 60))
+  printf "%02dh %02dm %02ds" "${h}" "${m}" "${s}"
+}
+
+RUN_RAG_STAGE="${RUN_RAG_STAGE:-1}" # 1: OCR 후 RAG까지 실행, 0: OCR만 실행
+
+# OCR stage env/args
+OCR_ENV_NAME="${OCR_ENV_NAME:-ocr_vl15}"
+OCR_CONFIG_PATH="${OCR_CONFIG_PATH:-configs/ocr_default.yaml}"
+DOC_KEY="${DOC_KEY:-}"
+RAG_HANDOFF_DIR="${RAG_HANDOFF_DIR:-}"
+MANIFEST_OUTPUT="${MANIFEST_OUTPUT:-}"
+CHUNKS_OUTPUT="${CHUNKS_OUTPUT:-}"
+EXCLUDE_REVIEW_REQUIRED="${EXCLUDE_REVIEW_REQUIRED:-0}"
+INCLUDE_HTML_CHUNK="${INCLUDE_HTML_CHUNK:-0}"
+HTML_CHUNK_MAX_CHARS="${HTML_CHUNK_MAX_CHARS:-1200}"
+USE_DOC_UNWARPING="${USE_DOC_UNWARPING:-0}"
+TABLE_DUAL_PASS="${TABLE_DUAL_PASS:-0}"
+OCR_USE_GT="${OCR_USE_GT:-0}"
+CURATED_ROOT="${CURATED_ROOT:-}"
+CURATED_FILE_NAME="${CURATED_FILE_NAME:-pred_table_layout.curated.json}"
+INPUT_VERSION="${INPUT_VERSION:-}"
+OCR_ENGINE_VERSION="${OCR_ENGINE_VERSION:-}"
+OCR_OUTPUT_VERSION="${OCR_OUTPUT_VERSION:-}"
+OCR_CURATED_VERSION="${OCR_CURATED_VERSION:-}"
+RAG_INDEX_VERSION="${RAG_INDEX_VERSION:-}"
+STRICT_CURATED="${STRICT_CURATED:-0}"
+
+# RAG stage env/args
+RAG_ENV_NAME="${RAG_ENV_NAME:-llm_team2}"
+INPUT_CHUNKS="${INPUT_CHUNKS:-}"
+OUTPUT_EMBEDDED="${OUTPUT_EMBEDDED:-}"
+INDEX_DIR="${INDEX_DIR:-}"
+EMBED_MODEL="${EMBED_MODEL:-text-embedding-3-small}"
+BATCH_SIZE="${BATCH_SIZE:-64}"
+FORCE_REAL="${FORCE_REAL:-0}"
+
+echo "[PIPELINE] root=${ROOT_DIR}"
+echo "[PIPELINE] run_rag_stage=${RUN_RAG_STAGE}"
+echo "[PIPELINE] ocr_config=${OCR_CONFIG_PATH}"
+echo "[PIPELINE] doc_key=${DOC_KEY:-<all>}"
+
+OCR_ENV_NAME="${OCR_ENV_NAME}" \
+OCR_CONFIG_PATH="${OCR_CONFIG_PATH}" \
+DOC_KEY="${DOC_KEY}" \
+RAG_HANDOFF_DIR="${RAG_HANDOFF_DIR}" \
+MANIFEST_OUTPUT="${MANIFEST_OUTPUT}" \
+CHUNKS_OUTPUT="${CHUNKS_OUTPUT}" \
+EXCLUDE_REVIEW_REQUIRED="${EXCLUDE_REVIEW_REQUIRED}" \
+INCLUDE_HTML_CHUNK="${INCLUDE_HTML_CHUNK}" \
+HTML_CHUNK_MAX_CHARS="${HTML_CHUNK_MAX_CHARS}" \
+USE_DOC_UNWARPING="${USE_DOC_UNWARPING}" \
+TABLE_DUAL_PASS="${TABLE_DUAL_PASS}" \
+OCR_USE_GT="${OCR_USE_GT}" \
+CURATED_ROOT="${CURATED_ROOT}" \
+CURATED_FILE_NAME="${CURATED_FILE_NAME}" \
+INPUT_VERSION="${INPUT_VERSION}" \
+OCR_ENGINE_VERSION="${OCR_ENGINE_VERSION}" \
+OCR_OUTPUT_VERSION="${OCR_OUTPUT_VERSION}" \
+OCR_CURATED_VERSION="${OCR_CURATED_VERSION}" \
+RAG_INDEX_VERSION="${RAG_INDEX_VERSION}" \
+STRICT_CURATED="${STRICT_CURATED}" \
+./scripts/run_ocr_stage.sh
+
+if [[ "${RUN_RAG_STAGE}" != "1" ]]; then
+  echo "=== Pipeline Summary ==="
+  echo "1. rag_stage: skipped (RUN_RAG_STAGE=${RUN_RAG_STAGE})"
+  PIPELINE_END_TS="$(date +%s)"
+  PIPELINE_ELAPSED_SEC="$((PIPELINE_END_TS - PIPELINE_START_TS))"
+  PIPELINE_TOTAL_LATENCY_MS="$((PIPELINE_ELAPSED_SEC * 1000))"
+  PIPELINE_TOTAL_LATENCY_HMS="$(format_elapsed "${PIPELINE_ELAPSED_SEC}")"
+  echo "2. total_latency_ms: ${PIPELINE_TOTAL_LATENCY_MS}"
+  echo "3. total_latency_hms: ${PIPELINE_TOTAL_LATENCY_HMS}"
+  exit 0
+fi
+
+if [[ -z "${INPUT_CHUNKS}" ]]; then
+  INPUT_CHUNKS="${CHUNKS_OUTPUT}"
+fi
+
+if [[ ! -s "${INPUT_CHUNKS}" ]]; then
+  echo "=== Pipeline Summary ==="
+  echo "1. rag_stage: skipped (chunks missing: ${INPUT_CHUNKS})"
+  PIPELINE_END_TS="$(date +%s)"
+  PIPELINE_ELAPSED_SEC="$((PIPELINE_END_TS - PIPELINE_START_TS))"
+  PIPELINE_TOTAL_LATENCY_MS="$((PIPELINE_ELAPSED_SEC * 1000))"
+  PIPELINE_TOTAL_LATENCY_HMS="$(format_elapsed "${PIPELINE_ELAPSED_SEC}")"
+  echo "2. total_latency_ms: ${PIPELINE_TOTAL_LATENCY_MS}"
+  echo "3. total_latency_hms: ${PIPELINE_TOTAL_LATENCY_HMS}"
+  exit 0
+fi
+
+RAG_ENV_NAME="${RAG_ENV_NAME}" \
+OCR_CONFIG_PATH="${OCR_CONFIG_PATH}" \
+INPUT_CHUNKS="${INPUT_CHUNKS}" \
+OUTPUT_EMBEDDED="${OUTPUT_EMBEDDED}" \
+INDEX_DIR="${INDEX_DIR}" \
+EMBED_MODEL="${EMBED_MODEL}" \
+BATCH_SIZE="${BATCH_SIZE}" \
+FORCE_REAL="${FORCE_REAL}" \
+RAG_INDEX_VERSION="${RAG_INDEX_VERSION}" \
+./scripts/run_rag_stage.sh
+
+PIPELINE_END_TS="$(date +%s)"
+PIPELINE_ELAPSED_SEC="$((PIPELINE_END_TS - PIPELINE_START_TS))"
+PIPELINE_TOTAL_LATENCY_MS="$((PIPELINE_ELAPSED_SEC * 1000))"
+PIPELINE_TOTAL_LATENCY_HMS="$(format_elapsed "${PIPELINE_ELAPSED_SEC}")"
+echo "=== Pipeline Summary ==="
+echo "1. rag_stage: completed"
+echo "2. total_latency_ms: ${PIPELINE_TOTAL_LATENCY_MS}"
+echo "3. total_latency_hms: ${PIPELINE_TOTAL_LATENCY_HMS}"

@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BioIN Chunk Review</title>
+<style>
+:root {
+  --bg:#f6f1ec; --paper:#fffdfa; --ink:#1f2328; --muted:#69707d; --line:#ded5cc;
+  --blue:#345c9c; --green:#2f6b4f; --brown:#956019; --chip:#eef2ff;
+}
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--ink); font-family:Arial, 'Malgun Gothic', sans-serif; line-height:1.55; }
+header { position:sticky; top:0; z-index:5; background:rgba(246,241,236,.97); border-bottom:1px solid var(--line); padding:18px 28px 16px; backdrop-filter:blur(8px); }
+h1 { margin:0; font-size:28px; letter-spacing:0; }
+.sub { margin-top:4px; color:var(--muted); font-size:14px; }
+.controls { display:grid; grid-template-columns:minmax(260px,1fr) 230px 210px 160px; gap:10px; margin-top:14px; }
+input, select, button { height:42px; border:1px solid var(--line); border-radius:8px; background:white; color:var(--ink); padding:0 12px; font-size:14px; }
+button { cursor:pointer; font-weight:700; }
+.stats { padding:16px 28px 8px; display:grid; gap:10px; }
+.stat-row { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+.stat-row strong { min-width:92px; }
+.stat-row span { display:inline-flex; gap:4px; align-items:center; border:1px solid var(--line); background:white; border-radius:999px; padding:5px 9px; font-size:13px; }
+.summary { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; padding:0 28px 12px; }
+.summary div { background:var(--paper); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+.summary b { display:block; font-size:23px; }
+.summary span { color:var(--muted); font-size:13px; }
+main { padding:4px 28px 40px; display:grid; gap:16px; }
+.card { background:var(--paper); border:1px solid var(--line); border-left:5px solid var(--green); border-radius:10px; padding:18px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+.table-card { border-left-color:var(--brown); }
+.card-top { display:flex; justify-content:space-between; align-items:flex-start; gap:18px; }
+.chunk-line { color:var(--blue); font-size:13px; font-weight:700; margin-bottom:5px; }
+h2 { margin:0; font-size:18px; line-height:1.35; letter-spacing:0; }
+.doc { margin:6px 0 0; color:var(--muted); font-size:13px; word-break:break-all; }
+.badges { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; min-width:270px; }
+.badges span { background:var(--chip); color:#263f75; border-radius:999px; padding:4px 8px; font-size:12px; font-weight:700; }
+.table-card .badges span { background:#fff2d9; color:#744908; }
+.preview { margin:14px 0 12px; padding:10px 12px; background:#f5f2ee; border:1px solid #ece2d8; border-radius:8px; color:#374151; }
+.preview b { margin-right:6px; color:#111827; }
+.meta-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:8px; margin:12px 0; }
+.meta-grid div { min-width:0; background:white; border:1px solid #eadfd5; border-radius:8px; padding:8px; }
+.meta-grid b { display:block; color:var(--muted); font-size:12px; margin-bottom:2px; }
+.meta-grid span { word-break:break-word; }
+pre { margin:0; padding:14px; border-radius:8px; background:#11161d; color:#f4f6f8; overflow:auto; white-space:pre-wrap; word-break:break-word; font-family:Consolas, 'D2Coding', monospace; font-size:13px; line-height:1.55; }
+.hidden { display:none; }
+@media (max-width:900px) {
+  header, .stats, .summary, main { padding-left:16px; padding-right:16px; }
+  .controls { grid-template-columns:1fr; }
+  .card-top { display:block; }
+  .badges { justify-content:flex-start; min-width:0; margin-top:10px; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>BioIN Chunk Review</h1>
+  <div class="sub" id="status">188 / 188 chunks ? source: E:\codeit\LLM_Project_team2\data\v2\BioIN_chunking\chunks.jsonl</div>
+  <div class="controls">
+    <input id="search" placeholder="???, ??, chunk_text ??">
+    <select id="type"><option value="">?? chunk_type</option><option value="table_rows/requirement_table">table_rows/requirement_table (105)</option><option value="section_text">section_text (36)</option><option value="table_group/compliance_table">table_group/compliance_table (14)</option><option value="table_summary/note_table">table_summary/note_table (6)</option><option value="table_rows/data_table">table_rows/data_table (6)</option><option value="table_rows/evaluation_table">table_rows/evaluation_table (6)</option><option value="table_markdown/requirement_table">table_markdown/requirement_table (4)</option><option value="table_rows/compliance_table">table_rows/compliance_table (3)</option><option value="table_summary/form_table">table_summary/form_table (3)</option><option value="table_rows/organization_table">table_rows/organization_table (2)</option><option value="cover_text">cover_text (1)</option><option value="table_group/schedule_table">table_group/schedule_table (1)</option><option value="table_markdown/compliance_table">table_markdown/compliance_table (1)</option></select>
+    <select id="section"><option value="">?? section_type</option><option value="requirements">requirements (86)</option><option value="body">body (79)</option><option value="evaluation">evaluation (10)</option><option value="overview">overview (7)</option><option value="bid_contract">bid_contract (5)</option><option value="cover">cover (1)</option></select>
+    <button id="reset">???</button>
+  </div>
+</header>
+<section class="summary">
+  <div><b>188</b><span>? chunk</span></div>
+  <div><b>37</b><span>??/?? chunk</span></div>
+  <div><b>151</b><span>? chunk</span></div>
+  <div><b>13</b><span>chunk_type ??</span></div>
+</section>
+<section class="stats">
+  <div class="stat-row"><strong>chunk_type</strong><span>table_rows/requirement_table <b>105</b></span><span>section_text <b>36</b></span><span>table_group/compliance_table <b>14</b></span><span>table_summary/note_table <b>6</b></span><span>table_rows/data_table <b>6</b></span><span>table_rows/evaluation_table <b>6</b></span><span>table_markdown/requirement_table <b>4</b></span><span>table_rows/compliance_table <b>3</b></span><span>table_summary/form_table <b>3</b></span><span>table_rows/organization_table <b>2</b></span><span>cover_text <b>1</b></span><span>table_group/schedule_table <b>1</b></span><span>table_markdown/compliance_table <b>1</b></span></div>
+  <div class="stat-row"><strong>section_type</strong><span>requirements <b>86</b></span><span>body <b>79</b></span><span>evaluation <b>10</b></span><span>overview <b>7</b></span><span>bid_contract <b>5</b></span><span>cover <b>1</b></span></div>
+  <div class="stat-row"><strong>document</strong><span title="BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp">BioIN_의료기기산업 종합정보시스템(정보관리기과... <b>188</b></span></div>
+</section>
+<main id="cards">
+
+    <article class="card text-card" data-type="cover_text" data-section="cover" data-source="cover_text" data-text="bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp  cover cover_text chunk_00000001_a347853959 문서명: bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp
+자료유형: 표지
+
+사 업 명 / 의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(올인원 플랫폼 구현 등)
+주관기관 / 한국보건산업진흥원
+
+담당 / 의료기기화장품산업단 의료기기산업혁신팀 / 팀 장 윤 태 영 / tel 043-713-8880
+담 당 자 김 지 애 / tel 043-713-8884
+
+제 안 요 청 서
+2024. 08.
+
+[다음 표: table_0001, 유형=note_table, 형태=freeform, 1행x1열] {&quot;file_name&quot;: &quot;bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp&quot;, &quot;source_content_type&quot;: &quot;cover_text&quot;, &quot;section_type&quot;: &quot;cover&quot;, &quot;source_record_indices&quot;: [null, null, null], &quot;merged_record_count&quot;: 3, &quot;part_index&quot;: 1, &quot;chunk_type&quot;: &quot;cover_text&quot;, &quot;body_chars&quot;: 179, &quot;chunk_chars&quot;: 277, &quot;content_hash&quot;: &quot;a347853959&quot;, &quot;next_table_id&quot;: &quot;table_0001&quot;, &quot;next_table_type&quot;: &quot;note_table&quot;, &quot;next_table_shape&quot;: &quot;freeform&quot;}">
+      <div class="card-top">
+        <div class="title-area">
+          <div class="chunk-line">#1 ? chunk_00000001_a347853959</div>
+          <h2>(section path ??)</h2>
+          <p class="doc">BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp</p>
+        </div>
+        <div class="badges">
+          <span>??</span>
+          <span>cover_text</span>
+          <span>cover</span>
+          <span>332?</span>
+        </div>
+      </div>
+      <div class="preview"><b>????</b> 문서명: BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp 자료유형: 표지 사 업 명 / 의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(올인원 플랫폼 구현 등) 주관기관 / 한국보건산업진흥원 담당 / 의료기기화장품산업단 의료기기산업혁신팀 / 팀 장 윤 태 영 / Tel 043-713-8880 담 당 자 김 지 애 / Tel 043-713-8884 제 안 요...</div>
+      <div class="meta-grid"><div><b>section_type</b><span>cover</span></div><div><b>part_index</b><span>1</span></div><div><b>source_content_type</b><span>cover_text</span></div><div><b>body_chars</b><span>179</span></div><div><b>chunk_chars</b><span>277</span></div><div><b>content_hash</b><span>a347853959</span></div><div><b>next_table_id</b><span>table_0001</span></div><div><b>next_table_type</b><span>note_table</span></div><div><b>next_table_shape</b><span>freeform</span></div><div><b>chunk_type</b><span>cover_text</span></div><div><b>merged_record_count</b><span>3</span></div><div><b>source_record_indices</b><span>[null, null, null]</span></div></div>
+      <pre>문서명: BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp
+자료유형: 표지
+
+사 업 명 / 의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(올인원 플랫폼 구현 등)
+주관기관 / 한국보건산업진흥원
+
+담당 / 의료기기화장품산업단 의료기기산업혁신팀 / 팀 장 윤 태 영 / Tel 043-713-8880
+담 당 자 김 지 애 / Tel 043-713-8884
+
+제 안 요 청 서
+2024. 08.
+
+[다음 표: table_0001, 유형=note_table, 형태=freeform, 1행x1열]</pre>
+    </article>
+    
+    <article class="card table-card" data-type="table_summary/note_table" data-section="body" data-source="table" data-text="bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp  body table_summary/note_table chunk_00000002_cb33e4c48f 문서명: bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp
+자료유형: 표
+
+&lt; 한국보건산업진흥원 공정거래 준수 안내 &gt; 한국보건산업진흥원은 공정한 거래와 상생문화를 정착하고 확산하도록 아래의 내용을 준수합니다. (1) 명확하고 상세한 요구사항 정의를 통해 적정한 사업 원가 및 기간을 산정하고 절차에 따라 적정한 대가를 지급합니다. (2) 사업 수행 시 적정 사업 수행 기간을 확보하여 사업을 추진하며 사업 내용에 변경이 있는 경우 상호 충분히 협의하고 과업심의위원회를 통해 사업 변경을 진행하겠습니다. (3) 정보화 사업 특성에 맞는 유연한 근무환경을 조성할 수 있도록 원격지 개발을 우선적으로 검토하겠습니다. (4) 계약업체의 책임이 없는 사유로 사업기간 연장, 납품기일 지연 등이 발생하여 과업이 추가로 필요한 경우, 조건 및 비용에 대하여 상호 충분히 협의하여 진행하겠습니다. (5) 한국보건산업진흥원이 부담해야 할 행정절차, 민원해결, 환경관리 등에 관한 책임이나 그에 소요되는 비용을 계약업체에게 부담하는 행위를 하지 않습니다. (6) 한국보건산업진흥원의 손해배상 책임을 관계법령 등에 규정된 기준에 비해 과도하게 경감하거나 계약업체의 손해배상 책임, 하자담보 책임 등을 과도하게 가중하는 행위를 하지 않습니다. (7) 계약업체가 계약상 의무의 이행을 지체한 경우 국가계약·지방계약법령 등에서 정한 수준 이상으로 지체상금을 부과하는 행위를 하지 않습니다. (8) 하도급 계약을 통해 과업을 수행할 경우, 계약업체는 하도급법에서 정한 사항을 준수하여야 하며, 계약업체가 하도급법 위반하여 공정위 제재를 받는 경우, 향후 업체 선정 과정에 참고할 수 있습니다. (9) 하도급대금이나 임금이 체불되지 않도록 하도급대금·노무비를 직접 지급하거나, 직접 지급효과가 있는 대금 직불시스템(하도급 지키미 이용 등)을 통해 대금을 지급합니다. (10) 한국보건산업진흥원은 사업 수행과정에서 느끼는 애로·불만사항을 제보할 수 있도록 온라인 제보센터를 설치해 운영하고 있습니다. {&quot;file_name&quot;: &quot;bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp&quot;, &quot;source_content_type&quot;: &quot;table&quot;, &quot;section_type&quot;: &quot;body&quot;, &quot;table_id&quot;: &quot;table_0001&quot;, &quot;table_type&quot;: &quot;note_table&quot;, &quot;table_shape&quot;: &quot;freeform&quot;, &quot;table_rows&quot;: 1, &quot;table_cols&quot;: 1, &quot;table_cell_count&quot;: 1, &quot;summary_group_index&quot;: 1, &quot;chunk_type&quot;: &quot;table_summary/note_table&quot;, &quot;body_chars&quot;: 949, &quot;chunk_chars&quot;: 1046, &quot;content_hash&quot;: &quot;cb33e4c48f&quot;}">
+      <div class="card-top">
+        <div class="title-area">
+          <div class="chunk-line">#2 ? chunk_00000002_cb33e4c48f</div>
+          <h2>(section path ??)</h2>
+          <p class="doc">BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp</p>
+        </div>
+        <div class="badges">
+          <span>?</span>
+          <span>table_summary/note_table</span>
+          <span>body</span>
+          <span>1,046?</span>
+        </div>
+      </div>
+      <div class="preview"><b>????</b> 문서명: BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp 자료유형: 표 &lt; 한국보건산업진흥원 공정거래 준수 안내 &gt; 한국보건산업진흥원은 공정한 거래와 상생문화를 정착하고 확산하도록 아래의 내용을 준수합니다. (1) 명확하고 상세한 요구사항 정의를 통해 적정한 사업 원가 및 기간을 산정하고 절차에 따라 적정한 대가를 지급합니다. (2) 사업 수행 시 적정 사업 수행...</div>
+      <div class="meta-grid"><div><b>section_type</b><span>body</span></div><div><b>source_content_type</b><span>table</span></div><div><b>table_id</b><span>table_0001</span></div><div><b>table_type</b><span>note_table</span></div><div><b>table_shape</b><span>freeform</span></div><div><b>table_rows</b><span>1</span></div><div><b>table_cols</b><span>1</span></div><div><b>table_cell_count</b><span>1</span></div><div><b>summary_group_index</b><span>1</span></div><div><b>body_chars</b><span>949</span></div><div><b>chunk_chars</b><span>1046</span></div><div><b>content_hash</b><span>cb33e4c48f</span></div><div><b>chunk_type</b><span>table_summary/note_table</span></div></div>
+      <pre>문서명: BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp
+자료유형: 표
+
+&lt; 한국보건산업진흥원 공정거래 준수 안내 &gt; 한국보건산업진흥원은 공정한 거래와 상생문화를 정착하고 확산하도록 아래의 내용을 준수합니다. (1) 명확하고 상세한 요구사항 정의를 통해 적정한 사업 원가 및 기간을 산정하고 절차에 따라 적정한 대가를 지급합니다. (2) 사업 수행 시 적정 사업 수행 기간을 확보하여 사업을 추진하며 사업 내용에 변경이 있는 경우 상호 충분히 협의하고 과업심의위원회를 통해 사업 변경을 진행하겠습니다. (3) 정보화 사업 특성에 맞는 유연한 근무환경을 조성할 수 있도록 원격지 개발을 우선적으로 검토하겠습니다. (4) 계약업체의 책임이 없는 사유로 사업기간 연장, 납품기일 지연 등이 발생하여 과업이 추가로 필요한 경우, 조건 및 비용에 대하여 상호 충분히 협의하여 진행하겠습니다. (5) 한국보건산업진흥원이 부담해야 할 행정절차, 민원해결, 환경관리 등에 관한 책임이나 그에 소요되는 비용을 계약업체에게 부담하는 행위를 하지 않습니다. (6) 한국보건산업진흥원의 손해배상 책임을 관계법령 등에 규정된 기준에 비해 과도하게 경감하거나 계약업체의 손해배상 책임, 하자담보 책임 등을 과도하게 가중하는 행위를 하지 않습니다. (7) 계약업체가 계약상 의무의 이행을 지체한 경우 국가계약·지방계약법령 등에서 정한 수준 이상으로 지체상금을 부과하는 행위를 하지 않습니다. (8) 하도급 계약을 통해 과업을 수행할 경우, 계약업체는 하도급법에서 정한 사항을 준수하여야 하며, 계약업체가 하도급법 위반하여 공정위 제재를 받는 경우, 향후 업체 선정 과정에 참고할 수 있습니다. (9) 하도급대금이나 임금이 체불되지 않도록 하도급대금·노무비를 직접 지급하거나, 직접 지급효과가 있는 대금 직불시스템(하도급 지키미 이용 등)을 통해 대금을 지급합니다. (10) 한국보건산업진흥원은 사업 수행과정에서 느끼는 애로·불만사항을 제보할 수 있도록 온라인 제보센터를 설치해 운영하고 있습니다.</pre>
+    </article>
+    
+    <article class="card table-card" data-type="table_summary/note_table" data-section="body" data-source="table" data-text="bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp  body table_summary/note_table chunk_00000003_76b980f8d1 문서명: bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp
+자료유형: 표
+
+&lt; 법제도 준수 여부 점검표&gt; {&quot;file_name&quot;: &quot;bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp&quot;, &quot;source_content_type&quot;: &quot;table&quot;, &quot;section_type&quot;: &quot;body&quot;, &quot;table_id&quot;: &quot;table_0002&quot;, &quot;table_type&quot;: &quot;note_table&quot;, &quot;table_shape&quot;: &quot;freeform&quot;, &quot;table_rows&quot;: 1, &quot;table_cols&quot;: 1, &quot;table_cell_count&quot;: 1, &quot;summary_group_index&quot;: 1, &quot;chunk_type&quot;: &quot;table_summary/note_table&quot;, &quot;body_chars&quot;: 16, &quot;chunk_chars&quot;: 113, &quot;content_hash&quot;: &quot;76b980f8d1&quot;}">
+      <div class="card-top">
+        <div class="title-area">
+          <div class="chunk-line">#3 ? chunk_00000003_76b980f8d1</div>
+          <h2>(section path ??)</h2>
+          <p class="doc">BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp</p>
+        </div>
+        <div class="badges">
+          <span>?</span>
+          <span>table_summary/note_table</span>
+          <span>body</span>
+          <span>113?</span>
+        </div>
+      </div>
+      <div class="preview"><b>????</b> 문서명: BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp 자료유형: 표 &lt; 법제도 준수 여부 점검표&gt;</div>
+      <div class="meta-grid"><div><b>section_type</b><span>body</span></div><div><b>source_content_type</b><span>table</span></div><div><b>table_id</b><span>table_0002</span></div><div><b>table_type</b><span>note_table</span></div><div><b>table_shape</b><span>freeform</span></div><div><b>table_rows</b><span>1</span></div><div><b>table_cols</b><span>1</span></div><div><b>table_cell_count</b><span>1</span></div><div><b>summary_group_index</b><span>1</span></div><div><b>body_chars</b><span>16</span></div><div><b>chunk_chars</b><span>113</span></div><div><b>content_hash</b><span>76b980f8d1</span></div><div><b>chunk_type</b><span>table_summary/note_table</span></div></div>
+      <pre>문서명: BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp
+자료유형: 표
+
+&lt; 법제도 준수 여부 점검표&gt;</pre>
+    </article>
+    
+    <article class="card text-card" data-type="section_text" data-section="overview" data-source="section_text" data-text="bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp ⅰ. 사업 개요 &gt; 1. 사업개요 overview section_text chunk_00000004_b6fdab85f6 문서명: bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp
+섹션경로: ⅰ. 사업 개요 &gt; 1. 사업개요
+제목: 1. 사업개요
+자료유형: 본문
+
+○ (사업명) 의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(올인원 플랫폼 구현 등)
+
+○ (사업금액) 50,000,000원(vat 포함)
+
+○ (사업기간) 계약체결일로부터 120일
+
+○ (사업공고) 제한경쟁(총액) 협상에 의한 계약
+
+- (입찰방식) 제한경쟁(긴급입찰)
+
+- (낙찰자 결정방식) 협상에 의한 낙찰자 선정(기술 90, 가격 10) {&quot;file_name&quot;: &quot;bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp&quot;, &quot;source_content_type&quot;: &quot;section_text&quot;, &quot;section_path&quot;: [&quot;ⅰ. 사업 개요&quot;, &quot;1. 사업개요&quot;], &quot;section_path_text&quot;: &quot;ⅰ. 사업 개요 &gt; 1. 사업개요&quot;, &quot;section_type&quot;: &quot;overview&quot;, &quot;heading&quot;: &quot;1. 사업개요&quot;, &quot;source_record_indices&quot;: [null], &quot;merged_record_count&quot;: 1, &quot;part_index&quot;: 1, &quot;chunk_type&quot;: &quot;section_text&quot;, &quot;body_chars&quot;: 198, &quot;chunk_chars&quot;: 333, &quot;content_hash&quot;: &quot;b6fdab85f6&quot;}">
+      <div class="card-top">
+        <div class="title-area">
+          <div class="chunk-line">#4 ? chunk_00000004_b6fdab85f6</div>
+          <h2>Ⅰ. 사업 개요 &gt; 1. 사업개요</h2>
+          <p class="doc">BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp</p>
+        </div>
+        <div class="badges">
+          <span>??</span>
+          <span>section_text</span>
+          <span>overview</span>
+          <span>333?</span>
+        </div>
+      </div>
+      <div class="preview"><b>????</b> 문서명: BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp 섹션경로: Ⅰ. 사업 개요 &gt; 1. 사업개요 제목: 1. 사업개요 자료유형: 본문 ○ (사업명) 의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(올인원 플랫폼 구현 등) ○ (사업금액) 50,000,000원(VAT 포함) ○ (사업기간) 계약체결일로부터 120일 ○ (사업공고) 제한경쟁(총액) 협상에...</div>
+      <div class="meta-grid"><div><b>section_type</b><span>overview</span></div><div><b>heading</b><span>1. 사업개요</span></div><div><b>part_index</b><span>1</span></div><div><b>source_content_type</b><span>section_text</span></div><div><b>body_chars</b><span>198</span></div><div><b>chunk_chars</b><span>333</span></div><div><b>content_hash</b><span>b6fdab85f6</span></div><div><b>chunk_type</b><span>section_text</span></div><div><b>merged_record_count</b><span>1</span></div><div><b>section_path</b><span>[&quot;Ⅰ. 사업 개요&quot;, &quot;1. 사업개요&quot;]</span></div><div><b>section_path_text</b><span>Ⅰ. 사업 개요 &gt; 1. 사업개요</span></div><div><b>source_record_indices</b><span>[null]</span></div></div>
+      <pre>문서명: BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp
+섹션경로: Ⅰ. 사업 개요 &gt; 1. 사업개요
+제목: 1. 사업개요
+자료유형: 본문
+
+○ (사업명) 의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(올인원 플랫폼 구현 등)
+
+○ (사업금액) 50,000,000원(VAT 포함)
+
+○ (사업기간) 계약체결일로부터 120일
+
+○ (사업공고) 제한경쟁(총액) 협상에 의한 계약
+
+- (입찰방식) 제한경쟁(긴급입찰)
+
+- (낙찰자 결정방식) 협상에 의한 낙찰자 선정(기술 90, 가격 10)</pre>
+    </article>
+    
+    <article class="card text-card" data-type="section_text" data-section="overview" data-source="section_text" data-text="bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp ⅰ. 사업 개요 &gt; 2. 추진배경 및 필요성 overview section_text chunk_00000005_e8c10dc5b7 문서명: bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp
+섹션경로: ⅰ. 사업 개요 &gt; 2. 추진배경 및 필요성
+제목: 2. 추진배경 및 필요성
+자료유형: 본문
+
+□ (추진 배경) 한국보건산업진흥원, 혁신의료기기 연구개발 정보관리기관으로 지정
+
+○ 의료기기산업법 제26조에 따라 혁신의료기기 연구개발 정보관리기관(이하 ‘정보관리기관’)으로 ‘한국보건산업진흥원’ 지정(’21.10.5)*
+* 혁신의료기기 연구개발 정보관리기관 지정 등에 관한 규정(복지부 고시 제2021-251호)
+
+[다음 표: table_0003, 유형=note_table, 형태=freeform, 1행x1열] {&quot;file_name&quot;: &quot;bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp&quot;, &quot;source_content_type&quot;: &quot;section_text&quot;, &quot;section_path&quot;: [&quot;ⅰ. 사업 개요&quot;, &quot;2. 추진배경 및 필요성&quot;], &quot;section_path_text&quot;: &quot;ⅰ. 사업 개요 &gt; 2. 추진배경 및 필요성&quot;, &quot;section_type&quot;: &quot;overview&quot;, &quot;heading&quot;: &quot;2. 추진배경 및 필요성&quot;, &quot;source_record_indices&quot;: [null], &quot;merged_record_count&quot;: 1, &quot;part_index&quot;: 1, &quot;chunk_type&quot;: &quot;section_text&quot;, &quot;body_chars&quot;: 176, &quot;chunk_chars&quot;: 323, &quot;content_hash&quot;: &quot;e8c10dc5b7&quot;, &quot;next_table_id&quot;: &quot;table_0003&quot;, &quot;next_table_type&quot;: &quot;note_table&quot;, &quot;next_table_shape&quot;: &quot;freeform&quot;}">
+      <div class="card-top">
+        <div class="title-area">
+          <div class="chunk-line">#5 ? chunk_00000005_e8c10dc5b7</div>
+          <h2>Ⅰ. 사업 개요 &gt; 2. 추진배경 및 필요성</h2>
+          <p class="doc">BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp</p>
+        </div>
+        <div class="badges">
+          <span>??</span>
+          <span>section_text</span>
+          <span>overview</span>
+          <span>378?</span>
+        </div>
+      </div>
+      <div class="preview"><b>????</b> 문서명: BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp 섹션경로: Ⅰ. 사업 개요 &gt; 2. 추진배경 및 필요성 제목: 2. 추진배경 및 필요성 자료유형: 본문 □ (추진 배경) 한국보건산업진흥원, 혁신의료기기 연구개발 정보관리기관으로 지정 ○ 의료기기산업법 제26조에 따라 혁신의료기기 연구개발 정보관리기관(이하 ‘정보관리기관’)으로 ‘한국보건산업진흥원’ 지정(’...</div>
+      <div class="meta-grid"><div><b>section_type</b><span>overview</span></div><div><b>heading</b><span>2. 추진배경 및 필요성</span></div><div><b>part_index</b><span>1</span></div><div><b>source_content_type</b><span>section_text</span></div><div><b>body_chars</b><span>176</span></div><div><b>chunk_chars</b><span>323</span></div><div><b>content_hash</b><span>e8c10dc5b7</span></div><div><b>next_table_id</b><span>table_0003</span></div><div><b>next_table_type</b><span>note_table</span></div><div><b>next_table_shape</b><span>freeform</span></div><div><b>chunk_type</b><span>section_text</span></div><div><b>merged_record_count</b><span>1</span></div><div><b>section_path</b><span>[&quot;Ⅰ. 사업 개요&quot;, &quot;2. 추진배경 및 필요성&quot;]</span></div><div><b>section_path_text</b><span>Ⅰ. 사업 개요 &gt; 2. 추진배경 및 필요성</span></div><div><b>source_record_indices</b><span>[null]</span></div></div>
+      <pre>문서명: BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp
+섹션경로: Ⅰ. 사업 개요 &gt; 2. 추진배경 및 필요성
+제목: 2. 추진배경 및 필요성
+자료유형: 본문
+
+□ (추진 배경) 한국보건산업진흥원, 혁신의료기기 연구개발 정보관리기관으로 지정
+
+○ 의료기기산업법 제26조에 따라 혁신의료기기 연구개발 정보관리기관(이하 ‘정보관리기관’)으로 ‘한국보건산업진흥원’ 지정(’21.10.5)*
+* 혁신의료기기 연구개발 정보관리기관 지정 등에 관한 규정(복지부 고시 제2021-251호)
+
+[다음 표: table_0003, 유형=note_table, 형태=freeform, 1행x1열]</pre>
+    </article>
+    
+    <article class="card table-card" data-type="table_summary/note_table" data-section="overview" data-source="table" data-text="bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp ⅰ. 사업 개요 &gt; 2. 추진배경 및 필요성 overview table_summary/note_table chunk_00000006_7486b1fdeb 문서명: bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp
+섹션경로: ⅰ. 사업 개요 &gt; 2. 추진배경 및 필요성
+자료유형: 표
+
+법 제26조(연구개발정보의 수집과 보급) ① 보건복지부장관과 식품의약품안전처장은 의료기기 연구개발을 효율적으로 촉진하기 위하여 국내외 연구개발 동향, 시장 동향 등 국내외 혁신의료기기의 연구개발에 관한 정보를 수집ㆍ조사하여 이를 체계적ㆍ종합적으로 관리ㆍ보급하여야 한다. ② 보건복지부장관과 식품의약품안전처장은 제1항의 업무를 추진하기 위하여 혁신의료기기의 연구개발 관련 정보를 전문적으로 관리하는 기관을 지정할 수 있다. ③ 제2항에 따른 혁신의료기기의 연구개발 관련 정보를 전문적으로 관리하는 기관의 지정 요건ㆍ절차 등에 필요한 사항은 대통령령으로 정한다. 시행령 제17조(연구개발 관련 정보 관리기관의 지정) ① 보건복지부장관과 식품의약품안전처장은 법 제26조제2항에 따라 다음 각 호의 요건을 모두 충족하는 기관을 혁신의료기기의 연구개발 관련 정보를 전문적으로 관리하는 기관으로 지정할 수 있다. 이 경우 혁신의료기기의 연구개발 관련 정보의 분야별로 해당 기관을 지정할 수 있다. 1. 「공공기관의 운영에 관한 법률」 제4조에 따른 공공기관 또는 비영리법인일 것 2. 보건복지부장관 또는 식품의약품안전처장이 혁신의료기기의 연구개발 관련 정보의 전문적인 관리에 필요하다고 인정하여 고시하는 인력 및 장비를 갖출 것 {&quot;file_name&quot;: &quot;bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp&quot;, &quot;source_content_type&quot;: &quot;table&quot;, &quot;section_path&quot;: [&quot;ⅰ. 사업 개요&quot;, &quot;2. 추진배경 및 필요성&quot;], &quot;section_path_text&quot;: &quot;ⅰ. 사업 개요 &gt; 2. 추진배경 및 필요성&quot;, &quot;section_type&quot;: &quot;overview&quot;, &quot;table_id&quot;: &quot;table_0003&quot;, &quot;table_type&quot;: &quot;note_table&quot;, &quot;table_shape&quot;: &quot;freeform&quot;, &quot;table_rows&quot;: 1, &quot;table_cols&quot;: 1, &quot;table_cell_count&quot;: 1, &quot;summary_group_index&quot;: 1, &quot;chunk_type&quot;: &quot;table_summary/note_table&quot;, &quot;body_chars&quot;: 625, &quot;chunk_chars&quot;: 753, &quot;content_hash&quot;: &quot;7486b1fdeb&quot;}">
+      <div class="card-top">
+        <div class="title-area">
+          <div class="chunk-line">#6 ? chunk_00000006_7486b1fdeb</div>
+          <h2>Ⅰ. 사업 개요 &gt; 2. 추진배경 및 필요성</h2>
+          <p class="doc">BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp</p>
+        </div>
+        <div class="badges">
+          <span>?</span>
+          <span>table_summary/note_table</span>
+          <span>overview</span>
+          <span>753?</span>
+        </div>
+      </div>
+      <div class="preview"><b>????</b> 문서명: BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp 섹션경로: Ⅰ. 사업 개요 &gt; 2. 추진배경 및 필요성 자료유형: 표 법 제26조(연구개발정보의 수집과 보급) ① 보건복지부장관과 식품의약품안전처장은 의료기기 연구개발을 효율적으로 촉진하기 위하여 국내외 연구개발 동향, 시장 동향 등 국내외 혁신의료기기의 연구개발에 관한 정보를 수집ㆍ조사하여 이를 체계적ㆍ종...</div>
+      <div class="meta-grid"><div><b>section_type</b><span>overview</span></div><div><b>source_content_type</b><span>table</span></div><div><b>table_id</b><span>table_0003</span></div><div><b>table_type</b><span>note_table</span></div><div><b>table_shape</b><span>freeform</span></div><div><b>table_rows</b><span>1</span></div><div><b>table_cols</b><span>1</span></div><div><b>table_cell_count</b><span>1</span></div><div><b>summary_group_index</b><span>1</span></div><div><b>body_chars</b><span>625</span></div><div><b>chunk_chars</b><span>753</span></div><div><b>content_hash</b><span>7486b1fdeb</span></div><div><b>chunk_type</b><span>table_summary/note_table</span></div><div><b>section_path</b><span>[&quot;Ⅰ. 사업 개요&quot;, &quot;2. 추진배경 및 필요성&quot;]</span></div><div><b>section_path_text</b><span>Ⅰ. 사업 개요 &gt; 2. 추진배경 및 필요성</span></div></div>
+      <pre>문서명: BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp
+섹션경로: Ⅰ. 사업 개요 &gt; 2. 추진배경 및 필요성
+자료유형: 표
+
+법 제26조(연구개발정보의 수집과 보급) ① 보건복지부장관과 식품의약품안전처장은 의료기기 연구개발을 효율적으로 촉진하기 위하여 국내외 연구개발 동향, 시장 동향 등 국내외 혁신의료기기의 연구개발에 관한 정보를 수집ㆍ조사하여 이를 체계적ㆍ종합적으로 관리ㆍ보급하여야 한다. ② 보건복지부장관과 식품의약품안전처장은 제1항의 업무를 추진하기 위하여 혁신의료기기의 연구개발 관련 정보를 전문적으로 관리하는 기관을 지정할 수 있다. ③ 제2항에 따른 혁신의료기기의 연구개발 관련 정보를 전문적으로 관리하는 기관의 지정 요건ㆍ절차 등에 필요한 사항은 대통령령으로 정한다. 시행령 제17조(연구개발 관련 정보 관리기관의 지정) ① 보건복지부장관과 식품의약품안전처장은 법 제26조제2항에 따라 다음 각 호의 요건을 모두 충족하는 기관을 혁신의료기기의 연구개발 관련 정보를 전문적으로 관리하는 기관으로 지정할 수 있다. 이 경우 혁신의료기기의 연구개발 관련 정보의 분야별로 해당 기관을 지정할 수 있다. 1. 「공공기관의 운영에 관한 법률」 제4조에 따른 공공기관 또는 비영리법인일 것 2. 보건복지부장관 또는 식품의약품안전처장이 혁신의료기기의 연구개발 관련 정보의 전문적인 관리에 필요하다고 인정하여 고시하는 인력 및 장비를 갖출 것</pre>
+    </article>
+    
+    <article class="card table-card" data-type="table_summary/note_table" data-section="overview" data-source="table" data-text="bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp ⅰ. 사업 개요 &gt; 2. 추진배경 및 필요성 overview table_summary/note_table chunk_00000007_1169b58c9a 문서명: bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp
+섹션경로: ⅰ. 사업 개요 &gt; 2. 추진배경 및 필요성
+자료유형: 표
+직전본문: □ (필요성) 정보관리기관 추가 기능 구현 및 고도화를 통한 의료기기 전문정보 관리 효율성 증대 및 플랫폼 활성화 도모
+○ 정보 제공 다양화, 과제 관리제도 활성화, 데이터 활용 활성화 등 기능 강화 및 추가하여 정보관리기관의 정보 활용 가치 확산
+표위치: 위 직전본문 다음에 이 표가 이어짐
+
+&lt;의료기기산업 종합정보시스템 개선 방향&gt; ◉ 산·학·연·병 전문가 및 이해관계자 대상 열린 소통 플랫폼 구축 ◉ 의료기기산업 전문정보 지속적 품질 검토 및 추가 연계 정보 제공 기능 추가 ◉ 진흥원 의료기기산업 육성 지원사업 관리시스템 기능 개선 {&quot;file_name&quot;: &quot;bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp&quot;, &quot;source_content_type&quot;: &quot;table&quot;, &quot;section_path&quot;: [&quot;ⅰ. 사업 개요&quot;, &quot;2. 추진배경 및 필요성&quot;], &quot;section_path_text&quot;: &quot;ⅰ. 사업 개요 &gt; 2. 추진배경 및 필요성&quot;, &quot;section_type&quot;: &quot;overview&quot;, &quot;table_id&quot;: &quot;table_0004&quot;, &quot;table_type&quot;: &quot;note_table&quot;, &quot;table_shape&quot;: &quot;freeform&quot;, &quot;table_rows&quot;: 1, &quot;table_cols&quot;: 1, &quot;table_cell_count&quot;: 1, &quot;summary_group_index&quot;: 1, &quot;chunk_type&quot;: &quot;table_summary/note_table&quot;, &quot;body_chars&quot;: 137, &quot;chunk_chars&quot;: 435, &quot;content_hash&quot;: &quot;1169b58c9a&quot;}">
+      <div class="card-top">
+        <div class="title-area">
+          <div class="chunk-line">#7 ? chunk_00000007_1169b58c9a</div>
+          <h2>Ⅰ. 사업 개요 &gt; 2. 추진배경 및 필요성</h2>
+          <p class="doc">BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp</p>
+        </div>
+        <div class="badges">
+          <span>?</span>
+          <span>table_summary/note_table</span>
+          <span>overview</span>
+          <span>435?</span>
+        </div>
+      </div>
+      <div class="preview"><b>????</b> 문서명: BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp 섹션경로: Ⅰ. 사업 개요 &gt; 2. 추진배경 및 필요성 자료유형: 표 직전본문: □ (필요성) 정보관리기관 추가 기능 구현 및 고도화를 통한 의료기기 전문정보 관리 효율성 증대 및 플랫폼 활성화 도모 ○ 정보 제공 다양화, 과제 관리제도 활성화, 데이터 활용 활성화 등 기능 강화 및 추가하여 정보관리기관의 ...</div>
+      <div class="meta-grid"><div><b>section_type</b><span>overview</span></div><div><b>source_content_type</b><span>table</span></div><div><b>table_id</b><span>table_0004</span></div><div><b>table_type</b><span>note_table</span></div><div><b>table_shape</b><span>freeform</span></div><div><b>table_rows</b><span>1</span></div><div><b>table_cols</b><span>1</span></div><div><b>table_cell_count</b><span>1</span></div><div><b>summary_group_index</b><span>1</span></div><div><b>body_chars</b><span>137</span></div><div><b>chunk_chars</b><span>435</span></div><div><b>content_hash</b><span>1169b58c9a</span></div><div><b>chunk_type</b><span>table_summary/note_table</span></div><div><b>section_path</b><span>[&quot;Ⅰ. 사업 개요&quot;, &quot;2. 추진배경 및 필요성&quot;]</span></div><div><b>section_path_text</b><span>Ⅰ. 사업 개요 &gt; 2. 추진배경 및 필요성</span></div></div>
+      <pre>문서명: BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp
+섹션경로: Ⅰ. 사업 개요 &gt; 2. 추진배경 및 필요성
+자료유형: 표
+직전본문: □ (필요성) 정보관리기관 추가 기능 구현 및 고도화를 통한 의료기기 전문정보 관리 효율성 증대 및 플랫폼 활성화 도모
+○ 정보 제공 다양화, 과제 관리제도 활성화, 데이터 활용 활성화 등 기능 강화 및 추가하여 정보관리기관의 정보 활용 가치 확산
+표위치: 위 직전본문 다음에 이 표가 이어짐
+
+&lt;의료기기산업 종합정보시스템 개선 방향&gt; ◉ 산·학·연·병 전문가 및 이해관계자 대상 열린 소통 플랫폼 구축 ◉ 의료기기산업 전문정보 지속적 품질 검토 및 추가 연계 정보 제공 기능 추가 ◉ 진흥원 의료기기산업 육성 지원사업 관리시스템 기능 개선</pre>
+    </article>
+    
+    <article class="card text-card" data-type="section_text" data-section="overview" data-source="section_text" data-text="bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp ⅰ. 사업 개요 &gt; 3. 과업내용 overview section_text chunk_00000008_a78e5af0dc 문서명: bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp
+섹션경로: ⅰ. 사업 개요 &gt; 3. 과업내용
+제목: 3. 과업내용
+자료유형: 본문
+
+□ 의료기기산업 종합정보시스템 고도화(시스템 개선 및 신규 기능 추가)
+
+○ 의료기기산업 전문정보 추가 연계 정보 제공 기능 구현
+
+○ 의료기기 이해관계자 대상 열린 소통 플랫폼 구축
+
+○ 의료기기산업 육성 지원사업 관리 시스템 개선
+
+○ 사용자 편의성을 강화한 정보관리기관 운영 {&quot;file_name&quot;: &quot;bioin_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp&quot;, &quot;source_content_type&quot;: &quot;section_text&quot;, &quot;section_path&quot;: [&quot;ⅰ. 사업 개요&quot;, &quot;3. 과업내용&quot;], &quot;section_path_text&quot;: &quot;ⅰ. 사업 개요 &gt; 3. 과업내용&quot;, &quot;section_type&quot;: &quot;overview&quot;, &quot;heading&quot;: &quot;3. 과업내용&quot;, &quot;source_record_indices&quot;: [null], &quot;merged_record_count&quot;: 1, &quot;part_index&quot;: 1, &quot;chunk_type&quot;: &quot;section_text&quot;, &quot;body_chars&quot;: 156, &quot;chunk_chars&quot;: 291, &quot;content_hash&quot;: &quot;a78e5af0dc&quot;}">
+      <div class="card-top">
+        <div class="title-area">
+          <div class="chunk-line">#8 ? chunk_00000008_a78e5af0dc</div>
+          <h2>Ⅰ. 사업 개요 &gt; 3. 과업내용</h2>
+          <p class="doc">BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2차).hwp</p>
+        </div>
+        <div class="badges">
+          <span>??</span>
+          <span>section_text</span>
+          <span>overview</span>
+          <span>291?</span>
+        </div>
+      </div>
+      <div class="preview"><b>????</b> 문서명: BioIN_의료기기산업 종합정보시스템(정보관리기관) 기능개선 사업(2... (2MB 남음)
