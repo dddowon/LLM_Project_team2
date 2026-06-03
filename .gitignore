@@ -46,6 +46,10 @@ data/v3/raw/
 *.doc
 *.docx
 
+# Allow report PDFs under docs/report
+!docs/report/*.pdf
+!docs/report/**/*.pdf
+
 # Large / private metadata files
 data/**/*.csv
 data/**/*.xlsx
