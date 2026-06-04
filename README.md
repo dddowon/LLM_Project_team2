@@ -118,8 +118,8 @@ PYTHONPYCACHEPREFIX=.cache/pycache python3 -m src.cli evaluate-harness --config 
 
 ## 팀 협업 일지 (Notion)
 
-- 박도원: [협업 일지 링크](https://www.notion.so/)
-- 정신우: [협업 일지 링크](https://www.notion.so/)
-- 김태민: [협업 일지 링크](https://www.notion.so/)
-- 안수진: [협업 일지 링크](https://www.notion.so/)
-- 김범수: [협업 일지 링크](https://www.notion.so/)
+- 박도원: [협업 일지 링크](https://www.notion.so/2-35fc44689b4380a4af4defae4197908f?source=copy_link)
+- 정신우: [협업 일지 링크](https://www.notion.so/37577551411b802f883de8d93cd7ae83?source=copy_link)
+- 김태민: [협업 일지 링크](https://www.notion.so/368c44689b43802491d4dfa5a1380c4c?source=copy_link)
+- 안수진: [협업 일지 링크](https://app.notion.com/p/_-375e900739a38021872cee567caf01a4)
+- 김범수: [협업 일지 링크](https://app.notion.com/p/_-3-3746f05dfc1080b2838fcc9b5bc89a02?source=copy_link)
